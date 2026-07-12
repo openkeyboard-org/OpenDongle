@@ -49,6 +49,10 @@ Additional requirements and checks:
 3. Verify the bare-board USB fit in several Type-A receptacles before a production run. The enclosure or carrier must not place metal or conductive coating over the antenna region.
 4. The layout does not claim controlled impedance. Validate RF return loss/range and USB operation on assembled first articles before releasing a production revision.
 
+## USB receiver shell
+
+This [USB receiver shell](https://item.taobao.com/item.htm?id=1042083494471) has been verified to fit and work well with the PCB. Other shells designed for the same PCB dimensions and specification should also work, but their fit has not been verified.
+
 ## Suggested BOM
 
 The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source requirements. Substitutes should match the value, package, dielectric/tolerance, voltage rating, and crystal parameters.

@@ -10,5 +10,5 @@ OpenDongle is an open-source keyboard dongle project.
 
 ## Licensing
 
-- Firmware and tools software: Apache License 2.0 (`firmware/LICENSE`, `tools/LICENSE`).
-- Hardware designs: CERN Open Hardware Licence Version 2 - Weakly Reciprocal (`hardware/LICENSE`).
+- Firmware and tools software: [Apache License 2.0](./firmware/LICENSE).
+- Hardware designs: [CERN Open Hardware Licence Version 2 - Weakly Reciprocal](./hardware/LICENSE).
