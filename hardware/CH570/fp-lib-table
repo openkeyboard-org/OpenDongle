@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "OpenDongle")(type "KiCad")(uri "${KIPRJMOD}/lib/OpenDongle.pretty")(options "")(descr "OpenDongle project footprints"))
+)
