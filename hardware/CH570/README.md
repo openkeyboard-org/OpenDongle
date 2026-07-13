@@ -13,18 +13,30 @@ OpenDongle CH570 is a compact USB Type-A 2.4 GHz receiver built around the WCH C
 | `lib/OpenDongle.pretty/` | Project-owned USB edge connector and WCH antenna footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 
-Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` paths and do not depend on global KiCad configuration.
+Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` paths, so the project resolves every symbol and footprint from this directory and does not depend on global KiCad configuration. Nothing needs to be added to your global symbol or footprint library tables.
 
 ## Electrical design notes
 
-- USB VBUS supplies the CH570Q V5 pin directly.
-- R1 is the 1.5 kOhm connection required by WCH between V5 and the internally regulated VDD33/VIO33 rail for direct 5V operation.
-- Both V5 and VDD33/VIO33 have 2.2 uF bulk and 100 nF decoupling capacitors.
-- Y1 is a 32 MHz, 8 pF-load crystal. The CH570 provides programmable internal crystal load capacitance, so external load capacitors are not fitted.
-- The RF output connects directly to the WCH-derived PCB antenna, as recommended by the CH570 datasheet.
-- AE2 and J1 represent copper footprints fabricated as part of the PCB. They are intentionally excluded from the assembly BOM and position file.
+- USB VBUS supplies the CH570Q V5 pin (pin 2) directly. There is no external regulator; the CH570 regulates 3.3 V internally.
+- R1 is the 1.5 kOhm connection required by WCH between V5 and the internally regulated VDD33/VIO33 rail (pin 1) for direct 5 V operation.
+- Both V5 and VDD33/VIO33 have 2.2 uF bulk and 100 nF high-frequency decoupling: C1/C2 on V5, C3/C4 on VDD33.
+- Y1 is a 32 MHz, 8 pF-load crystal on XI/XO (pins 9 and 8). The CH570 provides programmable internal crystal load capacitance, so external load capacitors are not fitted.
+- The RF output (ANT, pin 10) connects directly to the WCH-derived PCB antenna, as recommended by the CH570 datasheet.
+- USB data connects to the CH570Q native USB pins: D+ to PA1/UDP (pin 4) and D- to PA0/UDM (pin 3).
+- GND reaches the CH570Q through the exposed pad (pin 11).
+- The three unused GPIOs (pins 5, 6, 7) carry no-connect flags.
+- AE2 and J1 represent copper footprints fabricated as part of the PCB. They are excluded from the assembly BOM and position file at both the symbol level (`in_bom no`, `in_pos_files no`) and the footprint level (`exclude_from_bom`, `exclude_from_pos_files`), so they do not appear in the Fabrication Toolkit output as unsourceable line items.
 
 See the [WCH CH572/CH570 datasheet](https://www.wch-ic.com/downloads/CH572DS1_PDF.html) for the power, oscillator, RF, USB, and package requirements.
+
+## Design verification
+
+This design passes both checks cleanly with KiCad 10:
+
+```sh
+kicad-cli sch erc --severity-all OpenDongle-CH570.kicad_sch     # 0 errors, 0 warnings
+kicad-cli pcb drc --severity-all --schematic-parity OpenDongle-CH570.kicad_pcb   # 0 violations, 0 parity issues
+```
 
 ## Fabrication requirements
 
@@ -34,7 +46,7 @@ The antenna geometry and USB connector make the board construction part of the e
 | --- | --- |
 | Layer count | 2 copper layers |
 | Finished board size | 16.4 mm x 10.0 mm |
-| Finished thickness | 0.8 mm nominal |
+| Finished thickness | 0.8 mm nominal (35 um + 0.73 mm core + 35 um) |
 | Material | FR-4 |
 | Copper | 1 oz / 35 um outer copper |
 | Surface finish | ENIG recommended; hard gold on the USB contacts is preferred for high insertion-cycle production |
@@ -44,8 +56,8 @@ The antenna geometry and USB connector make the board construction part of the e
 
 Additional requirements and checks:
 
-1. Preserve the antenna copper, ground keepout, board thickness, and via fence exactly. Do not allow the fabricator to add serial numbers, tooling features, or anything else in the antenna region.
-2. Keep the board outline and USB contact geometry at 1:1 scale. If an edge bevel is requested confirm that the fabricator supports it on a 0.8 mm board without shortening or damaging the USB contacts.
+1. Preserve the antenna copper, ground keepout, board thickness, and via fence exactly. The antenna is designed for 0.8 mm FR-4; a different thickness detunes it. Do not allow the fabricator to add serial numbers, tooling features, or anything else in the antenna region.
+2. Keep the board outline and USB contact geometry at 1:1 scale. If an edge bevel is requested, confirm that the fabricator supports it on a 0.8 mm board without shortening or damaging the USB contacts.
 3. Verify the board USB contact fits in several Type-A receptacles before a production run.
 4. The enclosure and carrier must not place metal or conductive material over the antenna region.
 
@@ -65,9 +77,11 @@ The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source req
 | C1, C3 | 2 | 2.2 uF | 0603 | C23630 | X5R or better, 10 V minimum; suggested part is 16 V |
 | C2, C4 | 2 | 100 nF | 0603 | C14663 | X7R or better, 10 V minimum |
 
+AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and are not assembly parts.
+
 ## Source attribution
 
-- The 0.8 mm FR-4 antenna is based on the WCH reference antenna distributed in [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib).
+- The 0.8 mm FR-4 antenna is based on the WCH reference antenna distributed in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib).
 - The PCB USB connector footprint is derived from the [USB armory](https://github.com/usbarmory/usbarmory) hardware design.
 
 ## License

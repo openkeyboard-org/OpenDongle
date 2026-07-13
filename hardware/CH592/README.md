@@ -2,6 +2,8 @@
 
 OpenDongle CH592 is a compact USB Type-A 2.4 GHz receiver built around the WCH CH592D RISC-V wireless MCU. The PCB is 16.35 mm x 9.90 mm and uses a PCB-edge USB connector and a WCH-derived 2.4 GHz PCB antenna.
 
+Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from VBUS on its internal regulator, the CH592 is powered from a 3.3 V LDO.
+
 ## Design files
 
 | File or directory | Purpose |
@@ -21,9 +23,9 @@ Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` pa
 - Y1 is a 32 MHz crystal on X32MI/X32MO (pins 13 and 12). No external load capacitors are fitted; the design relies on the CH592 programmable internal crystal load capacitance.
 - The RF output (ANT, pin 15) connects directly to the WCH-derived PCB antenna.
 - USB data connects to the CH592D native USB pins: D+ to PB11/UD+ (pin 10) and D- to PB10/UD- (pin 11).
-- AE2 and J1 represent copper footprints fabricated as part of the PCB. They are intentionally excluded from the assembly BOM and position file (`in_bom no`, `in_pos_files no`), so they do not appear in the Fabrication Toolkit output as unsourceable line items.
 - GND reaches the CH592D through the exposed pad (pin 21).
 - The nine unused GPIOs (pins 1, 2, 7, 8, 9, 17, 18, 19, 20) carry no-connect flags.
+- AE2 and J1 represent copper footprints fabricated as part of the PCB. They are excluded from the assembly BOM and position file at both the symbol level (`in_bom no`, `in_pos_files no`) and the footprint level (`exclude_from_bom`, `exclude_from_pos_files`), so they do not appear in the Fabrication Toolkit output as unsourceable line items.
 
 ### The internal DC-DC is deliberately not used
 
@@ -52,21 +54,26 @@ Consequences to keep in mind:
 - Firmware must never configure PB15 as a push-pull output. Driving it high would short it to ground.
 - PB15 is also TCK, so the two-wire debug interface is not usable while the strap is fitted.
 
-#### Improvement for next version: strap through a 4.7 kOhm pull-down
-
-The strap is currently a direct connection to GND. Fitting a resistor between PB15 and GND instead would preserve the ISP behaviour while removing the short if firmware ever drives the pin high.
-
-**Use 4.7 kOhm, 0603, 1% (suggested LCSC C23162)** The boot ROM's internal pull-up sources up to 90 uA (IUP max, datasheet Table 20-2) and VIL is 0.9 V max, so:
-
-| Pull-down | Worst-case V(PB15) | Margin to VIL | Current if driven high |
-| --- | --- | --- | --- |
-| 10 kOhm | 0.90 V | **none - exactly at the limit** | 0.33 mA |
-| **4.7 kOhm** | **0.42 V** | **2.1x** | **0.70 mA** |
-| 3.3 kOhm | 0.30 V | 3.0x | 1.0 mA |
-
-Adopting this will also clear the remaining ERC warning (`Pins of type Bidirectional and Power output are connected`), because PB15 leaves the GND net. The cost is placement: the 0603 has to fit near U3 pin 6 without intruding on the antenna keepout, on an already tight board.
+This strap is the sole remaining ERC warning; see [Design verification](#design-verification) below.
 
 See the [WCH CH592 datasheet](https://github.com/openwch/ch592/blob/main/Datasheet/CH592DS1_EN.PDF) for the power, oscillator, RF, USB, and package requirements.
+
+## Design verification
+
+```sh
+kicad-cli sch erc --severity-all OpenDongle-CH592.kicad_sch     # 0 errors, 1 expected warning
+kicad-cli pcb drc --severity-all --schematic-parity OpenDongle-CH592.kicad_pcb   # 0 violations, 0 parity issues
+```
+
+The single ERC warning is expected and understood:
+
+```
+[pin_to_pin]: Pins of type Bidirectional and Power output are connected
+    Symbol U3 Pin 6 [PB15/TCK/MISO_/SCL, Bidirectional]
+    Symbol #FLG02 Pin 1 [Power output]
+```
+
+This is the PB15 boot strap sitting on the GND net, described above. It is not a defect. Fitting the pull-down resistor proposed under [Known issues](#known-issues-and-next-revision) removes PB15 from the GND net and clears the warning.
 
 ## Fabrication requirements
 
@@ -91,19 +98,45 @@ Additional requirements and checks:
 3. Verify the board USB contact fits in several Type-A receptacles before a production run.
 4. The enclosure and carrier must not place metal or conductive material over the antenna region.
 
+## USB receiver shell
+
+This board is 0.05 mm narrower and 0.1 mm shorter than the CH570, so the same [USB receiver shell](https://item.taobao.com/item.htm?id=1042083494471) that was verified against the CH570 is the intended enclosure. Its fit has been verified on the CH570 but not yet on this board. Other shells designed for the same PCB dimensions and specification should also work.
+
 ## Suggested BOM
 
-The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source requirements. Substitutes should match the value, package, dielectric/tolerance, voltage rating, and crystal parameters. There is no C3, this will be fixed in the next spin of the hardware.
+The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source requirements. Substitutes should match the value, package, dielectric/tolerance, voltage rating, and crystal parameters.
 
 | References | Qty | Value / part | Package | Suggested LCSC part | Notes |
 | --- | ---: | --- | --- | --- | --- |
 | U3 | 1 | WCH CH592D | QFN-20, 3 mm x 3 mm, exposed pad | C41417128 | Confirm pin-1 orientation and exposed-pad soldering |
 | U2 | 1 | XC6206P332MR-G, 3.3 V LDO | SOT-23-3 | C5446 | |
-| Y1 | 1 | 32 MHz crystal | 3225, 4 pad | C7294588 | No external load capacitors fitted |
+| Y1 | 1 | 32 MHz crystal | 3225, 4 pad | C7294588 | No external load capacitors fitted; confirm the part's load capacitance matches what firmware programs into the internal load caps |
 | C1, C2, C4 | 3 | 1 uF | 0603 | C15849 | X5R or better, 10 V minimum |
 | C5 | 1 | 470 nF | 0603 | C47339 | Alternate: C1623 |
 
 AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and are not assembly parts.
+
+## Known issues and next revision
+
+Neither of these prevents the current board from being built, but both should be addressed in the next spin.
+
+### Strap PB15 through a 4.7 kOhm pull-down
+
+The strap is currently a direct connection to GND. Fitting a resistor between PB15 and GND instead would preserve the ISP behaviour while removing the short if firmware ever drives the pin high.
+
+**Use 4.7 kOhm, 0603, 1% (suggested LCSC C23162).** The boot ROM's internal pull-up sources up to 90 uA (IUP max, datasheet Table 20-2) and VIL is 0.9 V max, so:
+
+| Pull-down | Worst-case V(PB15) | Margin to VIL | Current if driven high |
+| --- | --- | --- | --- |
+| 10 kOhm | 0.90 V | **none - exactly at the limit** | 0.33 mA |
+| **4.7 kOhm** | **0.42 V** | **2.1x** | **0.70 mA** |
+| 3.3 kOhm | 0.30 V | 3.0x | 1.0 mA |
+
+Adopting this also clears the remaining ERC warning, because PB15 leaves the GND net. The cost is placement: the 0603 has to fit near U3 pin 6 without intruding on the antenna keepout, on an already tight board.
+
+### Close the reference designator gaps
+
+The designators are non-contiguous: there is no **C3** and no **U1** (the parts jump from U2 to U3). This is cosmetic, but it makes the BOM harder to review and invites the question of whether a part was lost. Renumber on the next spin.
 
 ## Source attribution
 
@@ -112,4 +145,4 @@ AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and ar
 
 ## License
 
-This hardware design is licensed under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal.
+This hardware design is licensed under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).

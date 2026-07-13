@@ -1,38 +1,45 @@
 (kicad_symbol_lib
-	(version 20241209)
+	(version 20251024)
 	(generator "kicad_symbol_editor")
-	(generator_version "9.0")
-(symbol "CH592D"
+	(generator_version "10.0")
+	(symbol "CH570Q"
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
 		(in_pos_files yes)
 		(duplicate_pin_numbers_are_jumpers no)
-		(property "Reference" "U1"
-			(at -5.3086 17.3609 0)
+		(property "Reference" "U"
+			(at 0 11.43 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
 				(font
-					(face "Arial")
-					(size 1.6891 1.6891)
+					(size 1.27 1.27)
 				)
-				(justify left top)
 			)
 		)
-		(property "Value" "CH592D"
-			(at 0.5334 17.3609 0)
+		(property "Value" "CH570Q"
+			(at 0 8.89 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
 				(font
-					(face "Arial")
-					(size 1.6891 1.6891)
+					(size 1.27 1.27)
 				)
-				(justify left top)
 			)
 		)
-		(property "Footprint" "Package_DFN_QFN:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm"
+		(property "Footprint" "Package_DFN_QFN:DFN-10-1EP_3x3mm_P0.5mm_EP1.7x2.5mm"
+			(at 0.254 2.794 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://www.wch-ic.com/downloads/CH572DS1_PDF.html"
 			(at 0 0 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -43,7 +50,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Description" "WCH CH570 2.4 GHz wireless RISC-V MCU, DFN-10"
 			(at 0 0 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -54,8 +61,8 @@
 				)
 			)
 		)
-		(property "Description" ""
-			(at 0 0 0)
+		(property "LCSC" "C49260680"
+			(at 0 5.08 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(hide yes)
@@ -65,68 +72,22 @@
 				)
 			)
 		)
-		(property "Manufacturer Part" "CH592D"
-			(at 0 0 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(hide yes)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Manufacturer" "WCH(南京沁恒)"
-			(at 0 0 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(hide yes)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "LCSC Part" "C41417128"
-			(at 0 0 0)
-			(show_name no)
-			(do_not_autoplace no)
-			(hide yes)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(symbol "CH592D_0_0"
+		(symbol "CH570Q_1_1"
 			(rectangle
-				(start -40.64 15.24)
-				(end 40.64 -15.24)
+				(start -34.29 6.35)
+				(end 34.29 -8.89)
 				(stroke
-					(width 0.254)
+					(width 0)
 					(type solid)
 				)
 				(fill
-					(type none)
+					(type background)
 				)
 			)
-			(circle
-				(center -39.37 13.97)
-				(radius 0.254)
-				(stroke
-					(width 0.254)
-					(type solid)
-				)
-				(fill
-					(type outline)
-				)
-			)
-		)
-		(symbol "CH592D_1_0"
-			(pin bidirectional line
-				(at -43.18 10.16 0)
+			(pin power_out line
+				(at -36.83 5.08 0)
 				(length 2.54)
-				(name "PA11/X32KO/TMR2"
+				(name "VDD33/VIO33"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -141,10 +102,10 @@
 					)
 				)
 			)
-			(pin bidirectional line
-				(at -43.18 7.62 0)
+			(pin power_in line
+				(at -36.83 2.54 0)
 				(length 2.54)
-				(name "PA10/X32KI/TMR1"
+				(name "V5"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -159,10 +120,10 @@
 					)
 				)
 			)
-			(pin passive line
-				(at -43.18 5.08 0)
+			(pin bidirectional line
+				(at -36.83 0 0)
 				(length 2.54)
-				(name "VDCID"
+				(name "PA0/UDM/R2/T3/SCL1/SWD"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -177,10 +138,10 @@
 					)
 				)
 			)
-			(pin passive line
-				(at -43.18 2.54 0)
+			(pin bidirectional line
+				(at -36.83 -2.54 0)
 				(length 2.54)
-				(name "VSW"
+				(name "PA1/UDP/T2/R3/SDA/SWCLK"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -195,10 +156,10 @@
 					)
 				)
 			)
-			(pin power_in line
-				(at -43.18 0 0)
+			(pin bidirectional line
+				(at -36.83 -5.08 0)
 				(length 2.54)
-				(name "VIO33/VDD33"
+				(name "PA7/T4/TMR/RST_/CAP_IN1/CMP_P1"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -214,9 +175,9 @@
 				)
 			)
 			(pin bidirectional line
-				(at -43.18 -2.54 0)
+				(at 36.83 -5.08 180)
 				(length 2.54)
-				(name "PB15/TCK/MISO_/SCL"
+				(name "PA2/R/T1/SDA2/TMR1/CMP_N"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -232,9 +193,9 @@
 				)
 			)
 			(pin bidirectional line
-				(at -43.18 -5.08 0)
+				(at 36.83 -2.54 180)
 				(length 2.54)
-				(name "PB14/TIO/MOSI_/SDA/PWM10"
+				(name "PA3/T/R1/SCL2/CMP_P0/SCK_"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -250,9 +211,9 @@
 				)
 			)
 			(pin bidirectional line
-				(at -43.18 -7.62 0)
+				(at 36.83 0 180)
 				(length 2.54)
-				(name "PB13/SCK0_/TXD1_"
+				(name "XO"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -268,9 +229,9 @@
 				)
 			)
 			(pin bidirectional line
-				(at -43.18 -10.16 0)
+				(at 36.83 2.54 180)
 				(length 2.54)
-				(name "PB12/SCS_/RXD1_"
+				(name "XI"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -286,9 +247,9 @@
 				)
 			)
 			(pin bidirectional line
-				(at -43.18 -12.7 0)
+				(at 36.83 5.08 180)
 				(length 2.54)
-				(name "PB11/UD+/TMR2_"
+				(name "ANT"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -303,10 +264,10 @@
 					)
 				)
 			)
-			(pin bidirectional line
-				(at 43.18 -12.7 180)
+			(pin power_in line
+				(at 36.83 -7.62 180)
 				(length 2.54)
-				(name "PB10/UD-/TMR1_"
+				(name "GND"
 					(effects
 						(font
 							(size 1.27 1.27)
@@ -321,190 +282,10 @@
 					)
 				)
 			)
-			(pin output line
-				(at 43.18 -10.16 180)
-				(length 2.54)
-				(name "X32MO"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "12"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin input line
-				(at 43.18 -7.62 180)
-				(length 2.54)
-				(name "X32MI"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "13"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin passive line
-				(at 43.18 -5.08 180)
-				(length 2.54)
-				(name "VINTA"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "14"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin bidirectional line
-				(at 43.18 -2.54 180)
-				(length 2.54)
-				(name "ANT"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "15"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin passive line
-				(at 43.18 0 180)
-				(length 2.54)
-				(name "VDCIA"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "16"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin bidirectional line
-				(at 43.18 2.54 180)
-				(length 2.54)
-				(name "PA15/MISO/RXD0_/AIN5"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "17"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin bidirectional line
-				(at 43.18 5.08 180)
-				(length 2.54)
-				(name "PA14/MOSI/TXD0_/AIN4"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "18"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin bidirectional line
-				(at 43.18 7.62 180)
-				(length 2.54)
-				(name "PA13/SCK0/PWM5/AIN3"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "19"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin bidirectional line
-				(at 43.18 10.16 180)
-				(length 2.54)
-				(name "PA12/SCS/PWM4/AIN2"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "20"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
-			(pin power_in line
-				(at 43.18 12.7 180)
-				(length 2.54)
-				(name "GND"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-				(number "21"
-					(effects
-						(font
-							(size 1.27 1.27)
-						)
-					)
-				)
-			)
 		)
 		(embedded_fonts no)
 	)
-(symbol "USB_A_PCB_4Pin"
+	(symbol "USB_A_PCB_4Pin"
 		(pin_names
 			(offset 1.016)
 		)

@@ -6,11 +6,11 @@
 	(paper "A4")
 	(title_block
 		(title "OpenDongle CH592")
-		(date "2026-06-07")
-		(rev "0.001")
+		(date "2026-07-12")
+		(rev "0.93")
 		(company "Copyright 2026 Eric Molitor (EMulator)")
-		(comment 3 "github.com/emolitor/ OpenDongle")
-		(comment 4 "CERN-OHL-S CERN Open Hardware Licence Version 2 - Strong-Reciprocal")
+		(comment 3 "github.com/openkeyboard-org/OpenDongle")
+		(comment 4 "CERN-OHL-W CERN Open Hardware Licence Version 2 - Weakly Reciprocal")
 	)
 	(lib_symbols
 		(symbol "OpenDongle:USB_A_PCB_4Pin"
@@ -2741,7 +2741,7 @@
 				)
 			)
 		)
-		(property "Value" "Crystal"
+		(property "Value" "32MHz"
 			(at 130.81 109.22 0)
 			(show_name no)
 			(do_not_autoplace no)
