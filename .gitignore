@@ -36,6 +36,11 @@ fp-info-cache
 # Archived Backups (KiCad 6.0)
 **/*-backups/*.zip
 
+# Fabrication Toolkit outputs. These are generated from the current board and go
+# stale the moment the layout changes, so they are not tracked. Regenerate with
+# the Fabrication Toolkit plugin before every order.
+hardware/**/production/
+
 # Local git-based history (KiCad 9.0+)
 .history
 
