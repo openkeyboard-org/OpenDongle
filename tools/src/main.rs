@@ -95,7 +95,7 @@ struct Cli {
 
     /// With --enter-bootloader and no --image: reboot without the
     /// family guard (you take wrong-image risk into your own hands)
-    #[arg(long)]
+    #[arg(long, requires = "enter_bootloader")]
     force: bool,
 }
 
@@ -114,13 +114,29 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             let msg = e.to_string();
             if msg.contains("no HID device") {
                 if cli.enter_bootloader && openboot_present(&api) {
-                    // The device is already sitting in OpenBoot; nothing to do.
+                    // Already sitting in OpenBoot, so there is nothing to
+                    // reboot. The family guard CANNOT run here: it compares the
+                    // image against the family the *application* reports, and
+                    // the application is not running. Say so rather than
+                    // implying the image was checked.
                     println!(
                         "no {:04X}:{:04X} app, but an OpenBoot bootloader (1209:0001) \
                          is on the bus — already in the bootloader",
                         cli.vid, cli.pid
                     );
-                    println!("next: openboot flash --force <app.bin>");
+                    if cli.image.is_some() && !cli.force {
+                        eprintln!(
+                            "ERROR: the image family could NOT be verified — that check \
+                             needs the running application, which is not present."
+                        );
+                        eprintln!(
+                            "       Confirm the image matches this device yourself (the \
+                             bootloader reports its chip family in `openboot probe`), \
+                             then re-run with --force to acknowledge the guard was skipped."
+                        );
+                        return Ok(ExitCode::from(3));
+                    }
+                    println!("next: openboot flash --force <app.bin>  (family NOT verified)");
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -277,6 +293,14 @@ mod tests {
 
         let enter = Cli::try_parse_from(["opendongle", "--enter-bootloader"]).unwrap();
         assert!(!enter.show_info());
+    }
+
+    #[test]
+    fn force_requires_enter_bootloader() {
+        // --force alone used to parse and then silently fall into the info
+        // path, which reads as "the guard was skipped" when nothing was asked.
+        assert!(Cli::try_parse_from(["opendongle", "--force"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--enter-bootloader", "--force"]).is_ok());
     }
 
     #[test]

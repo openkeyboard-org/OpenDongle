@@ -111,7 +111,18 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
     let read = op_bond_read(dev);
     let disarm = op_disarm(dev);
     let response = read?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
-    check("GetDevInfo(disarm)", &disarm?, ACK_OK, None)?;
+    // Disarm answers with either ack, exactly as in probe(): both mean the
+    // write landed. Demanding only ACK_OK would fail a healthy session.
+    let disarm = disarm?;
+    let dr = disarm
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("GetDevInfo(disarm): no response (timeout)"))?;
+    if dr.is_empty() || (dr[0] != ACK_OK && dr[0] != ACK_GETDEVINFO) {
+        anyhow::bail!(
+            "GetDevInfo(disarm): unexpected ack; raw={}",
+            crate::iap::hexsp(dr, 8)
+        );
+    }
 
     println!("bond:");
     match decode_response(&response)? {

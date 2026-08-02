@@ -32,6 +32,17 @@ pub fn probe(dev: &IapDevice) -> Result<DevInfo> {
     let r = op_arm(dev)?;
     check("GetDevInfo(arm)", &r, ACK_GETDEVINFO, None)?;
     let rr = r.as_ref().unwrap();
+    // check() only guarantees the ack byte. The decode below reads through
+    // rr[11], and these bytes came off the wire from a device that may be
+    // wedged, mid-reset, or not the thing we think it is - so a short but
+    // ack-correct reply must be an error here, not an out-of-bounds panic.
+    if rr.len() < DEVINFO_LEN {
+        bail!(
+            "GetDevInfo(arm): short response, {} byte(s), need {DEVINFO_LEN}; raw={}",
+            rr.len(),
+            hexsp(rr, 8)
+        );
+    }
     let info = DevInfo {
         reserved_geometry: u32::from_le_bytes([rr[2], rr[3], rr[4], rr[5]]),
         reserved_block: u16::from_le_bytes([rr[6], rr[7]]),
@@ -99,7 +110,7 @@ pub fn enter_bootloader(dev: &IapDevice) -> Result<()> {
     {
         bail!(
             "EnterBootloader: refused; ack=0x{:02X} status=0x{:02X} raw={}",
-            rr[0],
+            rr.first().copied().unwrap_or(0xFF),
             rr.get(2).copied().unwrap_or(0xFF),
             hexsp(rr, 8)
         );

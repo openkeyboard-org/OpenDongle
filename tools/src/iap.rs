@@ -1,4 +1,4 @@
-//! USB-HID IAP transport and protocol for the OpenDongle dongle (WCH CH592F).
+//! USB-HID IAP transport and protocol for the OpenDongle dongle (WCH CH570/CH592).
 //!
 //! Direct port of the transport/protocol layer in `flash_dongle.py`. The on-wire
 //! framing is identical: a 65-byte HID report carrying a leading 0x00 report-ID
@@ -38,6 +38,10 @@ pub const ENTER_BOOTLOADER_MAGIC: u32 = 0xB007_CA11;
 pub const HANDSHAKE_PAYLOAD: &[u8] = b"WCH@HFD"; // see firmware VA 0x654C; 7 bytes
 
 pub const ACK_HANDSHAKE: u8 = 0xA5;
+/// Bytes the GetDevInfo reply must carry before `flows::probe` can decode it:
+/// the ack, a status byte, then the 10-byte identity body it reads through.
+pub const DEVINFO_LEN: usize = 12;
+
 pub const ACK_GETDEVINFO: u8 = 0x04;
 pub const ACK_OK: u8 = 0x0F;
 
@@ -133,7 +137,12 @@ impl IapDevice {
     /// Write a report, wait, and read one response (or `None` on timeout).
     /// Ports `IAPDevice.xfer`.
     pub fn xfer(&self, packet: &[u8], timeout_ms: i32) -> Result<Response> {
-        assert_eq!(packet.len(), REPORT_SIZE);
+        if packet.len() != REPORT_SIZE {
+            bail!(
+                "internal: report is {} bytes, must be {REPORT_SIZE}",
+                packet.len()
+            );
+        }
         self.dev.write(packet)?;
         std::thread::sleep(POST_WRITE_SLEEP);
         let mut buf = [0u8; REPORT_SIZE];
@@ -213,6 +222,16 @@ pub fn check(
     let r = r
         .as_ref()
         .ok_or_else(|| anyhow!("{name}: no response (timeout)"))?;
+    // A device that answers short must produce an error, not a panic: these
+    // bytes come off the wire and nothing guarantees their count.
+    let need = if expected_status.is_some() { 3 } else { 1 };
+    if r.len() < need {
+        bail!(
+            "{name}: short response, {} byte(s), need {need}; raw={}",
+            r.len(),
+            hexsp(r, 8)
+        );
+    }
     if r[0] != expected_ack {
         bail!(
             "{name}: bad ack 0x{:02X} (want 0x{:02X}); raw={}",
@@ -224,8 +243,9 @@ pub fn check(
     if let Some(st) = expected_status {
         if r[2] != st {
             bail!(
-                "{name}: status byte 0x{:02X} != 0; raw={}",
+                "{name}: status byte 0x{:02X} != 0x{:02X}; raw={}",
                 r[2],
+                st,
                 hexsp(r, 8)
             );
         }

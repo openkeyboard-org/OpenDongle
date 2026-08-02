@@ -181,13 +181,29 @@ pub fn parse_intel_hex(text: &str) -> Result<(u32, Vec<u8>)> {
         match t {
             0 => {
                 let data = hex_to_bytes(data_hex)?;
-                let full = base + addr;
+                // Checked, because `base` comes from a type-4 record and is
+                // attacker-controlled up to 0xFFFF0000: unchecked it panics in
+                // a debug build and silently wraps in a release one, which puts
+                // max_a below min_a and panics further down instead of
+                // reporting a bad file.
+                let full = base.checked_add(addr).ok_or_else(|| {
+                    anyhow!(
+                        "intel hex: record address 0x{base:08X}+0x{addr:04X} \
+                         overflows the 32-bit address space: {line}"
+                    )
+                })?;
+                let end = full.checked_add(n).ok_or_else(|| {
+                    anyhow!(
+                        "intel hex: record at 0x{full:08X} with {n} data byte(s) \
+                         runs past the end of the 32-bit address space: {line}"
+                    )
+                })?;
                 records.push((full, data));
                 if min_a.is_none_or(|m| full < m) {
                     min_a = Some(full);
                 }
-                if full + n > max_a {
-                    max_a = full + n;
+                if end > max_a {
+                    max_a = end;
                 }
             }
             1 => break,
@@ -200,7 +216,21 @@ pub fn parse_intel_hex(text: &str) -> Result<(u32, Vec<u8>)> {
     let Some(min_a) = min_a else {
         return Ok((0, Vec::new()));
     };
-    let mut img = vec![0xFFu8; (max_a - min_a) as usize];
+    // A file with records at both ends of the address space is legal Intel HEX
+    // and would ask for an allocation of nearly 4 GiB to hold a few real bytes.
+    // Nothing this tool flashes is remotely that large - the biggest part in
+    // the family carries 512 KiB of code flash - so treat a span beyond a
+    // generous ceiling as a malformed file rather than trying to serve it.
+    const MAX_IMAGE_SPAN: u32 = 4 * 1024 * 1024;
+    let span = max_a - min_a;
+    if span > MAX_IMAGE_SPAN {
+        bail!(
+            "intel hex: records span 0x{span:X} bytes (0x{min_a:08X}..0x{max_a:08X}), \
+             more than the {} MiB ceiling; this is not a firmware image for this family",
+            MAX_IMAGE_SPAN / (1024 * 1024)
+        );
+    }
+    let mut img = vec![0xFFu8; span as usize];
     for (a, d) in records {
         let off = (a - min_a) as usize;
         img[off..off + d.len()].copy_from_slice(&d);
@@ -247,6 +277,39 @@ pub fn load_firmware(path: &Path) -> Result<FirmwareImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A type-4 record can push `base` to 0xFFFF0000; the address arithmetic
+    /// below it must report a bad file rather than wrapping (release) or
+    /// panicking (debug).
+    #[test]
+    fn type4_base_near_the_top_cannot_overflow_the_address() {
+        // base = 0xFFFF0000, then 16 data bytes at 0xFFF0: the record starts
+        // at 0xFFFFFFF0 and runs one byte past the top of the space.
+        let hex = ":02000004FFFFFC\n:10FFF000000102030405060708090A0B0C0D0E0F89\n:00000001FF\n";
+        let err = parse_intel_hex(hex).unwrap_err().to_string();
+        assert!(
+            err.contains("32-bit address space"),
+            "expected an address-space error, got: {err}"
+        );
+    }
+
+    /// Records at both ends of the address space are legal Intel HEX and would
+    /// otherwise ask for a ~4 GiB allocation to hold a handful of real bytes.
+    #[test]
+    fn an_absurd_span_is_rejected_rather_than_allocated() {
+        // One byte at 0x00000000 and one at 0x7FFF0000: a ~2 GiB span.
+        let hex = ":0100000000FF\n:020000047FFF7C\n:0100000000FF\n:00000001FF\n";
+        match parse_intel_hex(hex) {
+            Err(e) => assert!(
+                e.to_string().contains("ceiling"),
+                "expected the span ceiling to fire, got: {e}"
+            ),
+            Ok((base, img)) => panic!(
+                "a 2 GiB span was accepted: base=0x{base:08X} len={}",
+                img.len()
+            ),
+        }
+    }
 
     fn odg2_image(family: u8) -> Vec<u8> {
         let mut image = vec![0xA5; MIN_APP_LEN];
