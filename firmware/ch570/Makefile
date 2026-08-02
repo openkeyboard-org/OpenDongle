@@ -191,7 +191,13 @@ $(CONFIG_STAMP): Makefile | $(BUILD)
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
 	 trap - 0 1 2 15
 
-$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) | $(BUILD)
+# Makefile is a prerequisite because CFLAGS and LDFLAGS are hashed into the
+# build id but are DEFINED here. Without it, a flags-only edit moved the id
+# while this stamp stayed up to date, so nothing recompiled: the objects, the
+# ELF, the ODG2 record and the factory image all kept the old flags and the
+# old id baked in, while the build system advertised the new one. The content
+# guard below still blocks propagation when the id has not actually moved.
+$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(BUILD_ID)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \

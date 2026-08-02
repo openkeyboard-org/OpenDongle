@@ -5,6 +5,7 @@ SHELL := /bin/sh
 
 MRS_TOOLCHAIN ?=
 OPENWCH_ROOT ?= $(abspath ../third_party/openwch)
+CH570_SDK ?= $(OPENWCH_ROOT)/ch570/EVT/EXAM
 CH592_SDK ?= $(OPENWCH_ROOT)/ch592/EVT/EXAM
 OPENBOOT ?= $(abspath ../third_party/openboot)
 MINICHLINK ?= minichlink
@@ -18,18 +19,34 @@ PYTHON ?= /usr/bin/python3 -I
 
 .DEFAULT_GOAL := all
 
-.PHONY: all ch592 ch592-factory ch592-factory-flash \
-	ch592-openboot openboot-test check-deps test clean
+.PHONY: all ch570 ch592 ch570-factory ch592-factory \
+	ch570-factory-flash ch592-factory-flash \
+	ch570-openboot ch592-openboot openboot-test \
+	check-deps test clean
 
-all: ch592
+all: ch570 ch592
+
+ch570:
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" all
 
 ch592:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" all
 
+ch570-factory:
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" factory
+
 ch592-factory:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" factory
+
+ch570-factory-flash:
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
+	    flash-factory
 
 ch592-factory-flash:
 	$(MAKE) -C ch592 \
@@ -43,14 +60,18 @@ ch592-factory-flash:
 # ours; init with --recursive.
 #
 # What is NOT checked, so nobody has to discover it from a build: `check-deps`
-# validates the openwch SDK and the compiler, and OpenBoot's own recursive build
-# validates ITS openwch submodules - but nothing validates the OpenBoot checkout
-# itself. Its revision is not compared against this repository's gitlink, its
-# worktree is not checked for local edits, and no OpenBoot revision appears in
-# CONFIG_TEXT or BUILD_ID_INPUTS. So a factory image can be composed from an
-# unpinned or locally modified bootloader while every gate passes, and the build
-# id will not record it. The application-side companion headers ARE hashed; the
-# bootloader image is not. Tracked in TODO.md.
+# validates the two openwch SDKs and the compiler, and OpenBoot's own recursive
+# build validates ITS openwch submodules - but nothing validates the OpenBoot
+# checkout itself. Its revision is not compared against this repository's
+# gitlink, its worktree is not checked for local edits, and no OpenBoot revision
+# appears in CONFIG_TEXT or BUILD_ID_INPUTS. So a factory image can be composed
+# from an unpinned or locally modified bootloader while every gate passes, and
+# the build id will not record it. The application-side companion headers ARE
+# hashed; the bootloader image is not. Tracked in TODO.md.
+ch570-openboot:
+	$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
+	    BOARD=opendongle-ch570 MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" image
+
 ch592-openboot:
 	$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
 	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" image
@@ -64,6 +85,10 @@ openboot-test:
 
 check-deps:
 	$(PYTHON) check_dependencies.py \
+	    --sdk "$(CH570_SDK)" \
+	    --sdk-revision 1e34c9450cd6df390153952c097cd09dd8a91aed \
+	    --toolchain "$(MRS_TOOLCHAIN)"
+	$(PYTHON) check_dependencies.py \
 	    --sdk "$(CH592_SDK)" \
 	    --sdk-revision a46e0086f1ffb5e5502703970bff94888e67f4cb \
 	    --toolchain "$(MRS_TOOLCHAIN)"
@@ -75,4 +100,5 @@ test:
 	$(PYTHON) -m unittest discover -s tests
 
 clean:
+	$(MAKE) -C ch570 clean
 	$(MAKE) -C ch592 clean
