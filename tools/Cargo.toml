@@ -1,0 +1,19 @@
+[package]
+name = "opendongle"
+version = "0.1.0"
+edition = "2021"
+description = "Host CLI for OpenDongle CH570/CH592 dongles: status, bond and fault readout, and handoff to the OpenBoot bootloader for updates"
+license = "Apache-2.0"
+
+[[bin]]
+name = "opendongle"
+path = "src/main.rs"
+
+[dependencies]
+hidapi = "2"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+crc32fast = "1"
+
+[profile.release]
+strip = true
