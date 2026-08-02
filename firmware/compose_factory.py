@@ -40,7 +40,13 @@ def compose_factory(openboot: bytes, app: bytes) -> bytes:
 
 def write_atomic(path: Path, data: bytes) -> None:
     """Replace in one step: an interrupted compose must not leave a short image
-    that the next `make` treats as up to date and someone then flashes."""
+    that the next `make` treats as up to date and someone then flashes.
+
+    The temporary file is staged beside the destination so the replace is on
+    one filesystem; the parent is created first so a standalone run against a
+    fresh output directory reports a composition result rather than a
+    FileNotFoundError from the staging call."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "wb") as handle:

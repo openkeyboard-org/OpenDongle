@@ -72,7 +72,12 @@ def validate_toolchain(toolchain_value: str) -> None:
     if digest != PINNED_COMPILER_SHA256:
         fail(
             f"compiler SHA-256 is {digest}, expected {PINNED_COMPILER_SHA256}: "
-            f"{compiler}"
+            f"{compiler}\n"
+            "the pin names ONE MounRiver release built for ONE host platform, and "
+            "covers the gcc driver only (not cc1/as/ld/objcopy)\n"
+            "see firmware/README.md, 'The toolchain pin', before changing it: the "
+            "build id advertises this digest, so artifacts built against another "
+            "toolchain are not the bytes that id implies"
         )
     try:
         version = subprocess.run(
