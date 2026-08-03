@@ -11,7 +11,7 @@
  * bench spikes default to are 5-8% different and are not what ships:
  *
  *   byte-oriented, S-box in flash          7534   <- what this replaces
- *   THIS: row-major SWAR, S-box in RAM     4674   (1.61x)
+ *   THIS: row-major SWAR, S-box in RAM     3901   (1.93x, unrolled)
  *
  * and, measured with xPack so comparable only among themselves:
  *
@@ -187,8 +187,17 @@ void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
     _Pragma("GCC unroll 9")
     for (unsigned i = 1; i < 10; i++) {
         uint32_t t, n0, n1, n2, n3;
-        r0 = sub4(r0); r1 = sub4(r1); r2 = sub4(r2); r3 = sub4(r3);
-        r1 = ROR32(r1, 8); r2 = ROR32(r2, 16); r3 = ROR32(r3, 24);
+        /*
+         * Rotate the INPUT of sub4, not its output. The S-box is applied
+         * byte-wise so the two commute, but this form measured 79 cycles
+         * faster and 120 B smaller. Note the near miss: specialising sub4 into
+         * four rotate-folded variants to remove the rotate entirely is 37%
+         * SLOWER (5435), because one shared sub4 lets GCC share work that four
+         * expansions cannot. Same transformation, opposite result -- measure
+         * any change here, do not reason about it.
+         */
+        r0 = sub4(r0); r1 = sub4(ROR32(r1, 8));
+        r2 = sub4(ROR32(r2, 16)); r3 = sub4(ROR32(r3, 24));
         t = r0 ^ r1 ^ r2 ^ r3;
         n0 = r0 ^ t ^ xt4(r0 ^ r1);
         n1 = r1 ^ t ^ xt4(r1 ^ r2);
@@ -197,8 +206,8 @@ void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
         r0 = n0 ^ rk[4*i+0]; r1 = n1 ^ rk[4*i+1];
         r2 = n2 ^ rk[4*i+2]; r3 = n3 ^ rk[4*i+3];
     }
-    r0 = sub4(r0); r1 = sub4(r1); r2 = sub4(r2); r3 = sub4(r3);
-    r1 = ROR32(r1, 8); r2 = ROR32(r2, 16); r3 = ROR32(r3, 24);
+    r0 = sub4(r0); r1 = sub4(ROR32(r1, 8));
+    r2 = sub4(ROR32(r2, 16)); r3 = sub4(ROR32(r3, 24));
     r0 ^= rk[40]; r1 ^= rk[41]; r2 ^= rk[42]; r3 ^= rk[43];
 
     out[0]=(uint8_t)r0;  out[4]=(uint8_t)(r0>>8);  out[8]=(uint8_t)(r0>>16);  out[12]=(uint8_t)(r0>>24);
