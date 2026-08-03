@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * USB pin/PHY HAL seam.
  *
  * The shared USB device driver (fw-common/src/usb_device.c) is chip-agnostic

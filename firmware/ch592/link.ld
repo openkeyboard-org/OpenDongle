@@ -1,4 +1,5 @@
-/* Bridge75 Dongle Firmware Linker Script
+/* OpenKeyboard.org OpenDongle Linker Script
+ * Copyright 2026 Eric Molitor (EMulator)
  * Based on CH592 SDK Link.ld
  *
  * Flash base 0x2000: OpenBoot owns [0x0000, 0x2000) and hands off to the

@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware -- CH570 timing HAL.
+ * OpenKeyboard.org OpenDongle -- CH570 timing HAL.
+ * Copyright 2026 Eric Molitor (EMulator)
  *
  * Implements hal_timing.h directly over the CH570 HSE-TMR software-deadline mux
  * (sched.h `st_*`, implemented in main.c). This is the convergence target: the

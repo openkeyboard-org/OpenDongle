@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * CH592 RF-PHY HAL seam — private declarations.
  *
  * CH59x implements hal_rf.h over the LIBCH59xBLE radio (RF_Config /

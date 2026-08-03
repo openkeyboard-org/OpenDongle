@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware — CH570 hal_dispatch backing.
+ * OpenKeyboard.org OpenDongle — CH570 hal_dispatch backing.
+ * Copyright 2026 Eric Molitor (EMulator)
  *
  * Deferred events are a volatile pending bitmask drained by RF_TaskPump()
  * once per main-loop pass (hal_dispatch.h contract: coalescing bitmask,

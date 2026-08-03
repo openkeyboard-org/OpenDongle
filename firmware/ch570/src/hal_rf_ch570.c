@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware -- CH570 RF PHY HAL.
+ * OpenKeyboard.org OpenDongle -- CH570 RF PHY HAL.
+ * Copyright 2026 Eric Molitor (EMulator)
  *
  * Implements hal_rf.h directly over the CH570 RFIP radio
  * (RFRole_BasicInit / RFIP_SetRx / RFIP_StartTx). This is the PHY seam: the

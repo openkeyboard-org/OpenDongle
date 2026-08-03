@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware -- CH592 RF PHY HAL.
+ * OpenKeyboard.org OpenDongle -- CH592 RF PHY HAL.
+ * Copyright 2026 Eric Molitor (EMulator)
  *
  * Implements hal_rf.h over the LIBCH59xBLE radio (RF_Config / RF_SetChannel /
  * RF_Rx / RF_Tx / RF_Shut). This is the PHY seam: rf_task drives the radio

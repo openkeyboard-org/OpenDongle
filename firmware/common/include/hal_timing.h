@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * Timing HAL seam — the RF deadline scheduler.
  *
  * The shared RF task schedules all of its time-based work through this seam so

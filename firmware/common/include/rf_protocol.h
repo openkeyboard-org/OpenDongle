@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * Shared 2.4 GHz protocol facts (Convergence phase A).
  *
  * Single source of truth for the on-air protocol constants and the

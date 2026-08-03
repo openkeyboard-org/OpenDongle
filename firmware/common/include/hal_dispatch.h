@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * Dispatch HAL seam — deferred-event posting for the shared RF task.
  *
  * The RF task defers non-timing-critical work out of IRQ context (bond
