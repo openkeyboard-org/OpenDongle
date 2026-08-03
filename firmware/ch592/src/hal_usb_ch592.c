@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * CH592F (CH59x) USB pin/PHY HAL.
  *
  * On CH59x the USB analog IO and D+ pull-up live in R16_PIN_ANALOG_IE

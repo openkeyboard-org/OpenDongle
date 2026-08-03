@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * USB HID Composite Device Driver (shared CH592 / CH582 / CH570)
  *
  * 5-interface HID device: boot keyboard, boot mouse, composite

@@ -7,7 +7,8 @@
  * the RF_TASK_EXECUTOR_TMOS family switch. Includes resolve per-chip via the
  * building tree's -I src / -I common/include (rf_task.h, CONFIG.h etc.).
  *
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * 2.4G RF Receiver Task
  *
  * Reverse-engineered protocol parameters from stock firmware.

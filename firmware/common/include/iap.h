@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * IAP (In-Application Programming) command handler.
  *
  * Implements the minimum subset of the vendor's McuProgramIAP_* protocol

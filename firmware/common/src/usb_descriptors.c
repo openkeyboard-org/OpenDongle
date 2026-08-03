@@ -1,5 +1,6 @@
 /*
- * Bridge75 Open-Source Dongle Firmware
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
  * USB descriptor tables shared by dongle ports.
  */
 
