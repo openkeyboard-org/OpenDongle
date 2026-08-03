@@ -39,7 +39,10 @@
  *  - hal_aes_encrypt_block() is PURE with respect to the key: same key, same
  *    input, same output, with no cross-block chaining state. Counter mode is
  *    built by the caller.
- *  - IN-PLACE IS ALLOWED. `out` may alias `in` exactly. Partial overlap is not.
+ *  - IN-PLACE IS ALLOWED, and any overlap is safe, not just exact aliasing:
+ *    both backends read all 16 input bytes before writing any output byte. The
+ *    contract previously claimed only exact aliasing was permitted, which was
+ *    needlessly strict and would have pushed callers into pointless copies.
  *  - NOT REENTRANT. Both backends keep module state (the round-key schedule on
  *    CH570; a single shared hardware engine on CH592), so a call from interrupt
  *    context that preempts one in task context corrupts the result. Callers on
