@@ -34,16 +34,21 @@
  *   - MixColumns does all four columns at once with a SWAR xtime, four GF(2^8)
  *     doublings per instruction group and no lookup.
  *
- * On the ISA extensions, both measured rather than assumed:
- *   - Zba/Zbb are worth 9.3% here (4863 -> 4413) and were worth *exactly zero*
- *     to the byte-oriented version -- compiling that with and without
- *     zba_zbb_zbc_zbs produced byte-identical output, because byte-at-a-time
- *     code has no rotate or shifted-add for them to accelerate.
- *   - WCH's `xw` (four compressed byte/half load-stores) is the mirror image:
- *     worth 14.8% to the old code (8839 -> 7534), which was 40% lbu/sb, and
- *     only 0.4% here (4692 -> 4674) because the state no longer lives in
- *     memory. It is emitted automatically with no intrinsics; there is nothing
- *     further to exploit. Its remaining value is size: 60 B on this file.
+ * On the ISA extensions, all measured on the production compiler:
+ *   - WCH's `xw` (four compressed byte/half load-stores) was worth 14.8% to the
+ *     old byte-oriented code (8839 -> 7534), which was 40% lbu/sb, and is worth
+ *     0.4% here (4692 -> 4674) now that the state lives in registers. It is
+ *     emitted automatically with no intrinsics; nothing further to exploit.
+ *   - Zba/Zbb are worth *exactly zero* to byte-at-a-time code (the old version
+ *     compiled byte-identically with and without them) and, on GCC 12.2, are a
+ *     7.6% PESSIMISATION here: this file builds to 4344 cycles under
+ *     -march=rv32imc_xw versus 4674 under the production
+ *     -march=rv32imc_zba_zbb_zbc_zbs_xw. On GCC 15.2 the sign flips and they
+ *     help by 9.3%, so this is a compiler-codegen artefact, not a property of
+ *     the silicon. It is deliberately NOT worked around with a per-file -march:
+ *     7.6% is not worth a build-system exception that a toolchain bump would
+ *     silently turn into a pessimisation in the other direction. Re-measure if
+ *     the pinned compiler ever moves.
  *
  * There is no inverse cipher on purpose: counter mode encrypts in both
  * directions, so InvMixColumns and the inverse S-box would be dead weight.
@@ -136,6 +141,16 @@ void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
     r3 = (uint32_t)in[3] | ((uint32_t)in[7] << 8) | ((uint32_t)in[11] << 16) | ((uint32_t)in[15] << 24);
     r0 ^= rk[0]; r1 ^= rk[1]; r2 ^= rk[2]; r3 ^= rk[3];
 
+    /*
+     * Unrolled deliberately: measured 4674 -> 3980 cycles (15%) on CH570 for
+     * +2132 B of flash, which is cheap here. This contradicts the published
+     * guidance -- Adomnicai measured unrolling as 2.9% *slower* on a SiFive
+     * E31 -- and that result simply does not transfer to a 3-stage QingKe
+     * fetching from flash, where each taken back-edge restarts the prefetcher.
+     * Note `-funroll-loops` globally is worse than this targeted pragma (4499
+     * cycles, and it wrecks the key schedule); unroll this loop and no other.
+     */
+    _Pragma("GCC unroll 9")
     for (unsigned i = 1; i < 10; i++) {
         uint32_t t, n0, n1, n2, n3;
         r0 = sub4(r0); r1 = sub4(r1); r2 = sub4(r2); r3 = sub4(r3);
