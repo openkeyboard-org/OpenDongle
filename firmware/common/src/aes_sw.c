@@ -21,11 +21,21 @@
  *   T-table (1 KB), tables in RAM          3664   (costs 1280 B of 12 KB RAM)
  *
  * The dominant cost on this part is not instruction count, it is *flash data
- * reads*: the same table in RAM rather than flash is worth ~14 cycles per
- * lookup, and there are 160 lookups per block. That single fact is why the
- * obvious answer (a bigger table) loses to this one -- a 1 KB table in flash
- * pays the flash penalty on every lookup, while this keeps only the 256-byte
- * S-box and puts it in RAM, buying ~2240 cycles for 256 B.
+ * reads*, and there are 160 table lookups per block. Measured directly with a
+ * dependent pointer-chase over byte-identical 1 KB tables (same machine code,
+ * only the base pointer differing): a flash read costs **~9 cycles more than a
+ * RAM read** -- 9.4 vs 0.75 cycles per dependent load. Running the same chase
+ * from SRAM instead of flash changed it by under 4%, so instruction/data
+ * contention is not a factor; prefetch already hides instruction fetch.
+ *
+ * (An earlier estimate of ~14 cycles was inferred from the AES-level delta
+ * between a T-table in flash and the same table in RAM. That overstated it:
+ * the delta also contained 40 round-key loads per block and placement-induced
+ * codegen differences. The direct measurement above is the one to trust.)
+ *
+ * That is why the obvious answer -- a bigger table -- loses to this one. A
+ * 1 KB table in flash pays the flash penalty on every lookup; this keeps only
+ * the 256-byte S-box and puts it in RAM.
  *
  * The linear layer then costs no table at all:
  *   - state is four 32-bit words, one per ROW, held in registers throughout;
@@ -119,7 +129,12 @@ static uint32_t sub4(uint32_t w)
            ((uint32_t)sbox[(w >> 24) & 0xff] << 24);
 }
 
-/* four GF(2^8) doublings at once */
+/*
+ * Four GF(2^8) doublings at once. The alternative formulation
+ * `((x << 1) & 0xfefefefe) ^ (((x >> 7) & 0x01010101) * 0x1b)` was measured and
+ * is a wash -- 3980 cycles either way, same code size, because GCC folds both
+ * to equivalent instructions. Do not re-litigate it.
+ */
 static uint32_t xt4(uint32_t x)
 {
     return ((x & 0x7f7f7f7fu) << 1) ^ (((x & 0x80808080u) >> 7) * 0x1bu);
