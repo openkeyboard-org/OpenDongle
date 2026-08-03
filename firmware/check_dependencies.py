@@ -11,9 +11,14 @@ import subprocess
 import sys
 
 
+# MounRiver "RISC-V Embedded GCC15" (WCH GCC 15.2.0). Note the tool prefix
+# changed with this release: GCC12 shipped riscv-wch-elf-*, GCC15 ships
+# riscv32-wch-elf-*. TOOL_PREFIX below is the single place that encodes it.
 PINNED_COMPILER_SHA256 = (
-    "7f2d3c114b98fe9e48ac6abe6259a4574291a8e2aba960b21dce73528ece9ff2"
+    "9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99"
 )
+PINNED_COMPILER_VERSION = "15.2.0"
+TOOL_PREFIX = "riscv32-wch-elf"
 
 
 def fail(message: str) -> None:
@@ -55,19 +60,27 @@ def validate_sdk(sdk: Path, revision: str) -> None:
         fail(f"SDK checkout is dirty: {root}\n  {listed}")
 
 
-def validate_toolchain(toolchain_value: str) -> None:
+def validate_toolchain(toolchain_value: str, tool_prefix: str) -> None:
+    """Validate the toolchain the build will ACTUALLY use.
+
+    The prefix is a parameter rather than the module constant because the
+    application Makefiles expose it as CROSS. If this validated a hardcoded
+    prefix while the build used an overridden one, check-deps would pass having
+    inspected a different compiler from the one that compiles the firmware --
+    which is worse than not checking at all, because it looks like assurance.
+    """
     if not toolchain_value.strip():
-        fail("MRS_TOOLCHAIN is required and must name the GCC12 bin directory")
+        fail("MRS_TOOLCHAIN is required and must name the GCC15 bin directory")
     toolchain = Path(toolchain_value).expanduser().resolve()
     # nm belongs here: the fault validators consume it via --tool-dir, so
     # check-deps passing without it just moves the failure to the middle of
     # a build.
-    for name in ("riscv-wch-elf-gcc", "riscv-wch-elf-objcopy",
-                 "riscv-wch-elf-size", "riscv-wch-elf-nm"):
+    for suffix in ("gcc", "objcopy", "size", "nm"):
+        name = f"{tool_prefix}-{suffix}"
         executable = toolchain / name
         if not executable.is_file() or not os.access(executable, os.X_OK):
             fail(f"MounRiver tool is missing or not executable: {executable}")
-    compiler = toolchain / "riscv-wch-elf-gcc"
+    compiler = toolchain / f"{tool_prefix}-gcc"
     digest = hashlib.sha256(compiler.read_bytes()).hexdigest()
     if digest != PINNED_COMPILER_SHA256:
         fail(
@@ -89,8 +102,8 @@ def validate_toolchain(toolchain_value: str) -> None:
         ).stdout.splitlines()[0]
     except (OSError, subprocess.CalledProcessError, IndexError) as exc:
         fail(f"cannot identify compiler {compiler}: {exc}")
-    if "12.2.0" not in version:
-        fail(f"compiler is not the required GCC 12.2.0: {version}")
+    if PINNED_COMPILER_VERSION not in version:
+        fail(f"compiler is not the required GCC {PINNED_COMPILER_VERSION}: {version}")
 
 
 def main() -> int:
@@ -98,10 +111,13 @@ def main() -> int:
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--sdk-revision", required=True)
     parser.add_argument("--toolchain", required=True)
+    # Defaults to the pinned prefix so an older caller keeps working; the
+    # Makefiles pass $(CROSS) so an override is validated rather than bypassed.
+    parser.add_argument("--tool-prefix", default=TOOL_PREFIX)
     args = parser.parse_args()
     try:
         validate_sdk(args.sdk, args.sdk_revision)
-        validate_toolchain(args.toolchain)
+        validate_toolchain(args.toolchain, args.tool_prefix)
     except RuntimeError as exc:
         print(f"dependency check failed: {exc}", file=sys.stderr)
         return 2
