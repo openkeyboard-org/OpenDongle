@@ -50,15 +50,25 @@
  *     0.4% here (4692 -> 4674) now that the state lives in registers. It is
  *     emitted automatically with no intrinsics; nothing further to exploit.
  *   - Zba/Zbb are worth *exactly zero* to byte-at-a-time code (the old version
- *     compiled byte-identically with and without them) and, on GCC 12.2, are a
- *     7.6% PESSIMISATION here: this file builds to 4344 cycles under
- *     -march=rv32imc_xw versus 4674 under the production
- *     -march=rv32imc_zba_zbb_zbc_zbs_xw. On GCC 15.2 the sign flips and they
- *     help by 9.3%, so this is a compiler-codegen artefact, not a property of
- *     the silicon. It is deliberately NOT worked around with a per-file -march:
- *     7.6% is not worth a build-system exception that a toolchain bump would
- *     silently turn into a pessimisation in the other direction. Re-measure if
- *     the pinned compiler ever moves.
+ *     compiled byte-identically with and without them), and their value here is
+ *     a property of the COMPILER, not the silicon. On the pinned GCC 12.2 they
+ *     are a 7.6% pessimisation (4674 with, 4344 without). On WCH's GCC 15.2 the
+ *     sign flips and they help by 8.9% (3693 with, 4053 without). Deliberately
+ *     NOT worked around with a per-file -march: the workaround a toolchain bump
+ *     would silently invert is worse than the 7.6%.
+ *
+ * TOOLCHAIN NOTE, measured on silicon with this exact source. WCH ships a
+ * GCC 15.2 alongside the pinned 12.2 (Toolchain/RISC-V Embedded GCC15, prefix
+ * riscv32-wch-elf, accepts the full production -march including _xw):
+ *
+ *   GCC 12.2 (pinned)   3901 cycles/block, 3304 B
+ *   GCC 15.2            3693 cycles/block, 3036 B   (-5.3% time, -8% size)
+ *
+ * So the pinned compiler is leaving ~5% and ~270 B on the table here, and is
+ * the sole reason the bitmanip extensions look harmful. Bumping the pin is a
+ * project-level decision -- it moves DONGLE_BUILD_ID for the whole firmware,
+ * changes PINNED_COMPILER_SHA256 in check_dependencies.py, and obliges a full
+ * hardware validation re-run -- so it is recorded here, not taken.
  *
  * There is no inverse cipher on purpose: counter mode encrypts in both
  * directions, so InvMixColumns and the inverse S-box would be dead weight.
