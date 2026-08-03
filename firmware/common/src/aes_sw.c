@@ -4,21 +4,64 @@
  *
  * Encrypt-only AES-128 per FIPS-197, used by the CH570 hal_aes backend because
  * that silicon has no hardware AES engine (see hal_aes.h for the measurement).
- * Deliberately the compact byte-oriented form rather than a T-table: one
- * 256-byte S-box in flash and a 176-byte round-key schedule in RAM, against a
- * 12 KB SRAM budget and an 875 us poll slot that this comfortably fits.
  *
- * There is no inverse cipher here on purpose — counter mode encrypts in both
- * directions, so the inverse S-box and InvMixColumns would be dead weight.
+ * WHY THIS SHAPE, measured on CH570 silicon at 100 MHz (cycles per block).
+ * These are the PRODUCTION toolchain and ISA (MounRiver GCC 12.2,
+ * -march=rv32imc_zba_zbb_zbc_zbs_xw); numbers taken with the xPack compiler the
+ * bench spikes default to are 5-8% different and are not what ships:
  *
- * State layout is FIPS-197 column-major, which is also plain input order:
- * byte i of the input is row (i mod 4), column (i / 4). So a column is
- * s[4c..4c+3] and a row is s[r], s[r+4], s[r+8], s[r+12]. Keeping the state in
- * input order means AddRoundKey is a flat 16-byte XOR with no permutation.
+ *   byte-oriented, S-box in flash          7534   <- what this replaces
+ *   THIS: row-major SWAR, S-box in RAM     4674   (1.61x)
+ *
+ * and, measured with xPack so comparable only among themselves:
+ *
+ *   byte-oriented, S-box in flash          8070
+ *   T-table (1 KB), tables in flash        5977
+ *   row-major SWAR, S-box in RAM           4413
+ *   T-table (1 KB), tables in RAM          3664   (costs 1280 B of 12 KB RAM)
+ *
+ * The dominant cost on this part is not instruction count, it is *flash data
+ * reads*: the same table in RAM rather than flash is worth ~14 cycles per
+ * lookup, and there are 160 lookups per block. That single fact is why the
+ * obvious answer (a bigger table) loses to this one -- a 1 KB table in flash
+ * pays the flash penalty on every lookup, while this keeps only the 256-byte
+ * S-box and puts it in RAM, buying ~2240 cycles for 256 B.
+ *
+ * The linear layer then costs no table at all:
+ *   - state is four 32-bit words, one per ROW, held in registers throughout;
+ *   - ShiftRows is one rotate per row -- GCC emits Zbb `rori` from the plain C
+ *     idiom, which the previous byte-oriented form could never reach;
+ *   - MixColumns does all four columns at once with a SWAR xtime, four GF(2^8)
+ *     doublings per instruction group and no lookup.
+ *
+ * On the ISA extensions, both measured rather than assumed:
+ *   - Zba/Zbb are worth 9.3% here (4863 -> 4413) and were worth *exactly zero*
+ *     to the byte-oriented version -- compiling that with and without
+ *     zba_zbb_zbc_zbs produced byte-identical output, because byte-at-a-time
+ *     code has no rotate or shifted-add for them to accelerate.
+ *   - WCH's `xw` (four compressed byte/half load-stores) is the mirror image:
+ *     worth 14.8% to the old code (8839 -> 7534), which was 40% lbu/sb, and
+ *     only 0.4% here (4692 -> 4674) because the state no longer lives in
+ *     memory. It is emitted automatically with no intrinsics; there is nothing
+ *     further to exploit. Its remaining value is size: 60 B on this file.
+ *
+ * There is no inverse cipher on purpose: counter mode encrypts in both
+ * directions, so InvMixColumns and the inverse S-box would be dead weight.
+ *
+ * The S-box placement is load-bearing, not incidental, and it needs the
+ * explicit section attribute below: merely dropping `const` is NOT enough,
+ * because GCC proves the table is never written and promotes it back into
+ * .rodata (flash) — silently undoing the optimisation and costing ~2240 cycles
+ * with nothing in the build output to say so. Both chips' linker scripts
+ * collect `*(.data .data.*)` into RAM with a flash LMA, so this is portable
+ * across the two targets. If you move this table, re-measure.
  */
 #include "aes_sw.h"
 
-static const uint8_t sbox[256] = {
+/* GCC emits a single Zbb `rori` for this on the production -march. */
+#define ROR32(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
+__attribute__((section(".data"))) static uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b,
     0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
     0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26,
@@ -43,125 +86,74 @@ static const uint8_t sbox[256] = {
     0xb0, 0x54, 0xbb, 0x16,
 };
 
-/* Round constants for the ten AES-128 key-expansion rounds. */
-static const uint8_t rcon[10] = {0x01, 0x02, 0x04, 0x08, 0x10,
-                                 0x20, 0x40, 0x80, 0x1b, 0x36};
+static const uint8_t rcon[10] = {0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
 
-/* Multiply by x in GF(2^8) modulo the AES polynomial 0x11b. */
-static uint8_t xtime(uint8_t a)
+static uint32_t sub4(uint32_t w)
 {
-    return (uint8_t)((uint8_t)(a << 1) ^ (uint8_t)((a >> 7) * 0x1bu));
+    return (uint32_t)sbox[w & 0xff] | ((uint32_t)sbox[(w >> 8) & 0xff] << 8) |
+           ((uint32_t)sbox[(w >> 16) & 0xff] << 16) |
+           ((uint32_t)sbox[(w >> 24) & 0xff] << 24);
 }
 
+/* four GF(2^8) doublings at once */
+static uint32_t xt4(uint32_t x)
+{
+    return ((x & 0x7f7f7f7fu) << 1) ^ (((x & 0x80808080u) >> 7) * 0x1bu);
+}
+
+/* schedule stored transposed into row words: rk[4r+row] */
 void aes_sw_expand_key(aes_sw_ctx_t *ctx, const uint8_t key[16])
 {
-    uint8_t *rk = ctx->rk;
-
-    for (uint8_t i = 0; i < 16; i++)
-        rk[i] = key[i];
-
-    /* Words 4..43. Each word is 4 bytes; word i lives at rk[4i..4i+3]. */
-    for (uint8_t i = 4; i < 44; i++) {
-        uint8_t t[4];
-        uint8_t p = (uint8_t)((i - 1) * 4);
-
-        t[0] = rk[p + 0];
-        t[1] = rk[p + 1];
-        t[2] = rk[p + 2];
-        t[3] = rk[p + 3];
-
-        if ((i & 3u) == 0u) {
-            /* RotWord, SubWord, then XOR the round constant into byte 0. */
-            uint8_t tmp = t[0];
-            t[0] = sbox[t[1]];
-            t[1] = sbox[t[2]];
-            t[2] = sbox[t[3]];
-            t[3] = sbox[tmp];
-            t[0] ^= rcon[(i >> 2) - 1];
-        }
-
-        uint8_t q = (uint8_t)((i - 4) * 4);
-        uint8_t d = (uint8_t)(i * 4);
-        rk[d + 0] = (uint8_t)(rk[q + 0] ^ t[0]);
-        rk[d + 1] = (uint8_t)(rk[q + 1] ^ t[1]);
-        rk[d + 2] = (uint8_t)(rk[q + 2] ^ t[2]);
-        rk[d + 3] = (uint8_t)(rk[q + 3] ^ t[3]);
+    uint32_t w[44];
+    for (unsigned i = 0; i < 4; i++)
+        w[i] = (uint32_t)key[4*i] | ((uint32_t)key[4*i+1] << 8) |
+               ((uint32_t)key[4*i+2] << 16) | ((uint32_t)key[4*i+3] << 24);
+    for (unsigned i = 4; i < 44; i++) {
+        uint32_t t = w[i-1];
+        if ((i & 3u) == 0u)
+            t = sub4(ROR32(t, 8)) ^ (uint32_t)rcon[(i >> 2) - 1];
+        w[i] = w[i-4] ^ t;
     }
-}
-
-static void add_round_key(uint8_t s[16], const uint8_t *rk)
-{
-    for (uint8_t i = 0; i < 16; i++)
-        s[i] ^= rk[i];
-}
-
-static void sub_bytes(uint8_t s[16])
-{
-    for (uint8_t i = 0; i < 16; i++)
-        s[i] = sbox[s[i]];
-}
-
-/* Row r rotates left by r. Row r is s[r], s[r+4], s[r+8], s[r+12]. */
-static void shift_rows(uint8_t s[16])
-{
-    uint8_t t;
-
-    t = s[1];
-    s[1] = s[5];
-    s[5] = s[9];
-    s[9] = s[13];
-    s[13] = t;
-
-    t = s[2];
-    s[2] = s[10];
-    s[10] = t;
-    t = s[6];
-    s[6] = s[14];
-    s[14] = t;
-
-    t = s[15];
-    s[15] = s[11];
-    s[11] = s[7];
-    s[7] = s[3];
-    s[3] = t;
-}
-
-static void mix_columns(uint8_t s[16])
-{
-    for (uint8_t c = 0; c < 16; c += 4) {
-        uint8_t a0 = s[c + 0], a1 = s[c + 1], a2 = s[c + 2], a3 = s[c + 3];
-        uint8_t sum = (uint8_t)(a0 ^ a1 ^ a2 ^ a3);
-
-        s[c + 0] ^= (uint8_t)(sum ^ xtime((uint8_t)(a0 ^ a1)));
-        s[c + 1] ^= (uint8_t)(sum ^ xtime((uint8_t)(a1 ^ a2)));
-        s[c + 2] ^= (uint8_t)(sum ^ xtime((uint8_t)(a2 ^ a3)));
-        s[c + 3] ^= (uint8_t)(sum ^ xtime((uint8_t)(a3 ^ a0)));
-    }
+    /* transpose each 4-word round key into 4 row words */
+    for (unsigned r = 0; r < 11; r++)
+        for (unsigned row = 0; row < 4; row++)
+            ctx->rk[4*r + row] =
+                ((w[4*r+0] >> (8*row)) & 0xff) |
+                (((w[4*r+1] >> (8*row)) & 0xff) << 8) |
+                (((w[4*r+2] >> (8*row)) & 0xff) << 16) |
+                (((w[4*r+3] >> (8*row)) & 0xff) << 24);
 }
 
 void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
                           uint8_t out[16])
 {
-    uint8_t s[16];
+    const uint32_t *rk = ctx->rk;
+    uint32_t r0, r1, r2, r3;
 
-    /* Work in a local so `out` may alias `in`. */
-    for (uint8_t i = 0; i < 16; i++)
-        s[i] = in[i];
+    r0 = (uint32_t)in[0] | ((uint32_t)in[4] << 8) | ((uint32_t)in[8] << 16) | ((uint32_t)in[12] << 24);
+    r1 = (uint32_t)in[1] | ((uint32_t)in[5] << 8) | ((uint32_t)in[9] << 16) | ((uint32_t)in[13] << 24);
+    r2 = (uint32_t)in[2] | ((uint32_t)in[6] << 8) | ((uint32_t)in[10] << 16) | ((uint32_t)in[14] << 24);
+    r3 = (uint32_t)in[3] | ((uint32_t)in[7] << 8) | ((uint32_t)in[11] << 16) | ((uint32_t)in[15] << 24);
+    r0 ^= rk[0]; r1 ^= rk[1]; r2 ^= rk[2]; r3 ^= rk[3];
 
-    add_round_key(s, &ctx->rk[0]);
-
-    for (uint8_t round = 1; round < 10; round++) {
-        sub_bytes(s);
-        shift_rows(s);
-        mix_columns(s);
-        add_round_key(s, &ctx->rk[round * 16]);
+    for (unsigned i = 1; i < 10; i++) {
+        uint32_t t, n0, n1, n2, n3;
+        r0 = sub4(r0); r1 = sub4(r1); r2 = sub4(r2); r3 = sub4(r3);
+        r1 = ROR32(r1, 8); r2 = ROR32(r2, 16); r3 = ROR32(r3, 24);
+        t = r0 ^ r1 ^ r2 ^ r3;
+        n0 = r0 ^ t ^ xt4(r0 ^ r1);
+        n1 = r1 ^ t ^ xt4(r1 ^ r2);
+        n2 = r2 ^ t ^ xt4(r2 ^ r3);
+        n3 = r3 ^ t ^ xt4(r3 ^ r0);
+        r0 = n0 ^ rk[4*i+0]; r1 = n1 ^ rk[4*i+1];
+        r2 = n2 ^ rk[4*i+2]; r3 = n3 ^ rk[4*i+3];
     }
+    r0 = sub4(r0); r1 = sub4(r1); r2 = sub4(r2); r3 = sub4(r3);
+    r1 = ROR32(r1, 8); r2 = ROR32(r2, 16); r3 = ROR32(r3, 24);
+    r0 ^= rk[40]; r1 ^= rk[41]; r2 ^= rk[42]; r3 ^= rk[43];
 
-    /* Final round omits MixColumns. */
-    sub_bytes(s);
-    shift_rows(s);
-    add_round_key(s, &ctx->rk[160]);
-
-    for (uint8_t i = 0; i < 16; i++)
-        out[i] = s[i];
+    out[0]=(uint8_t)r0;  out[4]=(uint8_t)(r0>>8);  out[8]=(uint8_t)(r0>>16);  out[12]=(uint8_t)(r0>>24);
+    out[1]=(uint8_t)r1;  out[5]=(uint8_t)(r1>>8);  out[9]=(uint8_t)(r1>>16);  out[13]=(uint8_t)(r1>>24);
+    out[2]=(uint8_t)r2;  out[6]=(uint8_t)(r2>>8);  out[10]=(uint8_t)(r2>>16); out[14]=(uint8_t)(r2>>24);
+    out[3]=(uint8_t)r3;  out[7]=(uint8_t)(r3>>8);  out[11]=(uint8_t)(r3>>16); out[15]=(uint8_t)(r3>>24);
 }

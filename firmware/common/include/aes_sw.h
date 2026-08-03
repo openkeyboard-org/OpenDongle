@@ -15,9 +15,9 @@
 
 #include <stdint.h>
 
-/* Expanded key schedule: 11 round keys of 16 bytes. */
+/* Expanded key schedule: 44 words = 11 round keys of 16 bytes (176 B, as before). */
 typedef struct {
-    uint8_t rk[176];
+    uint32_t rk[44];
 } aes_sw_ctx_t;
 
 /* Expand a 16-byte key into `ctx`. The expensive half; do it once per key. */
