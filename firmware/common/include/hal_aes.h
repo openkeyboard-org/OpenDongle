@@ -43,6 +43,13 @@
  *    both backends read all 16 input bytes before writing any output byte. The
  *    contract previously claimed only exact aliasing was permitted, which was
  *    needlessly strict and would have pushed callers into pointless copies.
+ *  - COST, so a caller can budget honestly: one block is ~29,500 core cycles
+ *    (~295 us at 100 MHz) on CH570 with the software backend, which is about a
+ *    THIRD of the 875 us connected-poll slot, and ~2,700 cycles (~27 us) on
+ *    CH592 with the hardware engine. That asymmetry is the whole reason the
+ *    intended construction precomputes keystream in task context: a CH570
+ *    caller must not assume a block is cheap. See aes_sw.c for the measurement
+ *    and for why relocating the cipher into SRAM would be worth ~17x.
  *  - NOT REENTRANT. Both backends keep module state (the round-key schedule on
  *    CH570; a single shared hardware engine on CH592), so a call from interrupt
  *    context that preempts one in task context corrupts the result. Callers on

@@ -5,10 +5,31 @@
  * Encrypt-only AES-128 per FIPS-197, used by the CH570 hal_aes backend because
  * that silicon has no hardware AES engine (see hal_aes.h for the measurement).
  *
- * WHY THIS SHAPE, measured on CH570 silicon at 100 MHz (cycles per block).
- * These are the PRODUCTION toolchain and ISA (MounRiver GCC 12.2,
- * -march=rv32imc_zba_zbb_zbc_zbs_xw); numbers taken with the xPack compiler the
- * bench spikes default to are 5-8% different and are not what ships:
+ * READ THIS BEFORE COMPARING ANY NUMBER BELOW. Every bench figure in this file
+ * is a SysTick TICK, and on this harness SysTick runs at HCLK/8, so one tick is
+ * EIGHT core cycles. ch32fun writes SysTick->CTLR = 1 unless
+ * FUNCONF_SYSTICK_USE_HCLK is defined, and the register reads 0x00000001 on
+ * silicon. Proof the divisor is real: a chain of 1024 *dependent* addi -- which
+ * a single-issue 3-stage core cannot execute faster than 1 cycle each --
+ * measures 0.127 ticks/instruction from SRAM, i.e. 1.02 core cycles. Exactly
+ * the floor. Ratios are unaffected; absolute costs are 8x these numbers.
+ *
+ * WHAT IT ACTUALLY COSTS, CH570 at 100 MHz, one AES-128 block, against the
+ * 875 us connected-poll slot:
+ *
+ *   byte-oriented, S-box in flash    60272 cycles   603 us   69% of the slot
+ *   THIS, flash-resident             29544 cycles   295 us   34% of the slot
+ *   THIS, if relocated into SRAM      1680 cycles    17 us    1.9% of the slot
+ *
+ * A third of the poll slot is not free. The SRAM figure is the same code, and
+ * the gap is instruction fetch: 16.4 core cycles per instruction from flash
+ * versus 1.02 from SRAM. If AES ever lands on the hot path, relocating it is
+ * worth more (~17x) than every source-level optimisation here combined -- the
+ * obstacle is that the hot path is ~2.3 KB against ~3 KB of free SRAM.
+ *
+ * WHY THIS SHAPE, in TICKS (multiply by 8 for core cycles), production
+ * toolchain and ISA (MounRiver GCC 12.2, -march=rv32imc_zba_zbb_zbc_zbs_xw);
+ * xPack-compiled numbers differ 5-8% and are not what ships:
  *
  *   byte-oriented, S-box in flash          7534   <- what this replaces
  *   THIS: row-major SWAR, S-box in RAM     3901   (1.93x, unrolled)
@@ -24,7 +45,7 @@
  * reads*, and there are 160 table lookups per block. Measured directly with a
  * dependent pointer-chase over byte-identical 1 KB tables (same machine code,
  * only the base pointer differing): a flash read costs **~9 cycles more than a
- * RAM read** -- 9.4 vs 0.75 cycles per dependent load. Running the same chase
+ * RAM read** -- 9.4 vs 0.75 TICKS per dependent load (75 vs 6 core cycles). Running the same chase
  * from SRAM instead of flash changed it by under 4%, so instruction/data
  * contention is not a factor; prefetch already hides instruction fetch.
  *
@@ -61,8 +82,8 @@
  * GCC 15.2 alongside the pinned 12.2 (Toolchain/RISC-V Embedded GCC15, prefix
  * riscv32-wch-elf, accepts the full production -march including _xw):
  *
- *   GCC 12.2 (pinned)   3901 cycles/block, 3304 B
- *   GCC 15.2            3693 cycles/block, 3036 B   (-5.3% time, -8% size)
+ *   GCC 12.2 (pinned)   3901 ticks/block, 3304 B
+ *   GCC 15.2            3693 ticks/block, 3036 B   (-5.3% time, -8% size)
  *
  * So the pinned compiler is leaving ~5% and ~270 B on the table here, and is
  * the sole reason the bitmanip extensions look harmful. Bumping the pin is a
@@ -76,7 +97,7 @@
  * The S-box placement is load-bearing, not incidental, and it needs the
  * explicit section attribute below: merely dropping `const` is NOT enough,
  * because GCC proves the table is never written and promotes it back into
- * .rodata (flash) — silently undoing the optimisation and costing ~2240 cycles
+ * .rodata (flash) — silently undoing the optimisation and costing ~2240 ticks (~18k core cycles)
  * with nothing in the build output to say so. Both chips' linker scripts
  * collect `*(.data .data.*)` into RAM with a flash LMA, so this is portable
  * across the two targets. If you move this table, re-measure.
@@ -96,7 +117,7 @@
  * than quietly misbehaving.
  *
  * Why not an inline function, which would also fix the double evaluation of x:
- * measured, it costs 3.5% (4118 vs 3980 cycles/block) even with
+ * measured, it costs 3.5% (4118 vs 3980 ticks/block) even with
  * always_inline, because GCC schedules the macro expansion better inside the
  * unrolled round. The double evaluation is safe here only because every call
  * site passes a plain local -- keep it that way.
@@ -142,7 +163,7 @@ static uint32_t sub4(uint32_t w)
 /*
  * Four GF(2^8) doublings at once. The alternative formulation
  * `((x << 1) & 0xfefefefe) ^ (((x >> 7) & 0x01010101) * 0x1b)` was measured and
- * is a wash -- 3980 cycles either way, same code size, because GCC folds both
+ * is a wash -- 3980 ticks either way, same code size, because GCC folds both
  * to equivalent instructions. Do not re-litigate it.
  */
 static uint32_t xt4(uint32_t x)
@@ -186,13 +207,13 @@ void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
     r0 ^= rk[0]; r1 ^= rk[1]; r2 ^= rk[2]; r3 ^= rk[3];
 
     /*
-     * Unrolled deliberately: measured 4674 -> 3980 cycles (15%) on CH570 for
+     * Unrolled deliberately: measured 4674 -> 3980 ticks (15%) on CH570 for
      * +2132 B of flash, which is cheap here. This contradicts the published
      * guidance -- Adomnicai measured unrolling as 2.9% *slower* on a SiFive
      * E31 -- and that result simply does not transfer to a 3-stage QingKe
      * fetching from flash, where each taken back-edge restarts the prefetcher.
      * Note `-funroll-loops` globally is worse than this targeted pragma (4499
-     * cycles, and it wrecks the key schedule); unroll this loop and no other.
+     * ticks, and it wrecks the key schedule); unroll this loop and no other.
      */
     _Pragma("GCC unroll 9")
     for (unsigned i = 1; i < 10; i++) {
