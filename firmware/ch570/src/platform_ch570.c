@@ -253,7 +253,7 @@ _Static_assert(CH570_JITTER_EDGE_US <= 0xFFFFFFFFu / HAL_TICKS_PER_US,
  * The whole firmware runs SysTick in exactly one configuration -- free-running,
  * CMP = max, sourced from HCLK -- established here and re-established idempotently
  * by st_systick_ensure() in main.c. Deriving the rate from CTLR rather than
- * assuming it is cheap defence in depth against that invariant being broken; it
+ * assuming it is cheap defense in depth against that invariant being broken; it
  * does NOT by itself prove the counter topology the modular deadline relies on
  * (a small CMP with auto-reload would wrap CNT early and break it). That
  * topology is the documented invariant, not something checked at runtime.
