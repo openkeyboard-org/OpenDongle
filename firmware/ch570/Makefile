@@ -52,11 +52,19 @@ CFLAGS += -DCH570_SYSCLK_HZ=100000000u
 CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
 # OpenBoot app companion (openboot_request_update / openboot_get_record).
 CFLAGS += -DOPENBOOT_CHIP_CH57X
+# Select the CH570 AES backend: DONGLE_AES_CH570_IMPL_{ASM_A,ASM_F,C}.
+# Default (ASM_A) is set in src/hal_aes_ch570_impl.h; override here, e.g.
+#   make AES_IMPL=DONGLE_AES_CH570_IMPL_ASM_F
+# ASM_F additionally REQUIRES CORECFGR bit 3 -- see that header.
+ifdef AES_IMPL
+CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
+endif
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
+LDFLAGS += $(EXTRA_LDFLAGS)
 
 INCLUDES := -I src -I $(COMMON)/include
 INCLUDES += -I $(SDK)/RF/LIB
@@ -71,15 +79,21 @@ APP_SRC += src/hal_rf_ch570.c src/hal_timing_ch570.c
 APP_SRC += $(COMMON)/src/iap.c $(COMMON)/src/usb_descriptors.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch570.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
+# AES-128 forward cipher behind hal_aes.h. hal_aes_ch570.c supplies
+# hal_aes_init/hal_aes_set_key for every backend; the block kernel comes
+# from hal_aes_ch570_asm.S (ASM_A default, ASM_F alternate) or from
+# aes_sw.c when DONGLE_AES_CH570_IMPL is ..._C. See hal_aes_ch570_impl.h.
+APP_SRC += src/hal_aes_ch570.c $(COMMON)/src/aes_sw.c
 
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH57x_clk.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH57x_sys.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH57x_flash.c
 STARTUP_SRC := $(SDK)/SRC/Startup/startup_CH572.S
 STARTUP_SRC += src/reset_handler_ch570.S src/fault_handler.S
+ASM_SRC := src/hal_aes_ch570_asm.S
 
 C_SRCS := $(APP_SRC) $(DRV_SRC)
-S_SRCS := $(STARTUP_SRC)
+S_SRCS := $(STARTUP_SRC) $(ASM_SRC)
 C_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(notdir $(C_SRCS)))
 S_OBJS := $(patsubst %.S,$(BUILD)/%.o,$(notdir $(S_SRCS)))
 OBJS := $(C_OBJS) $(S_OBJS)
@@ -108,7 +122,9 @@ OPENBOOT_SRC_BIN := $(OPENBOOT)/firmware/build/ch570-usb+opendongle-ch570/openbo
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
 CONFIG_TEXT := schema=6||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x800||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
-BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
+# $(ASM_SRC) belongs here too: without it, editing either AES kernel changes
+# the firmware without changing its build identity (CodeRabbit/Codex review).
+BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(ASM_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
 BUILD_ID_INPUTS += $(OPENBOOT)/protocol/openboot_protocol.h $(FINALIZE_TOOL)

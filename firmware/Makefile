@@ -32,6 +32,7 @@ PYTHON ?= /usr/bin/python3 -I
 .PHONY: all ch570 ch592 ch570-factory ch592-factory \
 	ch570-factory-flash ch592-factory-flash \
 	ch570-openboot ch592-openboot openboot-test \
+	aes-hw-build aes-hw-validate \
 	check-deps test clean
 
 all: ch570 ch592
@@ -113,6 +114,55 @@ check-deps:
 test:
 	$(PYTHON) -m unittest discover -s tests
 
+# AES backend validation images, built but not run. Useful on its own: it is
+# what proves the ASM_F guard still fires, since that arm is EXPECTED to fail
+# to compile while CORECFGR bit 3 is clear. Needs the cross toolchain, so it is
+# not part of `test`.
+#	A failed arm is only acceptable when it failed for the ONE expected reason:
+#	the ASM_F CORECFGR guard firing. Anything else is a real build break. An
+#	earlier version treated every non-zero exit as the expected refusal, which
+#	would have let a genuinely broken arm pass this target silently. The guard
+#	is identified by its own #error text rather than by arm name, so the day
+#	CORECFGR bit 3 is set and ASM_F starts building, a failure there becomes a
+#	failure again with no change here.
+aes-hw-build:
+	@set -e; fail=0; \
+	for arm in $$($(MAKE) -s -C validation arms); do \
+	    printf '\n=== %s ===\n' "$$arm"; \
+	    log="$$(mktemp)"; \
+	    if $(MAKE) -C validation ARM="$$arm" MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" \
+	           >"$$log" 2>&1; then \
+	        tail -3 "$$log"; \
+	    elif grep -q 'requires ROM_LOOP_ACC' "$$log"; then \
+	        echo "$$arm: build refused by the CORECFGR guard, as expected"; \
+	    else \
+	        cat "$$log"; echo "$$arm: BUILD FAILED" >&2; fail=1; \
+	    fi; \
+	    rm -f "$$log"; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+	    echo "one or more validation arms failed to build" >&2; exit 1; \
+	fi
+
+# Hardware AES validation across CH570/CH572/CH592. NOT part of `test`: it
+# flashes and drives real targets, and the image it writes is standalone, so it
+# ERASES OPENBOOT on whatever it touches. Requires an explicit probe serial per
+# chip - it refuses to guess, for the same reason flash-factory does, and it
+# will not write at all without AES_HW_ARGS containing --confirm-erase 1.
+#
+#   make aes-hw-validate AES_HW_CH570=<serial> AES_HW_ARGS="--confirm-erase 1"
+#
+# Add --dry-run to AES_HW_ARGS to build every arm and print the probe commands
+# without contacting a device.
+aes-hw-validate:
+	$(PYTHON) validation/run_aes_validation.py \
+	    --minichlink "$(MINICHLINK)" --toolchain "$(MRS_TOOLCHAIN)" \
+	    --ch570-probe "$(AES_HW_CH570)" \
+	    --ch572-probe "$(AES_HW_CH572)" \
+	    --ch592-probe "$(AES_HW_CH592)" \
+	    $(AES_HW_ARGS)
+
 clean:
 	$(MAKE) -C ch570 clean
 	$(MAKE) -C ch592 clean
+	$(MAKE) -C validation clean
