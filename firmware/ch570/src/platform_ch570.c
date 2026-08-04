@@ -156,37 +156,182 @@ void ch570_capture_boot_entropy(void)
  * (R32_RTC_CNT_LSI edges) over 32 periods, FNV-folding the deltas + phase into
  * rf_ch570_boot_entropy. Measured behaviour (bench): within a boot the LSI-vs-HCLK
  * beat is nearly locked (the cross-domain read synchronizer masks fine RC
- * jitter), but its phase/period drift across cold boots contributes ~3-5
- * independent bits. Mixed by FNV (bijective per step), so it can only ADD/permute
- * entropy — a stuck LSI folds in harmlessly and the SRAM hash survives intact.
+ * jitter), but its phase/period drift across cold boots contributed ~3-5
+ * independent bits under the conditions tested. FNV-1a is bijective in the prior
+ * hash for any fixed folded byte (XOR is bijective; 0x01000193 is odd, hence
+ * invertible mod 2^32), so folding these samples PRESERVES the entropy already
+ * in the SRAM hash — a stuck LSI cannot destroy it. Note that this is a statement
+ * about preservation only: whether the jitter ADDS entropy depends on it being
+ * independent of the SRAM hash, which bijectivity alone does not establish.
  * Call after the LSI is powered (main.c), following ch570_capture_boot_entropy().
- * Cost ~1 ms once the RC is oscillating (32 LSI periods at ~32 kHz); the priming
- * wait absorbs cold RC startup. If the LSI never ticks (hardware fault), the
- * priming wait times out ONCE (~tens of ms) and the sample is skipped. */
+ * Cost 0.88 ms measured, once the RC is oscillating (32 LSI periods at the
+ * measured 36.6 kHz); the priming wait absorbs cold RC startup, itself measured
+ * at 49.4 us. If the LSI never ticks (hardware fault), the
+ * priming wait times out ONCE (CH570_JITTER_PRIME_US) and the sample is skipped;
+ * if it stops mid-run the loop stops and keeps the samples already folded. */
+
+/*
+ * Wall-clock timeouts for the LSI edge waits.
+ *
+ * These were originally spin COUNTS (`spin < 400000u`), which is an
+ * instruction-count budget rather than a time budget: how long it actually
+ * waits depends on how fast this loop happens to execute. That made it silently
+ * sensitive to code placement, to compiler output, and — the reason it was
+ * found — to CORECFGR bit 3, which enables a 128-byte ROM loop buffer that a
+ * loop this small is eligible for. The failure mode is silent: the sample is
+ * skipped, the session-AA seed loses whatever this source contributes, and the
+ * SRAM hash survives, so nothing announces itself.
+ *
+ * SysTick is the correct instrument. It free-runs off HCLK independently of the
+ * fetch path, it is this firmware's established timebase (see sched.h), and it
+ * is already being enabled here anyway. hal_now() would be the usual choice but
+ * is not available this early — the TMR mux behind it is not initialised until
+ * well after this runs.
+ *
+ * Measured on CH570 silicon, on a bench replica of these two loops (same source,
+ * same toolchain, interrupts idle) with the wait condition forced never to
+ * clear, so both arms run to timeout:
+ *
+ *   CORECFGR    old (spin < 400000)   new (SysTick 50 ms)
+ *   0x25              696 ms                50.0 ms
+ *   0x2D               32 ms                50.0 ms
+ *   ratio            21.7x                   1.00x
+ *
+ * The 21.7x is what establishes the loop-buffer sensitivity empirically; source
+ * size alone would not, since it cannot predict the emitted loop's size or
+ * placement. Note this measured a replica, not these exact functions in situ.
+ *
+ * Two things worth keeping from it. The old timeout was NOT the "~tens of ms"
+ * the previous comment here claimed — on the shipping configuration it was
+ * 696 ms, understated by a factor of ~20. And it collapsed 21.7x from a single
+ * CSR bit, which is precisely the fragility this change removes.
+ *
+ * The 696 ms figure is also relevant to the USB-enumeration note in main.c,
+ * which reasons that an LSI cold-start stall starving enumeration "looks
+ * unlikely". That argument was made against a believed budget of tens of
+ * milliseconds. A 696 ms worst case deserves more weight than it was given —
+ * though note this is the DEAD-LSI path; a healthy RC ticks long before it.
+ * This change brings that worst case down to ~50 ms.
+ *
+ * "~50 ms" and not "50 ms exactly", for two reasons worth stating rather than
+ * glossing. The wait tests the LSI counter BEFORE the deadline, so an edge that
+ * arrives after the deadline still wins and returns success — this is a bound on
+ * polling, not a hard sample-acceptance deadline. And interrupt latency adds to
+ * the observed time, since an ISR's duration counts as elapsed wall time (which
+ * is correct for a wall-clock timeout, but means the return is not punctual).
+ * Masking interrupts to tighten this would be worse system-wide and is not
+ * warranted for a boot-time entropy sample.
+ */
+/*
+ * Both budgets verified against a LIVE LSI on CH570 silicon, which is the case
+ * the timeout-path measurement above could not cover -- it forced the wait
+ * condition never to clear, so it only ever exercised the failure path. The
+ * risk this closes is the opposite one: a deadline tight enough to fire on a
+ * HEALTHY LSI would break the loop early and silently fold almost nothing,
+ * while every timeout-path test still looked perfect.
+ *
+ *   LSI cold start (priming)   49.4 us          0.1% of the 50 ms budget
+ *   real LSI period            25.0 - 27.5 us   mean 27.30 us => 36.6 kHz
+ *   edge budget headroom       73.3x the mean period, 72.7x the worst observed
+ *   samples completed          32 / 32          (identical to the old code)
+ *
+ * Note the RC runs at ~36.6 kHz, not the ~32 kHz this budget was originally
+ * derived from. The assumption was conservative in the safe direction, but the
+ * measured number is the one to reason from if these are ever retuned.
+ */
+#define CH570_JITTER_PRIME_US   50000u   /* LSI RC cold start; measured 49.4 us */
+#define CH570_JITTER_EDGE_US     2000u   /* 73x the measured 27.3 us LSI period */
+
+/* The tick computation below must not overflow for the configured timeouts. */
+_Static_assert(CH570_JITTER_PRIME_US <= 0xFFFFFFFFu / HAL_TICKS_PER_US,
+    "CH570_JITTER_PRIME_US overflows the SysTick tick conversion");
+_Static_assert(CH570_JITTER_EDGE_US <= 0xFFFFFFFFu / HAL_TICKS_PER_US,
+    "CH570_JITTER_EDGE_US overflows the SysTick tick conversion");
+
+/* Convert microseconds to SysTick ticks for the CURRENT clock-source selection.
+ *
+ * The whole firmware runs SysTick in exactly one configuration -- free-running,
+ * CMP = max, sourced from HCLK -- established here and re-established idempotently
+ * by st_systick_ensure() in main.c. Deriving the rate from CTLR rather than
+ * assuming it is cheap defense in depth against that invariant being broken; it
+ * does NOT by itself prove the counter topology the modular deadline relies on
+ * (a small CMP with auto-reload would wrap CNT early and break it). That
+ * topology is the documented invariant, not something checked at runtime.
+ *
+ * Scaling by shift rather than dividing HAL_TICKS_PER_US by 8 avoids truncating
+ * 12.5 to 12 at 100 MHz, which would make every HCLK/8 timeout 4% short. */
+static uint32_t ch570_us_to_systicks(uint32_t us)
+{
+    uint32_t ticks = us * HAL_TICKS_PER_US;                  /* HCLK */
+    if ((SysTick->CTLR & SysTick_CTLR_STCLK) == 0u) {
+        ticks >>= 3;                                         /* HCLK/8 */
+    }
+    return ticks;
+}
+
+/* Wait for the LSI counter to leave `rc`, or until `limit_ticks` of WALL time
+ * has elapsed. Returns 1 on an edge, 0 on timeout.
+ *
+ * Takes ticks rather than microseconds so the rate is sampled ONCE per sampling
+ * run by the caller: re-deriving it per wait would let a CTLR change mid-run
+ * give different waits different limits, without actually protecting any
+ * individual wait. Modular subtraction handles CNT wrap; the windows are
+ * milliseconds against a 43-second period, so a wrap cannot alias. */
+static uint8_t ch570_lsi_wait_edge(uint32_t rc, uint32_t limit_ticks)
+{
+    const uint32_t start = (uint32_t)SysTick->CNT;
+
+    while (R32_RTC_CNT_LSI == rc) {
+        if ((uint32_t)((uint32_t)SysTick->CNT - start) >= limit_ticks) {
+            return 0u;
+        }
+    }
+    return 1u;
+}
+
 void ch570_mix_jitter_entropy(void)
 {
     uint32_t h = rf_ch570_boot_entropy;   /* start from the SRAM hash */
-    uint32_t prev, now, rc, spin;
+    uint32_t prev, now, rc;
     uint8_t i;
+    /* Same free-running configuration st_systick_ensure() in main.c establishes:
+     * CMP = max, sourced from HCLK, no auto-reload. Idempotent, and in practice
+     * this is the first user in the boot order. */
     if ((SysTick->CTLR & SysTick_CTLR_STE) == 0u) {
         SysTick->CMP  = SysTick_LOAD_RELOAD_Msk;
         SysTick->CNT  = 0u;
         SysTick->CTLR = SysTick_CTLR_STE | SysTick_CTLR_STCLK;
     }
+
+    /* Sample the tick rate ONCE, after SysTick is known to be running, so every
+     * deadline in this run uses the same one. */
+    const uint32_t prime_ticks = ch570_us_to_systicks(CH570_JITTER_PRIME_US);
+    const uint32_t edge_ticks  = ch570_us_to_systicks(CH570_JITTER_EDGE_US);
+
     /* Prime on the first LSI edge (also absorbs RC startup). If the counter
      * never advances the LSI is dead — skip the loop so a hardware fault costs
      * one timeout, not 32, and leave the SRAM hash untouched. */
-    rc = R32_RTC_CNT_LSI; spin = 0u;
-    while (R32_RTC_CNT_LSI == rc && spin < 400000u) { spin++; }
-    if (R32_RTC_CNT_LSI == rc) {
+    rc = R32_RTC_CNT_LSI;
+    if (!ch570_lsi_wait_edge(rc, prime_ticks)) {
         return;
     }
     prev = (uint32_t)SysTick->CNT;
     for (i = 0u; i < 32u; i++) {
-        rc = R32_RTC_CNT_LSI; spin = 0u;
-        while (R32_RTC_CNT_LSI == rc && spin < 400000u) { spin++; }
+        rc = R32_RTC_CNT_LSI;
+        if (!ch570_lsi_wait_edge(rc, edge_ticks)) {
+            /* LSI stopped mid-run. Stop rather than folding a meaningless delta
+             * for this sample and then paying the timeout on every remaining
+             * iteration. Keeping the partial fold is safe: FNV-1a is bijective
+             * in the prior hash, so the SRAM-hash entropy already in `h` is
+             * preserved. It may simply contribute less jitter entropy than a
+             * complete 32-sample run would have. */
+            break;
+        }
         now = (uint32_t)SysTick->CNT;
-        h = (h ^ (uint8_t)(now - prev)) * 0x01000193u;   /* HCLK cycles per LSI period */
+        /* Cycles since the LAST OBSERVED counter change — normally one LSI
+         * period, but a long ISR can hide several, in which case this is a
+         * multi-period delta. Harmless for entropy folding. */
+        h = (h ^ (uint8_t)(now - prev)) * 0x01000193u;
         h = (h ^ (uint8_t)now) * 0x01000193u;            /* + absolute sampling phase */
         prev = now;
     }
