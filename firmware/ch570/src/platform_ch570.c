@@ -160,7 +160,7 @@ void ch570_capture_boot_entropy(void)
  * independent bits under the conditions tested. FNV-1a is bijective in the prior
  * hash for any fixed folded byte (XOR is bijective; 0x01000193 is odd, hence
  * invertible mod 2^32), so folding these samples PRESERVES the entropy already
- * in the SRAM hash — a stuck LSI cannot destroy it. Note that is a statement
+ * in the SRAM hash — a stuck LSI cannot destroy it. Note that this is a statement
  * about preservation only: whether the jitter ADDS entropy depends on it being
  * independent of the SRAM hash, which bijectivity alone does not establish.
  * Call after the LSI is powered (main.c), following ch570_capture_boot_entropy().
