@@ -108,22 +108,34 @@ git submodule update --init --recursive
 ```
 
 MounRiver Studio's GCC 15.2 toolchain is an external dependency. It is not
-redistributed or made a submodule because its packaging and license are
+redistributed or made a submodule because its packaging and licence are
 independent of the OpenWCH SDK repositories. Set `MRS_TOOLCHAIN` to the
 directory containing `riscv32-wch-elf-gcc`, `riscv32-wch-elf-objcopy`,
-`riscv32-wch-elf-size`, and `riscv32-wch-elf-nm`:
+`riscv32-wch-elf-size`, and `riscv32-wch-elf-nm`.
+
+**Two toolchains are required.** The default goal composes the factory image,
+which builds OpenBoot — and OpenBoot is a pinned submodule still on GCC 12. So
+a working build names both:
 
 ```sh
-make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC15/bin
+make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC15/bin \
+     OPENBOOT_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC12/bin
 ```
+
+`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, so omitting it does not
+silently build something unexpected — it fails in OpenBoot's own dependency
+checker, which pins the GCC 12 `riscv-wch-elf-*` tool names. If you only want
+the application binaries and no bootloader, the per-chip `.elf`/`.bin` targets
+need `MRS_TOOLCHAIN` alone. See the OpenBoot note below; this collapses back to
+one toolchain the moment its pin moves.
 
 **Note the tool prefix changed with this release.** GCC 12 shipped
 `riscv-wch-elf-*`; GCC 15 ships `riscv32-wch-elf-*`. Pointing `MRS_TOOLCHAIN` at
 a GCC 12 directory now fails in `check-deps` with "MounRiver tool is missing or
 not executable", which is the intended behaviour rather than a broken build
 part-way through. The prefix lives in the `CROSS` variable in each application
-Makefile, and `check_dependencies.py` validates the same prefix it is given, so
-overriding `CROSS` also moves what gets validated.
+Makefile and in `firmware/Makefile`, and `check_dependencies.py` validates the
+same prefix it is given, so overriding `CROSS` also moves what gets validated.
 
 OpenBoot is the exception and still needs GCC 12 — see the note further down
 about `OPENBOOT_TOOLCHAIN`.
@@ -194,7 +206,9 @@ gaps are worth stating rather than leaving implied, both documented above and in
   toolchain pin, still on MounRiver GCC12 and its `riscv-wch-elf-*` tool names,
   so a factory build needs both toolchains present:
 
-      make ch570-factory MRS_TOOLCHAIN=<GCC15 bin> OPENBOOT_TOOLCHAIN=<GCC12 bin>
+  ```sh
+  make ch570-factory MRS_TOOLCHAIN=<GCC15 bin> OPENBOOT_TOOLCHAIN=<GCC12 bin>
+  ```
 
   This is safe rather than merely tolerated: the factory image is
   OpenBoot ‖ pad ‖ application, two separately linked binaries that share no

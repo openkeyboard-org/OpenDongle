@@ -13,7 +13,14 @@ import sys
 
 # MounRiver "RISC-V Embedded GCC15" (WCH GCC 15.2.0). Note the tool prefix
 # changed with this release: GCC12 shipped riscv-wch-elf-*, GCC15 ships
-# riscv32-wch-elf-*. TOOL_PREFIX below is the single place that encodes it.
+# riscv32-wch-elf-*.
+#
+# TOOL_PREFIX is only the DEFAULT. The prefix the build actually uses comes from
+# CROSS in firmware/Makefile and in each chip Makefile, and is passed in via
+# --tool-prefix; this constant applies when no caller supplies one. Keeping the
+# validated prefix and the compiling prefix the same is the entire point --
+# validating a hardcoded prefix while the build used an overridden one would
+# look like assurance while checking a different compiler.
 PINNED_COMPILER_SHA256 = (
     "9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99"
 )
@@ -71,6 +78,19 @@ def validate_toolchain(toolchain_value: str, tool_prefix: str) -> None:
     """
     if not toolchain_value.strip():
         fail("MRS_TOOLCHAIN is required and must name the GCC15 bin directory")
+    # An ABSOLUTE prefix would make this check inspect a different file from the
+    # one the build compiles with: pathlib discards the left operand when the
+    # right is absolute (Path("/opt/mrs") / "/tmp/gcc" == Path("/tmp/gcc")),
+    # while the Makefiles concatenate as strings and get "/opt/mrs//tmp/gcc".
+    # Only absolute prefixes diverge -- a relative one such as "sub/riscv32-wch-elf"
+    # resolves identically both ways, so rejecting every separator would ban a
+    # form that works.
+    if Path(tool_prefix).is_absolute():
+        fail(
+            f"tool prefix must be relative, got {tool_prefix!r}: an absolute "
+            "prefix makes this check validate a different compiler from the "
+            "one the build uses"
+        )
     toolchain = Path(toolchain_value).expanduser().resolve()
     # nm belongs here: the fault validators consume it via --tool-dir, so
     # check-deps passing without it just moves the failure to the middle of

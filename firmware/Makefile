@@ -4,6 +4,16 @@ SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 
 MRS_TOOLCHAIN ?=
+# OpenBoot is a pinned submodule with its OWN toolchain pin, still on MounRiver
+# GCC12 and its riscv-wch-elf-* tool names. Every target that reaches into the
+# submodule has to route through this, not MRS_TOOLCHAIN, or it is unbuildable
+# under a GCC15 pin with no way to override short of changing MRS_TOOLCHAIN
+# itself. The chip Makefiles declare the same default for the same reason.
+OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
+# The application tool prefix. GCC12 shipped riscv-wch-elf-*, GCC15 ships
+# riscv32-wch-elf-*. Passed to check_dependencies.py below so it validates the
+# prefix the build actually uses rather than a hardcoded one.
+CROSS ?= riscv32-wch-elf
 OPENWCH_ROOT ?= $(abspath ../third_party/openwch)
 CH570_SDK ?= $(OPENWCH_ROOT)/ch570/EVT/EXAM
 CH592_SDK ?= $(OPENWCH_ROOT)/ch592/EVT/EXAM
@@ -28,19 +38,23 @@ all: ch570 ch592
 
 ch570:
 	$(MAKE) -C ch570 \
-	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" all
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" all
 
 ch592:
 	$(MAKE) -C ch592 \
-	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" all
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" all
 
 ch570-factory:
 	$(MAKE) -C ch570 \
-	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" factory
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
 
 ch592-factory:
 	$(MAKE) -C ch592 \
-	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" factory
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
 
 ch570-factory-flash:
 	$(MAKE) -C ch570 \
@@ -70,11 +84,11 @@ ch592-factory-flash:
 # hashed; the bootloader image is not. Tracked in TODO.md.
 ch570-openboot:
 	$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
-	    BOARD=opendongle-ch570 MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" image
+	    BOARD=opendongle-ch570 MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
 
 ch592-openboot:
 	$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
-	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" image
+	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
 
 # OpenBoot's own host suites. Not part of `test`: run this when the
 # submodule pin advances — the pin only moves onto OpenBoot commits whose
@@ -87,11 +101,11 @@ check-deps:
 	$(PYTHON) check_dependencies.py \
 	    --sdk "$(CH570_SDK)" \
 	    --sdk-revision 1e34c9450cd6df390153952c097cd09dd8a91aed \
-	    --toolchain "$(MRS_TOOLCHAIN)"
+	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
 	$(PYTHON) check_dependencies.py \
 	    --sdk "$(CH592_SDK)" \
 	    --sdk-revision a46e0086f1ffb5e5502703970bff94888e67f4cb \
-	    --toolchain "$(MRS_TOOLCHAIN)"
+	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
 
 # Host-side suite: no cross toolchain, no hardware. Covers the build-identity
 # contract and the factory composition. (OpenBoot's own host suite is separate

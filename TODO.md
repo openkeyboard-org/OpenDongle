@@ -360,7 +360,7 @@ the build id for no functional gain, or expands scope beyond the import:
 - **`finalize_image.py`** — create both output parent directories and stage each
   temporary file beside its own destination, so a cross-directory or
   cross-filesystem `--output-bin` cannot leave an ELF written and a BIN missing.
-- **`check_dependencies.py`** — the pinned digest covers the `riscv-wch-elf-gcc`
+- **`check_dependencies.py`** — the pinned digest covers the `riscv32-wch-elf-gcc`
   driver only, not `cc1`, the assembler, the linker or `objcopy`, so a partially
   replaced toolchain directory can pass the gate and still produce different
   firmware under the same build id. Widening this to a full toolchain manifest

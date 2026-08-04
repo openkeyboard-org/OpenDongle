@@ -10,7 +10,7 @@
  * __INTERRUPT handlers, same concern as CH59x). Fail the build LOUDLY on ANY
  * INT_SOFT definition (the shipping build leaves it undefined). */
 #ifdef INT_SOFT
-#error "INT_SOFT must be UNDEFINED for CH570: the software-ISR ABI breaks the WCH hardware-stacking interrupt path; build with WCH GCC12 and INT_SOFT off."
+#error "INT_SOFT must be UNDEFINED for CH570: the software-ISR ABI breaks the WCH hardware-stacking interrupt path; build with the pinned MounRiver WCH toolchain and INT_SOFT off."
 #endif
 
 #include "CH57x_common.h"
