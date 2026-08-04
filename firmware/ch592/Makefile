@@ -97,6 +97,12 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
+# AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this
+# is the whole backend -- no software cipher is linked here, unlike CH570.
+# Listing it in APP_SRC also puts it in BUILD_ID_INPUTS (which expands
+# $(APP_SRC) below), so editing the driver moves the build id. It was in
+# neither before, meaning the file was dead code that no build compiled.
+APP_SRC += src/hal_aes_ch592.c
 
 HAL_SRC := $(SDK)/BLE/HAL/MCU.c $(SDK)/BLE/HAL/RTC.c
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c

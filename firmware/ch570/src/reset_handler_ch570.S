@@ -7,6 +7,8 @@
  * Four retained startup bytes record phase and pristine reset status.
  */
 
+#include "ch570_corecfgr.h"
+
 	.section .handle_reset_n23, "ax", @progbits
 	.global handle_reset
 	.type handle_reset, @function
@@ -95,8 +97,10 @@ handle_reset:
 2:
 	STARTUP_MARKER 0xC4
 
-	/* Preserve the vendor CH57x execution-mode and HPE setup. */
-	li t0, 0x25
+	/* Preserve the vendor CH57x execution-mode and HPE setup. The CORECFGR
+	 * value lives in ch570_corecfgr.h so that code depending on one of its
+	 * bits can test what is ACTUALLY written here rather than trust a comment. */
+	li t0, CH570_CORECFGR_VALUE
 	csrw 0xbc0, t0
 	li t0, 0x3
 	csrw 0x804, t0

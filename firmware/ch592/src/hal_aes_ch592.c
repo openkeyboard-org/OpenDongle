@@ -32,7 +32,16 @@
 
 #include <stdint.h>
 
+/*
+ * Overridable so a host test can point the register window at ordinary memory.
+ * The HAL_AES_ENGINE_TIMEOUT branch below is unreachable on a healthy engine --
+ * it needs the busy bit to stay set, which no working part will do on demand --
+ * so a mocked register block is the only way that path is ever executed. See
+ * tests/test_aes_ch592_mock.py. Nothing but a test should define this.
+ */
+#ifndef AES_BASE
 #define AES_BASE 0x4000C300u
+#endif
 #define AES_REG(off) (*(volatile uint32_t *)(uintptr_t)(AES_BASE + (off)))
 
 #define AES_CFG     AES_REG(0x00) /* bit0 start/busy, bit1 0=encrypt 1=decrypt */
@@ -75,8 +84,8 @@ void hal_aes_set_key(const uint8_t key[HAL_AES_KEY_BYTES])
         aes_key_words[i] = load_le32(&key[4u * i]);
 }
 
-void hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
-                           uint8_t out[HAL_AES_BLOCK_BYTES])
+hal_aes_status_t hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
+                                       uint8_t out[HAL_AES_BLOCK_BYTES])
 {
     AES_CFG = 0x100u; /* reset/prepare pulse, as the vendor driver does */
     __asm__ volatile("nop; nop; nop; nop");
@@ -95,6 +104,31 @@ void hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
     while ((AES_CFG & 1u) != 0u && ++spins < AES_SPIN_LIMIT)
         ;
 
+    /*
+     * Distinguish completion from expiry. This previously fell straight into
+     * the copy below in both cases, so a wedged engine returned the contents of
+     * the data registers with no indication anything was wrong.
+     *
+     * Measured, not assumed: with the check removed, this returns THE PLAINTEXT
+     * (tests/test_aes_ch592_mock.py reverts the branch and observes it). The
+     * input is written into the data registers just above, so if the engine
+     * never runs, reading them back yields exactly what was written. In counter
+     * mode the caller XORs that "keystream" with the same plaintext and
+     * transmits the result -- which is not encryption at all.
+     *
+     * Zero the output instead. A caller that ignores the status then transmits
+     * plaintext, which is equally broken but obvious in a capture rather than
+     * silently self-cancelling. See the contract note in hal_aes.h for why that
+     * is the lesser evil and not a safe one.
+     */
+    if ((AES_CFG & 1u) != 0u) {
+        for (uint32_t i = 0; i < HAL_AES_BLOCK_BYTES; i++)
+            out[i] = 0u;
+        return HAL_AES_ENGINE_TIMEOUT;
+    }
+
     for (uint32_t i = 0; i < 4u; i++)
         store_le32(&out[4u * i], AES_DATA(i));
+
+    return HAL_AES_OK;
 }
