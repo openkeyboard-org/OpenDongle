@@ -14,15 +14,25 @@ SHELL := /bin/sh
 
 SDK ?= $(abspath ../../third_party/openwch/ch592/EVT/EXAM)
 MRS_TOOLCHAIN ?=
+# MounRiver GCC15 renamed the tools: GCC12 shipped riscv-wch-elf-*, GCC15
+# ships riscv32-wch-elf-*. One variable so the prefix lives in one place.
+CROSS ?= riscv32-wch-elf
+# OpenBoot is a pinned submodule with its OWN toolchain pin, still on MounRiver
+# GCC12 and its riscv-wch-elf-* tool names. The factory image is
+# OpenBoot || pad || application -- two separately linked binaries that share no
+# code -- so building them with different compilers is safe. Until OpenBoot's
+# pin moves, point this at the GCC12 bin directory:
+#   make ch592-factory MRS_TOOLCHAIN=<GCC15 bin> OPENBOOT_TOOLCHAIN=<GCC12 bin>
+OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
 COMMON := ../common
 BLE_LIB_DIR := $(SDK)/BLE/LIB
 OPENBOOT := $(abspath ../../third_party/openboot)
 
-CC := $(MRS_TOOLCHAIN)/riscv-wch-elf-gcc
+CC := $(MRS_TOOLCHAIN)/$(CROSS)-gcc
 AS := $(CC)
 LD := $(CC)
-OBJCOPY := $(MRS_TOOLCHAIN)/riscv-wch-elf-objcopy
-SIZE := $(MRS_TOOLCHAIN)/riscv-wch-elf-size
+OBJCOPY := $(MRS_TOOLCHAIN)/$(CROSS)-objcopy
+SIZE := $(MRS_TOOLCHAIN)/$(CROSS)-size
 MINICHLINK ?= minichlink
 WCHLINK_SERIAL ?=
 
@@ -125,7 +135,7 @@ OPENBOOT_BIN := $(BUILD)/$(TARGET)-openboot.bin
 OPENBOOT_SRC_BIN := $(OPENBOOT)/firmware/build/ch592-usb+opendongle-ch592/openboot-ch592-usb.bin
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
-CONFIG_TEXT := schema=8||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=7f2d3c114b98fe9e48ac6abe6259a4574291a8e2aba960b21dce73528ece9ff2
+CONFIG_TEXT := schema=8||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
@@ -159,7 +169,7 @@ all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
 # not rebuild unless the bytes changed.
 openboot-image:
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
-	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" image
+	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
 
 $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
@@ -238,7 +248,8 @@ flash-factory: factory
 
 check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
-	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)"
+	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
+	    --tool-prefix "$(CROSS)"
 
 $(BUILD):
 	mkdir -p "$@"

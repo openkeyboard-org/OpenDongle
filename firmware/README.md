@@ -107,15 +107,38 @@ them once from the repository root:
 git submodule update --init --recursive
 ```
 
-MounRiver Studio's GCC 12 toolchain is an external dependency. It is not
-redistributed or made a submodule because its packaging and license are
+MounRiver Studio's GCC 15.2 toolchain is an external dependency. It is not
+redistributed or made a submodule because its packaging and licence are
 independent of the OpenWCH SDK repositories. Set `MRS_TOOLCHAIN` to the
-directory containing `riscv-wch-elf-gcc`, `riscv-wch-elf-objcopy`, and
-`riscv-wch-elf-size`:
+directory containing `riscv32-wch-elf-gcc`, `riscv32-wch-elf-objcopy`,
+`riscv32-wch-elf-size`, and `riscv32-wch-elf-nm`.
+
+**Two toolchains are required.** The default goal composes the factory image,
+which builds OpenBoot — and OpenBoot is a pinned submodule still on GCC 12. So
+a working build names both:
 
 ```sh
-make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC12/bin
+make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC15/bin \
+     OPENBOOT_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC12/bin
 ```
+
+`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, so omitting it does not
+silently build something unexpected — it fails in OpenBoot's own dependency
+checker, which pins the GCC 12 `riscv-wch-elf-*` tool names. If you only want
+the application binaries and no bootloader, the per-chip `.elf`/`.bin` targets
+need `MRS_TOOLCHAIN` alone. See the OpenBoot note below; this collapses back to
+one toolchain the moment its pin moves.
+
+**Note the tool prefix changed with this release.** GCC 12 shipped
+`riscv-wch-elf-*`; GCC 15 ships `riscv32-wch-elf-*`. Pointing `MRS_TOOLCHAIN` at
+a GCC 12 directory now fails in `check-deps` with "MounRiver tool is missing or
+not executable", which is the intended behaviour rather than a broken build
+part-way through. The prefix lives in the `CROSS` variable in each application
+Makefile and in `firmware/Makefile`, and `check_dependencies.py` validates the
+same prefix it is given, so overriding `CROSS` also moves what gets validated.
+
+OpenBoot is the exception and still needs GCC 12 — see the note further down
+about `OPENBOOT_TOOLCHAIN`.
 
 `MRS_TOOLCHAIN`, `OPENWCH_ROOT`, `CH570_SDK`, and `CH592_SDK` use Make's `?=`
 assignment, so they may be supplied by the environment, command line, or a
@@ -125,7 +148,7 @@ before compilation.
 
 ### The toolchain pin: what it covers, and what it costs
 
-`check_dependencies.py` pins the **`riscv-wch-elf-gcc` binary** by SHA-256, and
+`check_dependencies.py` pins the **`riscv32-wch-elf-gcc` binary** by SHA-256, and
 it is an order-only prerequisite of every object file — so the check is not
 advisory: a mismatch stops the build.
 
@@ -174,11 +197,25 @@ image, and it is only as strong as the inputs the build id actually covers. Two
 gaps are worth stating rather than leaving implied, both documented above and in
 `TODO.md`:
 
-- The toolchain pin covers the `riscv-wch-elf-gcc` driver, not `cc1`, the
+- The toolchain pin covers the `riscv32-wch-elf-gcc` driver, not `cc1`, the
   assembler, the linker or `objcopy`. A partially replaced toolchain directory
   can produce different bytes under the same build id, so "the same pinned
   toolchain" means the whole directory unchanged, not merely a matching driver
   digest.
+- **OpenBoot still builds with GCC12.** The pinned submodule carries its own
+  toolchain pin, still on MounRiver GCC12 and its `riscv-wch-elf-*` tool names,
+  so a factory build needs both toolchains present:
+
+  ```sh
+  make ch570-factory MRS_TOOLCHAIN=<GCC15 bin> OPENBOOT_TOOLCHAIN=<GCC12 bin>
+  ```
+
+  This is safe rather than merely tolerated: the factory image is
+  OpenBoot ‖ pad ‖ application, two separately linked binaries that share no
+  code, so the compilers never have to agree. `OPENBOOT_TOOLCHAIN` defaults to
+  `MRS_TOOLCHAIN`, so leaving it unset fails loudly in OpenBoot's own checker
+  rather than silently building something unexpected. It collapses back to one
+  toolchain the moment OpenBoot's pin moves.
 - No OpenBoot revision appears in `CONFIG_TEXT` or `BUILD_ID_INPUTS`. The
   **factory** image is OpenBoot ‖ pad ‖ application, so its bytes depend on a
   checkout the build id says nothing about. Comparing factory images across

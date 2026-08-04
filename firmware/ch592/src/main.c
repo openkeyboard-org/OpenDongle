@@ -10,7 +10,7 @@
  *   register-save/restore behavior it produces. Mainline GCC's plain
  *   `__attribute__((interrupt))` (what INT_SOFT=1 selects) produces a
  *   binary that wedges before any IRQ can be delivered. Only the MRS
- *   toolchain (riscv-wch-elf-gcc 12.2 at ~/.local/opt/mrs-toolchain/...)
+ *   toolchain (riscv32-wch-elf-gcc 15.2; see firmware/README.md)
  *   supports `WCH-Interrupt-fast` natively, so this firmware MUST be
  *   built with MRS + INT_SOFT=0. The Makefile defaults reflect this.
  *
@@ -29,7 +29,7 @@
  * Fail the build LOUDLY on ANY INT_SOFT definition. The shipping build leaves it
  * undefined, so this never fires there. */
 #ifdef INT_SOFT
-#error "INT_SOFT must be UNDEFINED for CH592F: the software-ISR ABI wedges LIBCH59xBLE.a; build with WCH GCC12 and the native WCH-Interrupt-fast attribute."
+#error "INT_SOFT must be UNDEFINED for CH592F: the software-ISR ABI wedges LIBCH59xBLE.a; build with the pinned MounRiver WCH toolchain and the native WCH-Interrupt-fast attribute."
 #endif
 
 #include "CONFIG.h"
