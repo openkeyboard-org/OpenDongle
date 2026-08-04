@@ -50,14 +50,33 @@
  *    87,500 cycles:
  *
  *      backend         cycles/block   % slot   key schedule   % slot
- *      ASM_A (default)      1,944      2.2%         60,538    69.2%
+ *      ASM_A (default)      1,944      2.2%         59,113    67.6%
  *      ASM_F                3,797      4.3%            n/m      n/m
- *      C (portable)        43,510     49.7%         47,759    54.6%
+ *      C (portable)        43,396     49.6%         45,378    51.9%
  *
  *    The hardware engines, measured on their own silicon and clock:
  *
- *      CH572 hardware, 100 MHz:  4,139 cycles/block,  41.4 us,  4.7% of slot
- *      CH592 hardware,  60 MHz:    885 cycles/block,  14.8 us,  1.7% of slot
+ *      CH572 hardware, 100 MHz:  4,011 cycles/block,  40.1 us,  4.6% of slot
+ *      CH592 hardware,  60 MHz:    865 cycles/block,  14.4 us,  1.6% of slot
+ *
+ *    THE SOFTWARE KERNEL BEATS THE HARDWARE ENGINE, measured on one CH572 so
+ *    this is cipher-vs-engine and not part-vs-part: ASM_A 1,944 against the
+ *    engine's 4,011, a factor of 2.06. The engine core is not slow; the driver
+ *    around it is, because it reloads all four key words and shuffles four data
+ *    words each way on EVERY block (the engine keeps no key across its reset
+ *    pulse), flash-resident with the loop buffer off. The key schedule inverts
+ *    it -- 59,113 against 5,126 -- so the engine wins below ~27 blocks per key
+ *    and the software kernel above it. A CTR link re-keying per session is far
+ *    above that crossover. *
+ *    ON PRECISION. The SRAM-resident kernel is EXACTLY reproducible: ASM_A
+ *    measures 1,944 on every build, on both a CH570 and a CH572. The
+ *    flash-resident figures are not -- they move by up to ~3% when unrelated
+ *    code shifts the link, because with the ROM loop buffer off their cost is
+ *    dominated by instruction fetch and therefore by alignment. Adding three
+ *    stores to a platform file moved the CH572 engine from 4,139 to 4,011 and
+ *    the portable C from 43,510 to 43,396. Treat the flash rows as good to two
+ *    significant figures, not to the digit, and do not chase small deltas.
+
  *
  *    Every figure above is a true core-cycle count measured by
  *    firmware/validation on production-faithful silicon -- same startup, same

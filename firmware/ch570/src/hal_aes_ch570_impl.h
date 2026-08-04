@@ -13,20 +13,20 @@
  * margin measured from this firmware's own link, with the seam retained:
  *
  *   IMPL    cycles/block   key sched   SRAM added   .highcode   stack margin
- *   ASM_A        1,944      60,538        840 B       404 B        2,164 B
+ *   ASM_A        1,944      59,113        840 B       404 B        2,164 B
  *   ASM_F        3,797         n/m        432 B         0 B        2,572 B
- *   C           43,510      47,759        432 B         0 B        2,572 B
+ *   C           43,396      45,378        432 B         0 B        2,572 B
  *
  * Cycles are measured by firmware/validation on production-faithful silicon and
  * reproduce bit-identically between runs; ASM_F's is a bench figure (n/m here)
  * because that backend cannot be built while CORECFGR bit 3 is clear.
  *
- * ASM_A's KEY SCHEDULE IS SLOWER THAN THE PORTABLE ONE -- 60,538 against
- * 47,759 -- and that is deliberate, not a defect. Variant A holds the state as
+ * ASM_A's KEY SCHEDULE IS SLOWER THAN THE PORTABLE ONE -- 59,113 against
+ * 45,378 -- and that is deliberate, not a defect. Variant A holds the state as
  * four ROW words, so hal_aes_ch570.c transposes the schedule once at set_key
  * time, which is what makes AddRoundKey four plain word loads inside the
- * kernel. The extra ~12,800 cycles are repaid after 0.31 blocks, since each
- * block is 41,566 cycles cheaper than the portable backend. Both schedules are
+ * kernel. The extra ~13,700 cycles are repaid after 0.33 blocks, since each
+ * block is 41,452 cycles cheaper than the portable backend. Both schedules are
  * ordinary C in flash; there is no hand-written assembly key schedule for any
  * backend, and adding one is not the lever here -- see the note below.
  *
@@ -37,7 +37,7 @@
  * NOTE THE C ROW. The portable backend is FLASH-resident, because aes_sw.c is
  * shared with CH592 and carries no chip-specific section attributes -- putting
  * __HIGH_CODE in common code to suit one part would be wrong. So C costs
- * 43,510 cycles/block, 435 us, 50% of a poll slot. It exists for PORTABILITY,
+ * 43,396 cycles/block, 434 us, 50% of a poll slot. It exists for PORTABILITY,
  * not performance: it is what a future chip gets before anyone writes assembly
  * for it, and it is what firmware/tests/test_aes_sw.py exercises on the host.
  * Do not select it on CH570 expecting the 2,133-cycle figure quoted in

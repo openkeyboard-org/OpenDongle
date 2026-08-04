@@ -105,10 +105,22 @@ which is the property the suite exists to prove:
 
 | arm | chip | fold | cycles/block | key schedule |
 |---|---|---|---|---|
-| `ch570-asm-a` | CH570 @100 MHz | `b106130c` | 1,944 | 60,538 |
-| `ch570-c` | CH570 @100 MHz | `b106130c` | 43,510 | 47,759 |
-| `ch572-hw` | CH572 @100 MHz | `b106130c` | 4,139 | 5,158 |
-| `ch592-hw` | CH592 @60 MHz | `b106130c` | 885 | 1,359 |
+| `ch570-asm-a` | CH570 @100 MHz | `b106130c` | 1,944 | 59,113 |
+| `ch570-c` | CH570 @100 MHz | `b106130c` | 43,396 | 45,378 |
+| `ch572-hw` | CH572 @100 MHz | `b106130c` | 4,011 | 5,126 |
+| `ch572-asm-a` | CH572 @100 MHz | `b106130c` | 1,944 | 59,113 |
+| `ch592-hw` | CH592 @60 MHz | `b106130c` | 865 | 1,359 |
+
+`ch572-asm-a` exists so the software-vs-hardware comparison is same-silicon:
+**the assembly kernel is 2.06x faster than the hardware engine** on the part
+that has the engine (1,944 against 4,011). The engine core is not slow, its
+driver is -- it reloads the key and shuffles data through registers on every
+block. The key schedule inverts it, so the engine wins below ~27 blocks per key.
+
+Precision: the SRAM-resident kernel is exactly reproducible (1,944 on every
+build, both chips). Flash-resident figures move up to ~3% when unrelated code
+shifts the link, since with the loop buffer off their cost is dominated by
+instruction fetch. Read the flash rows to two significant figures.
 
 Cycle figures are measured in-loop and include call overhead, so they run a
 little above the kernel-only costs quoted in `hal_aes.h`. Two of them are not
