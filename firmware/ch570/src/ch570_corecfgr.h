@@ -43,7 +43,11 @@
 #define CH570_CORECFGR_ROM_LOOP_ACC  0x08
 #define CH570_CORECFGR_IE_REMAP_EN   0x20
 
-/* The value reset_handler_ch570.S writes to CSR 0xBC0. Change it in ONE place. */
-#define CH570_CORECFGR_VALUE         0x25
+/* The value reset_handler_ch570.S writes to CSR 0xBC0. Change it in ONE place.
+ *
+ * EXPERIMENT: 0x2D turns ROM_LOOP_ACC on. Not yet approved for production --
+ * the RF end-to-end A/B described below has not been run, and the vendor delay
+ * loop hazard is real. This branch exists to measure what it buys. */
+#define CH570_CORECFGR_VALUE         0x2D
 
 #endif /* CH570_CORECFGR_H */

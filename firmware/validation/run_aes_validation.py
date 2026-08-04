@@ -180,7 +180,10 @@ def read_keep(probe, manifest):
     if not addr or probe.dry_run:
         return None
     out = Path(manifest["bin"]).with_suffix(".keep.bin")
-    probe.check("-r", str(out), addr, "20", what="retained diagnosis read")
+    # 32 bytes = 8 words, the whole block. Reading only the first five silently
+    # hid every field beyond VK_STAGE, which defeated a later addition without
+    # any error -- the parse just saw a short list.
+    probe.check("-r", str(out), addr, "32", what="retained diagnosis read")
     # A short or odd-length read is a probe problem, not a device verdict. Left
     # unguarded it raised LogError out of run_arm, which only catches InfraError,
     # and the whole suite died with a traceback instead of reporting one bad arm.
@@ -280,9 +283,18 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     # finding, and the retained snapshot deliberately hides it from the log.
     if keep:
         rec.keep = keep
-        if keep["boots"] > 1:
-            note = (f"the part booted {keep['boots']} times during this run "
-                    f"(reset status {keep['reset_status']:#04x}, furthest stage "
+        # CUMULATIVE, not per-run: retained RAM survives reflashing, so this
+        # counter climbs across runs. Reporting it raw once read "booted 50
+        # times during this run" when the run accounted for about five -- the
+        # difference between a part in a reset loop and a part behaving
+        # normally, and it sent a whole investigation down the wrong path. Two
+        # or three of those are the erase and the reboot this runner performs
+        # itself, so a healthy arm shows a small delta.
+        booted = keep["boots"] - boots_before
+        if booted > 4:
+            note = (f"the part booted {booted} times during this run "
+                    f"(cumulative {keep['boots']}, reset status "
+                    f"{keep['reset_status']:#04x}, furthest stage "
                     f"{keep['stage']})")
             if retained:
                 print(f"    note: {note}; results are from the retained "
