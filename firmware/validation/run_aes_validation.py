@@ -68,6 +68,7 @@ ARMS = {
     "ch570-asm-f": "ch570",
     "ch570-c": "ch570",
     "ch572-hw": "ch572",
+    "ch572-asm-a": "ch572",
     "ch592-hw": "ch592",
 }
 

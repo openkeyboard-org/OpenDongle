@@ -19,7 +19,7 @@ SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 .DELETE_ON_ERROR:
 
-ARMS := ch570-asm-a ch570-asm-f ch570-c ch572-hw ch592-hw
+ARMS := ch570-asm-a ch570-asm-f ch570-c ch572-hw ch572-asm-a ch592-hw
 ARM ?= ch570-asm-a
 
 COMMON := ../common
@@ -54,6 +54,13 @@ else ifeq ($(ARM),ch572-hw)
   CHIP := ch570
   BACKEND_ID := 4
   USE_HW_AES := 1
+else ifeq ($(ARM),ch572-asm-a)
+  # The software kernel on the part that HAS the engine. Exists purely so the
+  # software-vs-hardware comparison is same-silicon: comparing ASM_A on a CH570
+  # against the engine on a CH572 compares two parts as much as two ciphers.
+  CHIP := ch570
+  AES_IMPL := DONGLE_AES_CH570_IMPL_ASM_A
+  BACKEND_ID := 1
 else ifeq ($(ARM),ch592-hw)
   CHIP := ch592
   BACKEND_ID := 4
