@@ -57,6 +57,18 @@ static void record_fault(uint32_t kind)
     __asm__ volatile("csrr %0, 0x342" : "=r"(mcause));
     __asm__ volatile("csrr %0, 0x341" : "=r"(mepc));
     __asm__ volatile("csrr %0, 0x343" : "=r"(mtval));
+    /*
+     * Stamp a minimal header first. A fault before main() has written the log
+     * header leaves aes_log[0] zero, and the reader rejects the whole dump on
+     * bad magic -- so the fault record four words later, the only evidence of
+     * what happened, is never even looked at. Exactly the early faults hardest
+     * to debug are the ones that would be invisible. These are the same values
+     * main() writes, so stamping them here is idempotent on a normal run.
+     */
+    aes_log[0] = AES_LOG_MAGIC;
+    aes_log[1] = AES_LOG_VERSION;
+    aes_log[2] = AES_LOG_START;
+
     aes_log[AES_LOG_FAULT_SLOT + 0u] = AES_LOG_FAULT_MAGIC | kind;
     aes_log[AES_LOG_FAULT_SLOT + 1u] = mcause;
     aes_log[AES_LOG_FAULT_SLOT + 2u] = mepc;

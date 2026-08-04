@@ -49,11 +49,19 @@ make aes-hw-build MRS_TOOLCHAIN=<gcc bin dir>
 # See exactly what would happen, contact nothing.
 make aes-hw-validate AES_HW_ARGS="--dry-run" MRS_TOOLCHAIN=<gcc bin dir>
 
-# For real.
+# For real. Name a probe per chip you have.
 make aes-hw-validate MRS_TOOLCHAIN=<gcc bin dir> \
-    AES_HW_CH570=<probe serial> AES_HW_CH592=<probe serial> \
-    AES_HW_ARGS="--confirm-erase 1"
+    AES_HW_CH570=<probe serial> AES_HW_CH572=<probe serial> \
+    AES_HW_CH592=<probe serial> \
+    AES_HW_ARGS="--confirm-erase 1 --allow-skips 1"
 ```
+
+`--allow-skips 1` is needed for any run that does not cover every arm, and one
+always does: `ch570-asm-f` cannot be built while CORECFGR bit 3 is clear. Without
+it the run reports `INCOMPLETE` and exits 1 even though every arm that ran
+passed. That default is deliberate -- a suite that quietly tests a subset and
+prints PASS is worse than one that fails -- so pass the flag when a partial run
+is what you meant, and leave it off in CI.
 
 Probe serials are **required per chip and never guessed**. With several probes
 attached, minichlink picks one arbitrarily and says so only in a warning; a

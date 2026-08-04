@@ -298,6 +298,16 @@ def parse(words) -> Record:
             i += 2
             continue
 
+        # Running into the unwritten tail of the buffer is a TRUNCATED record,
+        # not a desync: the harness stopped before it got here. Distinguishing
+        # them matters because they are different verdicts -- a truncated record
+        # is a device that hung (an assertion failure), while a desync is the
+        # reader disagreeing with the firmware (an infrastructure failure). A
+        # real desync has non-zero garbage in it, so an all-zero tail is
+        # unambiguous.
+        if all(x == 0 for x in words[i:]):
+            break
+
         raise LogError(
             f"unrecognised word {w:#010x} at offset {i}: the log is out of sync "
             "with this reader. Not skipping it -- scanning forward would "

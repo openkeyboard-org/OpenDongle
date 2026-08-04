@@ -137,7 +137,10 @@ def build_arm(arm, toolchain, verbose=False):
     cmd = ["make", "-C", str(HERE), f"ARM={arm}"]
     if toolchain:
         cmd.append(f"MRS_TOOLCHAIN={toolchain}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired as exc:
+        raise InfraError(f"build for {arm} timed out after 600s") from exc
     if proc.returncode != 0:
         raise InfraError(f"build failed for {arm}:\n{proc.stdout[-1500:]}\n"
                          f"{proc.stderr[-1500:]}")
@@ -177,8 +180,14 @@ def read_keep(probe, manifest):
         return None
     out = Path(manifest["bin"]).with_suffix(".keep.bin")
     probe.check("-r", str(out), addr, "20", what="retained diagnosis read")
-    w = R.words_from_bytes(out.read_bytes())
-    if w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
+    # A short or odd-length read is a probe problem, not a device verdict. Left
+    # unguarded it raised LogError out of run_arm, which only catches InfraError,
+    # and the whole suite died with a traceback instead of reporting one bad arm.
+    try:
+        w = R.words_from_bytes(out.read_bytes())
+    except R.LogError as exc:
+        raise InfraError(f"malformed retained-diagnosis read: {exc}") from exc
+    if len(w) < 5 or w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
         return None
     return {"boots": w[1], "reset_status": w[2],
             "wdog_ctrl": w[3] & 0xFF, "wdog_count": (w[3] >> 8) & 0xFF,
@@ -205,7 +214,10 @@ def read_log(probe, manifest, boots_before=0):
         out = Path(manifest["bin"]).with_suffix(".saved.bin")
         probe.check("-r", str(out), saved_addr, str(nbytes + 12),
                     what="retained log read")
-        w = R.words_from_bytes(out.read_bytes())
+        try:
+            w = R.words_from_bytes(out.read_bytes())
+        except R.LogError as exc:
+            raise InfraError(f"malformed retained-log read: {exc}") from exc
         # w[2] is the boot the snapshot was taken on. Retained RAM survives
         # reflashing, so a snapshot from an earlier run of the SAME build would
         # otherwise pass the build-id check and be reported as this run's
@@ -219,7 +231,10 @@ def read_log(probe, manifest, boots_before=0):
                 what="live log read")
     if probe.dry_run:
         return [], False
-    return R.words_from_bytes(out.read_bytes()), False
+    try:
+        return R.words_from_bytes(out.read_bytes()), False
+    except R.LogError as exc:
+        raise InfraError(f"malformed live-log read: {exc}") from exc
 
 
 def run_arm(arm, probe, manifest, settle_s, exp, fold):

@@ -23,7 +23,14 @@ typedef struct {
 /* Expand a 16-byte key into `ctx`. The expensive half; do it once per key. */
 void aes_sw_expand_key(aes_sw_ctx_t *ctx, const uint8_t key[16]);
 
-/* Encrypt one 16-byte block. `out` may alias `in` exactly. */
+/* Encrypt one 16-byte block.
+ *
+ * ANY overlap of `out` and `in` is safe, not just exact aliasing: all 16 input
+ * bytes are read before any output byte is written. This matches the hal_aes.h
+ * contract, and firmware/tests/test_aes_sw.py exercises `out = in + 1` against
+ * this very source -- the case that catches an implementation which writes as
+ * it goes. The comment previously promised only exact aliasing, which would
+ * have pushed callers into pointless copies. */
 void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
                           uint8_t out[16]);
 

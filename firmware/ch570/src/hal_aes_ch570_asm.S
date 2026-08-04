@@ -507,8 +507,14 @@ aes_a_rk:
 
 /* ==========================================================================
  * VARIANT F — flash-resident, shaped to the 128-byte ROM loop buffer.
- * 3,797 cycles/block measured in this firmware's own link (a bench build of
- * the same kernel measured 3,796 -- link alignment, not a behaviour change);
+ * 3,797 cycles/block is a BENCH figure, not re-confirmed in this repository
+ * (a bench build of the same kernel measured 3,796 -- link alignment, not a
+ * behaviour change). It cannot be: this backend refuses to compile while
+ * CORECFGR bit 3 is clear, which production leaves clear, so
+ * firmware/validation reports the ASM_F arm as skipped and never measures it.
+ * Since ASM_F only ever runs with the ROM loop buffer enabled, a
+ * buffer-enabled bench measurement is the right one for it -- but it is
+ * unverified here, and hal_aes.h marks it n/m for the same reason.
  * ZERO bytes of code in SRAM, 432 B of data (256 B S-box +
  * 176 B schedule). Leaves the radio .highcode entirely untouched.
  *

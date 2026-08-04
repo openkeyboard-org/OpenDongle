@@ -17,18 +17,25 @@
  * WHAT IT ACTUALLY COSTS, CH570 at 100 MHz, one AES-128 block, against the
  * 875 us connected-poll slot:
  *
- *   byte-oriented, S-box in flash    60272 cycles   603 us   69% of the slot
- *   THIS, flash-resident             29544 cycles   295 us   34% of the slot
+ *   THIS, flash-resident             43510 cycles   435 us   50% of the slot
  *   THIS, if relocated into SRAM      1680 cycles    17 us    1.9% of the slot
  *
- * A third of the poll slot is not free. The SRAM figure is the same code, and
+ * The flash-resident row is measured by firmware/validation on production-
+ * faithful silicon: WCH GCC 15.2, -march=rv32imc_zba_zbb_zbc_zbs_xw, 100 MHz,
+ * CORECFGR = 0x25 with ROM_LOOP_ACC CLEAR, cipher left in flash. It replaces a
+ * figure of 29,544 that was taken under a bench harness which enabled the loop
+ * buffer, and with SysTick counting HCLK/8 -- neither of which production does.
+ * The SRAM row is still a bench estimate and has NOT been re-measured; treat
+ * the ~26x ratio as indicative rather than as a result.
+ *
+ * HALF the poll slot is not free. The SRAM figure is the same code, and
  * the gap is instruction fetch: 16.4 core cycles per instruction from flash
  * versus 1.02 from SRAM. If AES ever lands on the hot path, relocating it is
  * worth more (~17x) than every source-level optimisation here combined -- the
  * obstacle is that the hot path is ~2.3 KB against ~3 KB of free SRAM.
  *
  * WHY THIS SHAPE, in TICKS (multiply by 8 for core cycles), production
- * toolchain and ISA (MounRiver GCC 12.2, -march=rv32imc_zba_zbb_zbc_zbs_xw);
+ * toolchain and ISA (MounRiver GCC 15.2, -march=rv32imc_zba_zbb_zbc_zbs_xw);
  * xPack-compiled numbers differ 5-8% and are not what ships:
  *
  *   byte-oriented, S-box in flash          7534   <- what this replaces
@@ -72,24 +79,24 @@
  *     emitted automatically with no intrinsics; nothing further to exploit.
  *   - Zba/Zbb are worth *exactly zero* to byte-at-a-time code (the old version
  *     compiled byte-identically with and without them), and their value here is
- *     a property of the COMPILER, not the silicon. On the pinned GCC 12.2 they
- *     are a 7.6% pessimisation (4674 with, 4344 without). On WCH's GCC 15.2 the
- *     sign flips and they help by 8.9% (3693 with, 4053 without). Deliberately
- *     NOT worked around with a per-file -march: the workaround a toolchain bump
- *     would silently invert is worse than the 7.6%.
+ *     a property of the COMPILER, not the silicon. On GCC 12.2 they were a 7.6%
+ *     pessimisation (4674 with, 4344 without); on the now-pinned GCC 15.2 the
+ *     sign flips and they HELP by 8.9% (3693 with, 4053 without). Deliberately
+ *     never worked around with a per-file -march -- and that restraint paid off
+ *     exactly as argued: the workaround would have been silently inverted by
+ *     the pin move rather than merely made redundant.
  *
- * TOOLCHAIN NOTE, measured on silicon with this exact source. WCH ships a
- * GCC 15.2 alongside the pinned 12.2 (Toolchain/RISC-V Embedded GCC15, prefix
- * riscv32-wch-elf, accepts the full production -march including _xw):
+ * TOOLCHAIN NOTE, measured on silicon with this exact source:
  *
- *   GCC 12.2 (pinned)   3901 ticks/block, 3304 B
- *   GCC 15.2            3693 ticks/block, 3036 B   (-5.3% time, -8% size)
+ *   GCC 12.2            3901 ticks/block, 3304 B
+ *   GCC 15.2 (pinned)   3693 ticks/block, 3036 B   (-5.3% time, -8% size)
  *
- * So the pinned compiler is leaving ~5% and ~270 B on the table here, and is
- * the sole reason the bitmanip extensions look harmful. Bumping the pin is a
- * project-level decision -- it moves DONGLE_BUILD_ID for the whole firmware,
- * changes PINNED_COMPILER_SHA256 in check_dependencies.py, and obliges a full
- * hardware validation re-run -- so it is recorded here, not taken.
+ * The pin has since MOVED to GCC 15.2 (Toolchain/RISC-V Embedded GCC15, prefix
+ * riscv32-wch-elf, accepts the full production -march including _xw), so this
+ * source now gets that 5% and 270 B, and the bitmanip extensions are a win
+ * rather than the pessimisation they were under 12.2. This note previously read
+ * the other way round -- 12.2 pinned, the bump "recorded here, not taken" --
+ * which the pin move made exactly wrong.
  *
  * There is no inverse cipher on purpose: counter mode encrypts in both
  * directions, so InvMixColumns and the inverse S-box would be dead weight.
