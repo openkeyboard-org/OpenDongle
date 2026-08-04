@@ -191,3 +191,31 @@ Every device written is left running a standalone image with no bootloader:
 ```sh
 make ch570-factory-flash WCHLINK_SERIAL=<serial>
 ```
+
+## CORECFGR bit 3 (ROM_LOOP_ACC): hardware result
+
+Measured and RF-validated on `em-corecfgr-enable`, CH570 at 100 MHz.
+
+| arm | block 0x25 → 0x2D | × | key schedule 0x25 → 0x2D | × |
+|---|---|---:|---|---:|
+| `ch570-asm-a` | 1,944 → 1,672 | 1.16 | **59,113 → 8,901** | **6.64** |
+| `ch570-asm-f` | n/m → 3,992 | — | n/m → 9,429 | — |
+| `ch570-c` | 43,396 → 30,721 | 1.41 | 45,378 → 17,534 | 2.59 |
+| `ch572-hw` | 4,011 → 2,966 | 1.35 | 5,126 → 1,707 | 3.00 |
+
+The win is the key schedule, not the block: ASM_A's goes from 67.6% of an
+875 us poll slot to 10.2%, for zero SRAM. That was the single largest cost in
+the AES story and the reason the seam warns against re-keying inside a slot.
+Every arm still folds `b106130c`. `ch570-asm-f` is measured here for the first
+time — it cannot build at 0x25 — at 3,992 against its unverified bench 3,797.
+
+RF end-to-end on a production keyboard, with `0x2D` and **no** RF guard:
+connect, reconnect, media keys and indicators all work. That exercises both
+sites that reach the vendor bring-up (boot, and the post-bond-save reconnect in
+`rf_task.c`), so the delay-loop hazard did not manifest.
+
+NOT established, and it is the specific risk worth naming: RF **margin**. The
+hazard is a calibration settle collapsing ~99 us to ~3.3 us, and an
+under-settled calibration is exactly the fault that works perfectly at bench
+range and degrades at distance or under interference. A functional pass at
+30 cm does not retire it.
