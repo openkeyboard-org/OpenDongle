@@ -20,9 +20,11 @@
  * was wrong twice over. SysTick was counting HCLK/8, so every measurement was
  * 8x low; and the bench harness ran CORECFGR = 0x0f with the ROM loop buffer
  * enabled, while production boots 0x25 with it clear. The true flash-resident
- * cost is 43,510 cycles -- 435 us, or 50% of the 875 us connected-poll slot,
- * not the ~9% previously recorded here. Relocating the cipher is worth 25x,
- * which changes the trade completely. See bench/aes_spike/CORE-FINDINGS.md.
+ * cost was 43,396 cycles at the then-production CORECFGR 0x25 -- 434 us, half
+ * the 875 us connected-poll slot -- not the ~9% previously recorded here.
+ * Relocating the cipher was worth 25x, which changed the trade completely.
+ * (Production has since moved to 0x2D, where flash-resident C measures 30,721
+ * and SRAM-resident ASM_A 1,672 -- relocation is still worth 18x.) See bench/aes_spike/CORE-FINDINGS.md.
  *
  * The key schedule stays in FLASH on purpose for every backend. It runs once
  * per key, so making it fast buys nothing, and keeping it out of SRAM is what

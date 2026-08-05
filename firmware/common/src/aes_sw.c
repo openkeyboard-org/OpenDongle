@@ -17,18 +17,18 @@
  * WHAT IT ACTUALLY COSTS, CH570 at 100 MHz, one AES-128 block, against the
  * 875 us connected-poll slot:
  *
- *   THIS, flash-resident             43510 cycles   435 us   50% of the slot
- *   THIS, if relocated into SRAM      1680 cycles    17 us    1.9% of the slot
+ *   THIS, flash-resident             30721 cycles   307 us    35% of the slot
+ *   THIS, if relocated into SRAM      1680 cycles    17 us   1.9% of the slot
  *
  * The flash-resident row is measured by firmware/validation on production-
  * faithful silicon: WCH GCC 15.2, -march=rv32imc_zba_zbb_zbc_zbs_xw, 100 MHz,
- * CORECFGR = 0x25 with ROM_LOOP_ACC CLEAR, cipher left in flash. It replaces a
- * figure of 29,544 that was taken under a bench harness which enabled the loop
- * buffer, and with SysTick counting HCLK/8 -- neither of which production does.
- * The SRAM row is still a bench estimate and has NOT been re-measured; treat
- * the ~26x ratio as indicative rather than as a result.
+ * CORECFGR = 0x2D with the ROM loop buffer ON (the production value since the
+ * 0x25 -> 0x2D flip; the same silicon measured 43,396 at 0x25). It replaces a
+ * figure of 29,544 that was taken with SysTick counting HCLK/8, which nothing
+ * production does. The SRAM row is still a bench estimate and has NOT been
+ * re-measured; treat the ratio as indicative rather than as a result.
  *
- * HALF the poll slot is not free. The SRAM figure is the same code, and
+ * A THIRD of the poll slot is not free. The SRAM figure is the same code, and
  * the gap is instruction fetch: 16.4 core cycles per instruction from flash
  * versus 1.02 from SRAM. If AES ever lands on the hot path, relocating it is
  * worth more (~17x) than every source-level optimisation here combined -- the
