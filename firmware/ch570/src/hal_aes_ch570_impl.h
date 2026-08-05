@@ -15,9 +15,12 @@
  * retained:
  *
  *   IMPL    cycles/block   key sched   SRAM added   .highcode   stack margin
- *   ASM_A        1,672       8,899        840 B       404 B        2,164 B
- *   ASM_F        3,992       9,429        432 B         0 B        2,572 B
- *   C           30,721      17,535        432 B         0 B        2,572 B
+ *   ASM_A        1,672       7,647        840 B       404 B        2,164 B
+ *   ASM_F        3,960       7,405        432 B         0 B        2,572 B
+ *   C           30,694      16,543        432 B         0 B        2,572 B
+ *
+ * Key schedules timed with the key in SRAM (the production regime); see
+ * validation/README.md "the key-schedule numbers" for why that matters.
  *
  * All figures are from firmware/validation and reproduce to the cycle across
  * independent sweeps (key schedules within +/-2). They measure identically on
@@ -29,9 +32,9 @@
  * AddRoundKey four plain word loads inside the kernel. At 0x25 the transpose
  * made ASM_A's schedule SLOWER than portable C's (59,113 vs 45,378); under the
  * loop buffer the tight transpose loop accelerates 6.6x and the relationship
- * flips (8,899 vs 17,535). Either way both schedules are ordinary C in flash;
+ * flips (7,647 vs 16,543). Either way both schedules are ordinary C in flash;
  * there is no hand-written assembly key schedule for any backend, and adding
- * one is not a useful lever: 8,899 cycles once per key is 10.2% of one poll
+ * one is not a useful lever: 7,647 cycles once per key is 8.7% of one poll
  * slot, and re-keying happens outside the poll grid regardless.
  *
  * The 875 us connected-poll slot is 87,500 cycles. The linker asserts a 2,048 B
@@ -41,7 +44,7 @@
  * NOTE THE C ROW. The portable backend is FLASH-resident, because aes_sw.c is
  * shared with CH592 and carries no chip-specific section attributes -- putting
  * __HIGH_CODE in common code to suit one part would be wrong. So C costs
- * 30,721 cycles/block, 307 us, 35% of a poll slot. It exists for PORTABILITY,
+ * 30,694 cycles/block, 307 us, 35% of a poll slot. It exists for PORTABILITY,
  * not performance: it is what a future chip gets before anyone writes assembly
  * for it, and it is what firmware/tests/test_aes_sw.py exercises on the host.
  * Do not select it on CH570 expecting the 2,133-cycle figure quoted in
@@ -82,8 +85,8 @@
  * estimated 42,000-68,000 cycles/block — no better than an unoptimised
  * flash-resident cipher and possibly worse, which is why the guard below
  * refuses the build rather than let that ship silently. Production now boots
- * CORECFGR = 0x2D, so ASM_F builds and is silicon-validated (3,992
- * cycles/block, fold b106130c); if the startup value ever returns to 0x25 the
+ * CORECFGR = 0x2D, so ASM_F builds and is silicon-validated (3,960-3,992
+ * cycles/block, layout band, fold b106130c); if the startup value ever returns to 0x25 the
  * guard resumes refusing. See ch570_corecfgr.h for why 0x2D specifically
  * (ch32fun's 0x0f/0x1f clear IE_REMAP_EN, which makes CSR 0x800 read-only and
  * silently breaks __enable_irq/__disable_irq).

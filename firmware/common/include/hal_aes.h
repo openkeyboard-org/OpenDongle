@@ -51,14 +51,21 @@
  *    875 us connected poll, so 87,500 cycles:
  *
  *      backend         cycles/block   % slot   key schedule   % slot
- *      ASM_A (default)      1,672      1.9%          8,899    10.2%
- *      ASM_F                3,992      4.6%          9,429    10.8%
- *      C (portable)        30,721       35%         17,535    20.0%
+ *      ASM_A (default)      1,672      1.9%          7,647     8.7%
+ *      ASM_F                3,960      4.5%          7,405     8.5%
+ *      C (portable)        30,694       35%         16,543    18.9%
+ *
+ *    Key schedules are timed with the key in SRAM -- the production regime
+ *    (keys come from the bond record in RAM). Earlier figures used the
+ *    flash-resident KAT key, which inflated them 10-15% here and up to 5x on
+ *    the hardware engines; see validation/README.md, "the key-schedule
+ *    numbers", for the anatomy.
  *
  *    The hardware engines, measured on their own silicon and clock:
  *
- *      CH572 hardware, 100 MHz:  2,966 cycles/block,  29.7 us,  3.4% of slot
- *      CH592 hardware,  60 MHz:    865 cycles/block,  14.4 us,  1.6% of slot
+ *      CH572 hardware, 100 MHz:  2,967 cycles/block,  29.7 us,  3.4% of slot
+ *      CH592 hardware,  60 MHz:    871 cycles/block,  14.5 us,  1.7% of slot
+ *      (key schedule: 322 cycles on CH572, 838 on CH592, SRAM-key regime)
  *
  *    Every figure is a true core-cycle count measured by firmware/validation on
  *    silicon under the production startup, and reproduced to the cycle across
@@ -69,11 +76,11 @@
  *    lets either part stand in for the other on the bench.
  *
  *    THE SOFTWARE KERNEL BEATS THE HARDWARE ENGINE on the part that has one:
- *    ASM_A 1,672 against the engine's 2,966 on the same CH572, 1.8x. The
+ *    ASM_A 1,672 against the engine's 2,967 on the same CH572, 1.8x. The
  *    engine core is not slow; its driver reloads the key and shuffles four
  *    data words each way on EVERY block (the engine keeps no key across its
- *    reset pulse). The key schedule leans the other way -- 8,899 against
- *    1,707 -- so the engine wins below ~6 blocks per key and the software
+ *    reset pulse). The key schedule leans the other way -- 7,647 against
+ *    322 -- so the engine wins below ~6 blocks per key and the software
  *    kernel above; a CTR link re-keying per session is far above that.
  *
  *    THE KEY SCHEDULE COLUMN is the number that used to constrain callers
