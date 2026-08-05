@@ -108,12 +108,12 @@ prove:
 
 | arm | chip | fold | cycles/block | key schedule |
 |---|---|---|---|---|
-| `ch570-asm-a` | V3C @100 MHz | `b106130c` | 1,672 | 8,899 |
-| `ch570-asm-f` | V3C @100 MHz | `b106130c` | 3,992 | 9,429 |
-| `ch570-c` | V3C @100 MHz | `b106130c` | 30,721 | 17,535 |
-| `ch572-hw` | CH572 @100 MHz | `b106130c` | 2,966 | 1,707 |
-| `ch572-asm-a` | CH572 @100 MHz | `b106130c` | 1,672 | 8,899 |
-| `ch592-hw` | CH592 @60 MHz | `b106130c` | 865 | 1,359 |
+| `ch570-asm-a` | V3C @100 MHz | `b106130c` | 1,672 | 7,647 |
+| `ch570-asm-f` | V3C @100 MHz | `b106130c` | 3,960 | 7,405 |
+| `ch570-c` | V3C @100 MHz | `b106130c` | 30,694 | 16,543 |
+| `ch572-hw` | CH572 @100 MHz | `b106130c` | 2,967 | 322 |
+| `ch572-asm-a` | CH572 @100 MHz | `b106130c` | 1,672 | 7,647 |
+| `ch592-hw` | CH592 @60 MHz | `b106130c` | 871 | 838 |
 
 The V3C rows measure identically on CH570 and CH572 silicon — same core, same
 buffer — which is what lets either part stand in for the other on the bench,
@@ -131,11 +131,53 @@ block. The key schedule leans the other way (8,899 against 1,707), so the
 engine wins below ~6 blocks per key and the software kernel above.
 
 Cycle figures are measured in-loop and include call overhead, so they run a
-little above kernel-only costs quoted in bench material. One number remains
-unreconciled and should not be over-read: the hardware arms report a
-key-schedule cost (CH572 1,707, CH592 1,359) far above what caching four words
-can plausibly take. Treat the hardware key-schedule column as a regression
-signal, not a cost model.
+little above kernel-only costs quoted in bench material. The key-schedule
+column is timed with the key in SRAM -- the production regime, since real keys
+come from the bond record in RAM. It was previously timed with the flash-
+resident KAT constant, which inflated the hardware arms 2-10x and looked like
+an anomaly; the anatomy below is what that investigation found.
+
+
+## The key-schedule numbers: an anatomy
+
+The hardware arms once reported a key-schedule cost "far above what caching
+four words can plausibly take" (CH572 5,126 at CORECFGR 0x25, 1,707 at 0x2D;
+CH592 1,359), with a CH572/CH592 ratio that did not match the clock ratio.
+Investigated to closure; three stacked causes, none of them the driver's logic
+or the engine:
+
+1. **The code is not what the source says.** GCC 15.2 at -O2 compiles the
+   driver's "cache four words" loop into a tail call to newlib-nano's memcpy —
+   a one-byte-per-iteration loop, ~110 flash-resident instructions per call.
+2. **The measured key lived in flash.** The KAT constant is `.rodata`, so every
+   call did 16 flash *data* reads. Measured on CH572 @0x2D with matched loops:
+   the identical 16-byte copy costs 118 cycles from an SRAM source and ~1,760
+   from a flash source. A discriminator (same bytes as 4 aligned word loads:
+   182 cycles) shows the penalty is **per access**, roughly 10x worse for byte
+   loads than word loads; source alignment is a ~5% effect, no cliff.
+3. **On CH592, instruction fetch itself.** The V4C core has no loop buffer and
+   its 60 MHz flash fetch measured ~4.1 cycles/instruction even straight-line,
+   so the ~110-instruction loop dominates: ~800 of the 1,359 was fetch.
+
+The clock-ratio "anomaly" dissolves accordingly: the two parts differ in fetch
+and data-path architecture, not just clock.
+
+Two lessons the investigation itself paid for, worth keeping:
+
+- **Micro-benchmarks under the loop buffer are placement-sensitive.** An empty
+  call+ret probe measured 160 cycles in one layout and 13 in the next; the
+  set_key field moved 12% from unrelated harness edits. Individual small
+  figures at 0x2D are not stable; only deltas between matched loops in the
+  same image are. (This is also why the flash-resident block figures carry a
+  two-significant-figures caveat.)
+- **Time the regime that ships.** The field now measures set_key with an SRAM
+  key; the flash-key worst case and the full decomposition remain available by
+  building an arm with `EXTRA_CFLAGS=-DDONGLE_VALIDATE_TIMING_PROBE`, which
+  emits timing tags 3-9.
+
+The switch to SRAM-key semantics also lowered the software arms' key-schedule
+figures ~10-15% (e.g. ASM_A 8,899 to 7,647) — their real expansion work had the
+same 16 flash key-byte reads buried in it.
 
 ## How results come back
 

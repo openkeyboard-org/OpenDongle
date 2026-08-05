@@ -476,11 +476,25 @@ static void timings(void)
     put(AES_LOG_TIMING_BASE | AES_LOG_TIME_OVERHEAD);
     put(t1 - t0);
 
-    hal_aes_set_key(k_fips);
+    /*
+     * Time set_key with the key in SRAM, because that is the production
+     * regime: real keys come from the bond record in RAM. Timing it with the
+     * flash-resident KAT constant instead once produced numbers 2-10x higher
+     * and kicked off a whole investigation -- on the hardware backends
+     * set_key compiles to a tail call into newlib-nano's one-byte-loop
+     * memcpy, and each flash DATA access costs tens of cycles (a per-access
+     * penalty: reading the same 16 bytes as 4 word loads is ~10x cheaper
+     * than as 16 byte loads on V3C). The flash-key worst case remains
+     * measurable via DONGLE_VALIDATE_TIMING_PROBE.
+     */
+    uint8_t key_sram[16];
+    for (uint32_t i = 0; i < 16u; i++)
+        key_sram[i] = k_fips[i];
+    hal_aes_set_key(key_sram);
     BARRIER();
     t0 = cycles();
     for (uint32_t i = 0; i < 64u; i++)
-        hal_aes_set_key(k_fips);
+        hal_aes_set_key(key_sram);
     BARRIER();
     t1 = cycles();
     put(AES_LOG_TIMING_BASE | AES_LOG_TIME_KEY_EXPAND);
@@ -498,6 +512,99 @@ static void timings(void)
     put(AES_LOG_TIMING_BASE | AES_LOG_TIME_BLOCK);
     put((t1 - t0) / 256u);
 }
+
+#ifdef DONGLE_VALIDATE_TIMING_PROBE
+/* ------------------------------------------------------- timing decomposition
+ *
+ * One-off experiment support for the "hardware arms report an implausible key
+ * schedule" investigation. Emits extra timing records (tags 3..7) that the
+ * reader prints as "timing N". Decomposes hal_aes_set_key's measured cost:
+ * it compiles to a tail call into newlib-nano's one-byte-loop memcpy, all
+ * flash-resident, with the KAT key itself in flash .rodata -- so the number
+ * mixes call overhead, loop fetch rate, and flash DATA reads.
+ */
+__attribute__((noinline)) static void probe_empty(void) { __asm__ volatile(""); }
+
+static uint8_t probe_dst[16];
+/* 20 bytes of flash constants, word-aligned, extra word so a +1-offset 16-byte
+ * read stays in bounds. volatile-read in tag 8 so the loads cannot be elided. */
+static const uint32_t probe_flash_words[5] = {
+    0xA1B2C3D4u, 0x11223344u, 0x55667788u, 0x99AABBCCu, 0xDDEEFF00u };
+static uint8_t probe_src_sram[16];
+
+__attribute__((noinline)) static void probe_copy(uint8_t *d, const uint8_t *s)
+{
+    /* Same shape as nano memcpy's inner loop: byte copy, 16 iterations. */
+    for (uint32_t i = 0; i < 16u; i++)
+        d[i] = s[i];
+}
+
+static void timing_probe(void)
+{
+    uint32_t t0, t1;
+
+    /* tag 3: 64x call+ret to an empty noinline function -- call machinery. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++)
+        probe_empty();
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 3u); put((t1 - t0) / 64u);
+
+    /* tag 4: 64x straight-line 32 nops -- straight-line flash fetch rate. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++) {
+        __asm__ volatile(
+            "nop;nop;nop;nop;nop;nop;nop;nop;"
+            "nop;nop;nop;nop;nop;nop;nop;nop;"
+            "nop;nop;nop;nop;nop;nop;nop;nop;"
+            "nop;nop;nop;nop;nop;nop;nop;nop;");
+    }
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 4u); put((t1 - t0) / 64u);
+
+    /* tag 5: 64x byte-copy loop, SRAM source -- loop fetch + SRAM data. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++)
+        probe_copy(probe_dst, probe_src_sram);
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 5u); put((t1 - t0) / 64u);
+
+    /* tag 6: 64x byte-copy loop, FLASH source (the KAT key) -- adds 16 flash
+     * data reads per call, the same mix hal_aes_set_key actually executes. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++)
+        probe_copy(probe_dst, k_fips);
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 6u); put((t1 - t0) / 64u);
+
+    /* tag 7: 64x the real thing again, for drift control vs tag 1's field. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++)
+        hal_aes_set_key(k_fips);
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 7u); put((t1 - t0) / 64u);
+
+    /* tag 8: 16 flash bytes as 4 ALIGNED WORD loads. Discriminates per-BYTE
+     * read amplification (word cost ~= byte cost / 4) from a per-ACCESS
+     * penalty such as prefetch or loop-buffer disturbance (word ~= byte). */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++) {
+        const volatile uint32_t *s = probe_flash_words;
+        volatile uint32_t *d = (volatile uint32_t *)(void *)probe_dst;
+        d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
+    }
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 8u); put((t1 - t0) / 64u);
+
+    /* tag 9: the byte copy again from flash at +1 offset -- alignment
+     * sensitivity of the data path itself. */
+    BARRIER(); t0 = cycles();
+    for (uint32_t i = 0; i < 64u; i++)
+        probe_copy(probe_dst, ((const uint8_t *)probe_flash_words) + 1);
+    BARRIER(); t1 = cycles();
+    put(AES_LOG_TIMING_BASE | 9u); put((t1 - t0) / 64u);
+}
+#endif /* DONGLE_VALIDATE_TIMING_PROBE */
 
 /* --------------------------------------------------------------------- main */
 
@@ -540,6 +647,9 @@ int main(void)
     differential();
     vkeep_stage(3u);
     timings();
+#ifdef DONGLE_VALIDATE_TIMING_PROBE
+    timing_probe();
+#endif
     vkeep_stage(4u);
 
     /*

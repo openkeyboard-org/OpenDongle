@@ -15,9 +15,12 @@
  * retained:
  *
  *   IMPL    cycles/block   key sched   SRAM added   .highcode   stack margin
- *   ASM_A        1,672       8,899        840 B       404 B        2,164 B
- *   ASM_F        3,992       9,429        432 B         0 B        2,572 B
- *   C           30,721      17,535        432 B         0 B        2,572 B
+ *   ASM_A        1,672       7,647        840 B       404 B        2,164 B
+ *   ASM_F        3,992       7,405        432 B         0 B        2,572 B
+ *   C           30,721      16,543        432 B         0 B        2,572 B
+ *
+ * Key schedules timed with the key in SRAM (the production regime); see
+ * validation/README.md "the key-schedule numbers" for why that matters.
  *
  * All figures are from firmware/validation and reproduce to the cycle across
  * independent sweeps (key schedules within +/-2). They measure identically on
@@ -29,9 +32,9 @@
  * AddRoundKey four plain word loads inside the kernel. At 0x25 the transpose
  * made ASM_A's schedule SLOWER than portable C's (59,113 vs 45,378); under the
  * loop buffer the tight transpose loop accelerates 6.6x and the relationship
- * flips (8,899 vs 17,535). Either way both schedules are ordinary C in flash;
+ * flips (7,647 vs 16,543). Either way both schedules are ordinary C in flash;
  * there is no hand-written assembly key schedule for any backend, and adding
- * one is not a useful lever: 8,899 cycles once per key is 10.2% of one poll
+ * one is not a useful lever: 7,647 cycles once per key is 8.7% of one poll
  * slot, and re-keying happens outside the poll grid regardless.
  *
  * The 875 us connected-poll slot is 87,500 cycles. The linker asserts a 2,048 B

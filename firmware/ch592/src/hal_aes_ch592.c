@@ -79,7 +79,16 @@ void hal_aes_init(void)
 void hal_aes_set_key(const uint8_t key[HAL_AES_KEY_BYTES])
 {
     /* The engine has no persistent key register across a CFG reset pulse, so
-     * the key is cached here and reloaded per block. That is a few stores. */
+     * the key is cached here and reloaded per block.
+     *
+     * "A few stores" at the source level -- but GCC compiles this loop into a
+     * tail call to newlib-nano's one-byte-loop memcpy, so what it costs is
+     * dominated by where the KEY BYTES live and where this code sits, not by
+     * the work: with the key in flash it measured 1,359 cycles on CH592 and
+     * up to ~5,100 on CH572 (per-access flash data penalties plus flash
+     * instruction fetch), against ~120-800 with the key in SRAM. Production
+     * keys come from the bond record in RAM, so the SRAM regime is the real
+     * one. See validation/README.md, "the key-schedule numbers". */
     for (uint32_t i = 0; i < 4u; i++)
         aes_key_words[i] = load_le32(&key[4u * i]);
 }

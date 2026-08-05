@@ -160,6 +160,10 @@ ifdef AES_IMPL
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
 endif
 CFLAGS += $(INCLUDES)
+# One-off experiment hook, e.g. make ARM=... EXTRA_CFLAGS=-DFOO. Above the
+# build-id computation on purpose, so an experiment gets its own identity and
+# the flash-verify gate can tell experimental images from standard ones.
+CFLAGS += $(EXTRA_CFLAGS)
 
 LDFLAGS := $(ARCH) -T $(LINK) -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
