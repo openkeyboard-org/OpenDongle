@@ -20,6 +20,7 @@
 
 #include "CH57x_common.h"
 #include "CH572rf.h"
+#include "ch570_corecfgr.h"
 
 /*
  * --- Production RF PHY configuration -----------------------------------------
@@ -225,6 +226,32 @@ void hal_rf_init(void)
     conf.rfProcessCB = RF_ProcessCallBack;
     conf.processMask = RF_STATE_RX | RF_STATE_RX_CRCERR |
                        RF_STATE_TX_FINISH | RF_STATE_TIMEOUT;
+
+    /*
+     * DO NOT suspend ROM_LOOP_ACC (CORECFGR bit 3) around this call.
+     *
+     * It was tried -- a write-only guard that dropped CORECFGR to 0x25 across
+     * RFRole_BasicInit and restored 0x2D after, to protect the ~99 us
+     * calibration settle inside RFEND_DevInit from collapsing to ~3.3 us under
+     * the ROM loop buffer. Measured result, same bench, same day, byte-exact
+     * control image:
+     *
+     *   unguarded 0x2D: pairing 2/2, bond written, HID traffic flows
+     *   guarded   0x2D: pairing 0/2, bond page still blank
+     *
+     * The guard did not protect the radio; it broke it -- and backwards from
+     * the settle-duration theory (production-length settle FAILED, collapsed
+     * settle WORKS). The economical explanation is that the vendor init
+     * derives timing-dependent values consumed later at runtime: calibrate at
+     * 0x25, run at 0x2D, and every such value is ~30x wrong. Whatever the
+     * mechanism, the CONSISTENT configurations both work -- all-0x25 (the old
+     * production value) and all-0x2D each pass pairing, reconnect and traffic;
+     * mixing them fails. Keep CORECFGR at one value for the whole runtime:
+     * whatever reset_handler_ch570.S writes, leave it alone here.
+     *
+     * (Related: never READ CORECFGR to "save" it -- csrr 0xbc0 destabilises
+     * this part outright. It is a write-only register on this silicon.)
+     */
     (void)RFRole_BasicInit(&conf);
 
     tx_param.accessAddress = RF_PAIR_ACCESS_ADDR;
