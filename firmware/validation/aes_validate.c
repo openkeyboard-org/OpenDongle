@@ -517,11 +517,33 @@ static void timings(void)
 /* ------------------------------------------------------- timing decomposition
  *
  * One-off experiment support for the "hardware arms report an implausible key
- * schedule" investigation. Emits extra timing records (tags 3..7) that the
- * reader prints as "timing N" (tags 3..9). Decomposes hal_aes_set_key's measured cost:
- * it compiles to a tail call into newlib-nano's one-byte-loop memcpy, all
- * flash-resident, with the KAT key itself in flash .rodata -- so the number
- * mixes call overhead, loop fetch rate, and flash DATA reads.
+ * schedule" investigation. Emits extra timing records (tags 3..9) that the
+ * reader prints as "timing N".
+ *
+ * IT DECOMPOSES THE FLASH-KEY REGIME, which is NOT what the timing field
+ * reports. Tag 1 (AES_LOG_TIME_KEY_EXPAND) times set_key with an SRAM key,
+ * because that is what production does -- keys come from the bond record in
+ * RAM. The probe deliberately keeps the flash-resident KAT key (k_fips, in
+ * .rodata), because the flash regime is the worst case and was the thing that
+ * needed explaining. So tag 7 is expected to read several times tag 1; that
+ * gap IS the finding, not a discrepancy.
+ *
+ * What it isolates: set_key compiles to a tail call into newlib-nano's
+ * one-byte-loop memcpy, all flash-resident, so its cost mixes call overhead,
+ * loop instruction fetch, and flash DATA reads. The tags separate those:
+ *
+ *   3  empty noinline call+ret        -- call machinery alone
+ *   4  32 straight-line nops          -- straight-line fetch rate
+ *   5  16-byte copy, SRAM source      -- loop fetch + SRAM data
+ *   6  16-byte copy, FLASH source     -- (6 - 5) = the flash data penalty
+ *   7  real set_key, FLASH key        -- the worst case, cf. tag 1
+ *   8  same 16 bytes, 4 word loads    -- (6 vs 8) = per-access vs per-byte
+ *   9  16-byte copy, FLASH source +1  -- data alignment sensitivity
+ *
+ * Compare only within one image: under the ROM loop buffer these figures are
+ * placement-sensitive (an empty call+ret measured 160 cycles in one layout and
+ * 13 in the next), so absolute values travel badly and matched-loop deltas do
+ * not.
  */
 __attribute__((noinline)) static void probe_empty(void) { __asm__ volatile(""); }
 
