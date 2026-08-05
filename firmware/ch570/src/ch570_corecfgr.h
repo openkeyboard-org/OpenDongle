@@ -43,7 +43,10 @@
  *
  *  - AES: every backend still folds b106130c; ASM_A 1,944 -> 1,672
  *    cycles/block and its key schedule 59,113 -> 8,899 (6.6x, 68% of a poll
- *    slot down to 10%); ASM_F becomes buildable and measures 3,992. Figures
+ *    slot down to 10%); ASM_F becomes buildable and measures ~3,960-3,992.
+ *    (Those key-schedule figures are the flip sweep's, timed with a flash-
+ *    resident key; the field has since moved to SRAM-key timing and reads
+ *    7,647 -- see validation/README.md. The ratio is what mattered.) Figures
  *    reproduce to the cycle across independent sweeps (firmware/validation).
  *  - RF end-to-end at 0x2D on a production keyboard: pairing, reconnect,
  *    typing, indicators, media keys and sleep/wake all pass; bench pairing

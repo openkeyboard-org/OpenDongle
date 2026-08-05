@@ -518,14 +518,18 @@ static void timings(void)
  *
  * One-off experiment support for the "hardware arms report an implausible key
  * schedule" investigation. Emits extra timing records (tags 3..7) that the
- * reader prints as "timing N". Decomposes hal_aes_set_key's measured cost:
+ * reader prints as "timing N" (tags 3..9). Decomposes hal_aes_set_key's measured cost:
  * it compiles to a tail call into newlib-nano's one-byte-loop memcpy, all
  * flash-resident, with the KAT key itself in flash .rodata -- so the number
  * mixes call overhead, loop fetch rate, and flash DATA reads.
  */
 __attribute__((noinline)) static void probe_empty(void) { __asm__ volatile(""); }
 
-static uint8_t probe_dst[16];
+/* uint32_t so the word-store discriminator (tag 8) is aligned and
+ * type-correct; byte probes access it through uint8_t*, which character-type
+ * aliasing permits. A uint8_t[16] here was UB through the uint32_t* cast and,
+ * at alignment 1, potentially a trap on the V4C core. */
+static uint32_t probe_dst[4];
 /* 20 bytes of flash constants, word-aligned, extra word so a +1-offset 16-byte
  * read stays in bounds. volatile-read in tag 8 so the loads cannot be elided. */
 static const uint32_t probe_flash_words[5] = {
@@ -565,7 +569,7 @@ static void timing_probe(void)
     /* tag 5: 64x byte-copy loop, SRAM source -- loop fetch + SRAM data. */
     BARRIER(); t0 = cycles();
     for (uint32_t i = 0; i < 64u; i++)
-        probe_copy(probe_dst, probe_src_sram);
+        probe_copy((uint8_t *)probe_dst, probe_src_sram);
     BARRIER(); t1 = cycles();
     put(AES_LOG_TIMING_BASE | 5u); put((t1 - t0) / 64u);
 
@@ -573,7 +577,7 @@ static void timing_probe(void)
      * data reads per call, the same mix hal_aes_set_key actually executes. */
     BARRIER(); t0 = cycles();
     for (uint32_t i = 0; i < 64u; i++)
-        probe_copy(probe_dst, k_fips);
+        probe_copy((uint8_t *)probe_dst, k_fips);
     BARRIER(); t1 = cycles();
     put(AES_LOG_TIMING_BASE | 6u); put((t1 - t0) / 64u);
 
@@ -590,7 +594,7 @@ static void timing_probe(void)
     BARRIER(); t0 = cycles();
     for (uint32_t i = 0; i < 64u; i++) {
         const volatile uint32_t *s = probe_flash_words;
-        volatile uint32_t *d = (volatile uint32_t *)(void *)probe_dst;
+        volatile uint32_t *d = probe_dst;
         d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; d[3] = s[3];
     }
     BARRIER(); t1 = cycles();
@@ -600,7 +604,7 @@ static void timing_probe(void)
      * sensitivity of the data path itself. */
     BARRIER(); t0 = cycles();
     for (uint32_t i = 0; i < 64u; i++)
-        probe_copy(probe_dst, ((const uint8_t *)probe_flash_words) + 1);
+        probe_copy((uint8_t *)probe_dst, ((const uint8_t *)probe_flash_words) + 1);
     BARRIER(); t1 = cycles();
     put(AES_LOG_TIMING_BASE | 9u); put((t1 - t0) / 64u);
 }

@@ -507,8 +507,9 @@ aes_a_rk:
 
 /* ==========================================================================
  * VARIANT F — flash-resident, shaped to the 128-byte ROM loop buffer.
- * 3,992 cycles/block, measured by firmware/validation on V3C silicon at the
- * production CORECFGR 0x2D and reproduced to the cycle across sweeps; fold
+ * 3,960-3,992 cycles/block (the spread is code-layout, not behaviour),
+ * measured by firmware/validation on V3C silicon at production CORECFGR 0x2D;
+ * fold
  * b106130c on the 512-block differential. (Bench builds of the same kernel
  * measured 3,796/3,797 -- link alignment and harness overhead, not a
  * behaviour difference.) ZERO bytes of code in SRAM, 432 B of data (256 B

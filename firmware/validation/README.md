@@ -125,10 +125,10 @@ shifts, so read them to two significant figures.
 
 `ch572-asm-a` exists so the software-vs-hardware comparison is same-silicon:
 **the assembly kernel is 1.8× faster than the hardware engine** on the part
-that has the engine (1,672 against 2,966). The engine core is not slow, its
+that has the engine (1,672 against 2,967). The engine core is not slow, its
 driver is — it reloads the key and shuffles data through registers on every
-block. The key schedule leans the other way (8,899 against 1,707), so the
-engine wins below ~6 blocks per key and the software kernel above.
+block. The key schedule leans the other way (7,647 against 322, SRAM-key
+semantics), so the engine wins below ~6 blocks per key and the software kernel above.
 
 Cycle figures are measured in-loop and include call overhead, so they run a
 little above kernel-only costs quoted in bench material. The key-schedule
@@ -246,7 +246,7 @@ make ch570-factory-flash WCHLINK_SERIAL=<serial>
 
 Measured on V3C silicon at 100 MHz; the AES table above is the 0x2D result.
 The flip's headline is the key schedule, not the block: ASM_A's went from
-67.6% of an 875 µs poll slot to 10.2% (59,113 → 8,899, 6.6×) for zero SRAM,
+67.6% of an 875 µs poll slot to 10.2% (59,113 → 8,899 under the flash-key semantics of the day, 6.6× — the field now times SRAM keys and reads 7,647) for zero SRAM,
 and ASM_F became buildable and measurable at all (3,992 against its unverified
 bench figure of 3,797).
 
