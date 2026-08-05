@@ -58,8 +58,9 @@ fn parse_u16_auto(s: &str) -> Result<u16, String> {
     long_about = "OpenDongle CH570/CH592 maintenance over USB HID IAP.\n\n\
         Safe by default: without an action, displays device, firmware, and \
         bond information. Updates happen in the OpenBoot bootloader: \
-        --enter-bootloader reboots the dongle into OpenBoot (1209:0001), \
-        then flash with the openboot CLI."
+        --enter-bootloader reboots the dongle into OpenBoot, which enumerates \
+        under this same VID:PID and is told apart by its HID usage page \
+        0xFF00. Flash there with `openboot --vid 0x0C45 --pid 0xFEFE`."
 )]
 struct Cli {
     /// USB VID (default 0x0C45)
@@ -82,8 +83,9 @@ struct Cli {
     #[arg(long, conflicts_with = "enter_bootloader")]
     info: bool,
 
-    /// Reboot the dongle into the OpenBoot bootloader (it re-enumerates as
-    /// VID:PID 1209:0001; flash there with the openboot CLI)
+    /// Reboot the dongle into the OpenBoot bootloader (it re-enumerates under
+    /// the same VID:PID on HID usage page 0xFF00; flash there with the
+    /// openboot CLI, passing --vid/--pid to match this device)
     #[arg(long)]
     enter_bootloader: bool,
 
@@ -113,16 +115,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("no HID device") {
-                if cli.enter_bootloader && openboot_present(&api) {
+                if cli.enter_bootloader && openboot_present(&api, cli.vid, cli.pid) {
                     // Already sitting in OpenBoot, so there is nothing to
                     // reboot. The family guard CANNOT run here: it compares the
                     // image against the family the *application* reports, and
                     // the application is not running. Say so rather than
                     // implying the image was checked.
                     println!(
-                        "no {:04X}:{:04X} app, but an OpenBoot bootloader (1209:0001) \
-                         is on the bus — already in the bootloader",
-                        cli.vid, cli.pid
+                        "no {:04X}:{:04X} app interface, but an OpenBoot bootloader \
+                         (same VID:PID, HID usage page {:04X} usage {:02X}) is on the \
+                         bus — already in the bootloader",
+                        cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
                     );
                     if cli.image.is_some() && !cli.force {
                         eprintln!(
@@ -213,7 +216,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // is not mere disappearance — wait for the OpenBoot bootloader to
     // actually arrive on the bus. (With more than one dongle attached this
     // check is not path-precise; the bench wrapper additionally requires
-    // exactly one 1209:0001 device before flashing.)
+    // exactly one matching device before flashing.)
     let mut app_gone = false;
     let mut boot_here = false;
     for _ in 0..50 {
@@ -226,13 +229,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     && d.interface_number() == cli.interface
             });
         }
-        if openboot_present(&api) {
+        if openboot_present(&api, cli.vid, cli.pid) {
             boot_here = true;
             break;
         }
     }
     if boot_here {
-        println!("OpenBoot bootloader (1209:0001) is on the bus");
+        println!(
+            "OpenBoot bootloader is on the bus ({:04X}:{:04X}, HID usage page {:04X} \
+             usage {:02X})",
+            cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
+        );
         match &cli.image {
             Some(p) => println!("next: openboot flash --force {}", p.display()),
             None => println!("next: openboot flash --force <app.bin>"),
@@ -249,10 +256,56 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     }
 }
 
-/// OpenBoot's USB identity (pid.codes test PID; see OpenBoot PROTOCOL.md §12).
-fn openboot_present(api: &HidApi) -> bool {
-    api.device_list()
-        .any(|d| d.vendor_id() == 0x1209 && d.product_id() == 0x0001)
+/// The bootloader's HID report descriptor: vendor usage page 0xFF00, usage
+/// 0x01 (OpenBoot PROTOCOL.md §12).
+const OB_USAGE_PAGE: u16 = 0xFF00;
+const OB_USAGE: u16 = 0x0001;
+
+/// Given every HID interface already filtered to one VID:PID, is one of them
+/// the bootloader?
+///
+/// VID:PID alone stopped being enough when the dongle's board files gave
+/// OpenBoot the application's own identity (0C45:FEFE). Both modes now
+/// enumerate identically, and the application's keyboard, mouse and vendor
+/// interfaces sit behind that same VID:PID. The vendor usage page 0xFF00 /
+/// usage 0x01 is what separates them — the application deliberately uses
+/// 0xFFFF and 0xFF60 instead (common/src/usb_descriptors.c).
+///
+/// An exact usage decides it. A 0/0 pair means the backend could not parse
+/// the report descriptor — "cannot tell", not "matches" — so it stands in for
+/// the bootloader only when NOTHING on this VID:PID reported a usable usage,
+/// i.e. the platform does not report them at all.
+///
+/// Deliberately stricter than OpenBoot's own `narrow_to_bootloader()`, which
+/// falls back to 0/0 whenever no exact match survives. Upstream can afford
+/// that: it returns a candidate list and errors out if more than one survives,
+/// so an ambiguous answer is caught. This returns a bare bool that nothing
+/// downstream re-checks, and the dongle's application shares the VID:PID — so
+/// a platform that parsed the app's keyboard descriptor but not some sibling's
+/// would otherwise report the bootloader present while the app is running.
+fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
+    if usages
+        .iter()
+        .any(|&(page, usage)| page == OB_USAGE_PAGE && usage == OB_USAGE)
+    {
+        return true;
+    }
+    !usages.is_empty() && usages.iter().all(|&(page, usage)| page == 0 && usage == 0)
+}
+
+/// Is the OpenBoot bootloader on the bus under this VID:PID?
+///
+/// Both call sites reach this only after the application's IAP interface
+/// failed to open, so the "cannot tell" fallback is the permissive answer we
+/// want there rather than a false negative on a platform that does not report
+/// HID usages.
+fn openboot_present(api: &HidApi, vid: u16, pid: u16) -> bool {
+    let usages: Vec<(u16, u16)> = api
+        .device_list()
+        .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
+        .map(|d| (d.usage_page(), d.usage()))
+        .collect();
+    has_bootloader_usage(&usages)
 }
 
 fn main() -> ExitCode {
@@ -315,6 +368,40 @@ mod tests {
         .unwrap();
         assert!(full.enter_bootloader);
         assert!(full.image.is_some());
+    }
+
+    // The dongle's bootloader shares the application's VID:PID, so these
+    // pairs are the ONLY thing distinguishing the two modes. Getting this
+    // wrong is silent in both directions: too permissive reports "already in
+    // the bootloader" while the app is running, too strict makes
+    // --enter-bootloader always report failure after a successful reboot.
+    #[test]
+    fn bootloader_usage_needs_the_exact_vendor_page() {
+        // The bootloader's own interface.
+        assert!(has_bootloader_usage(&[(0xFF00, 0x0001)]));
+        // The application's interfaces, as declared in usb_descriptors.c.
+        // None of these may pass.
+        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0xFF60, 0x0061)]));
+        // Right page, wrong usage — and vice versa.
+        assert!(!has_bootloader_usage(&[(0xFF00, 0x0002)]));
+        assert!(!has_bootloader_usage(&[(0xFF01, 0x0001)]));
+        // Nothing on the bus under this VID:PID.
+        assert!(!has_bootloader_usage(&[]));
+    }
+
+    #[test]
+    fn unknown_usage_is_a_fallback_not_a_match() {
+        // 0/0 means the backend could not parse the report descriptor. Alone,
+        // it is the only thing we have to go on, so it counts.
+        assert!(has_bootloader_usage(&[(0, 0)]));
+        // But once ANY interface reports a real usage, the platform clearly
+        // does report them — so 0/0 no longer stands in for the bootloader.
+        // This is the case that regressed when the bootloader took the
+        // application's VID:PID: the app's keyboard interface would otherwise
+        // let a 0/0 sibling answer "bootloader present".
+        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0, 0)]));
+        // Exact match still wins when mixed with unknowns.
+        assert!(has_bootloader_usage(&[(0, 0), (0xFF00, 0x0001)]));
     }
 
     #[test]

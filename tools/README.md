@@ -50,8 +50,12 @@ opendongle --info                              # device, build, update, link, bo
 opendongle --enter-bootloader --image app.bin  # family-checked, then reboots into OpenBoot
 opendongle --enter-bootloader --force          # reboot with no family guard
 
-# then, with the device enumerated as OpenBoot (VID:PID 1209:0001):
-openboot flash --force app.bin
+# then, with the device enumerated as OpenBoot. The bootloader shares the
+# application's VID:PID, so the openboot CLI needs both flags — its own
+# defaults (1209:0001) are the generic/bench identity, not this product's.
+# It tells the two modes apart by HID usage page 0xFF00 usage 0x01, which the
+# application's interfaces (0xFFFF, 0xFF60) deliberately avoid.
+openboot --vid 0x0C45 --pid 0xFEFE flash --force app.bin
 ```
 
 `--image` is the safety interlock: the image's ODG2 family is compared against
