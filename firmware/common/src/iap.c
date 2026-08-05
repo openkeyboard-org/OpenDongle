@@ -161,7 +161,16 @@ static void handle_retired(uint8_t status)
  * reboots into OpenBoot. Never resets inline here. */
 static void handle_enter_bootloader(const uint8_t *data, uint8_t data_len)
 {
-    static const uint8_t magic[4] = { 0x11, 0xCA, 0x07, 0xB0 };
+    /* Derived from the protocol header rather than spelled out, so it cannot
+     * drift from OpenBoot. Kept as a byte array compared with memcmp: `data`
+     * points into the 64-byte HID report at offset 2, so it is at best 2-byte
+     * aligned and a uint32_t load through it would be misaligned. */
+    static const uint8_t magic[4] = {
+        (uint8_t)(OB_BOOTREQ_MAGIC        & 0xFFu),
+        (uint8_t)((OB_BOOTREQ_MAGIC >> 8)  & 0xFFu),
+        (uint8_t)((OB_BOOTREQ_MAGIC >> 16) & 0xFFu),
+        (uint8_t)((OB_BOOTREQ_MAGIC >> 24) & 0xFFu),
+    };
 
     if (!iap_armed) {
         send_reject();

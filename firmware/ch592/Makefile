@@ -17,13 +17,17 @@ MRS_TOOLCHAIN ?=
 # MounRiver GCC15 renamed the tools: GCC12 shipped riscv-wch-elf-*, GCC15
 # ships riscv32-wch-elf-*. One variable so the prefix lives in one place.
 CROSS ?= riscv32-wch-elf
-# OpenBoot is a pinned submodule with its OWN toolchain pin, still on MounRiver
-# GCC12 and its riscv-wch-elf-* tool names. The factory image is
-# OpenBoot || pad || application -- two separately linked binaries that share no
-# code -- so building them with different compilers is safe. Until OpenBoot's
-# pin moves, point this at the GCC12 bin directory:
+# OpenBoot builds with MounRiver GCC12, this application with GCC15. The
+# factory image is two separately linked binaries that share no code, so mixing
+# compilers is safe:
 #   make ch592-factory MRS_TOOLCHAIN=<GCC15 bin> OPENBOOT_TOOLCHAIN=<GCC12 bin>
+#
+# This split is now PERMANENT, not a wait for OpenBoot's pin to catch up.
+# OpenBoot auto-detects either tool prefix, so tool NAMES no longer force it -
+# but GCC15 is explicitly unvalidated and its own check went advisory, so the
+# requirement is enforced by check-openboot-toolchain below.
 OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
+OPENBOOT_ALLOW_UNVALIDATED_GCC ?= 0
 COMMON := ../common
 BLE_LIB_DIR := $(SDK)/BLE/LIB
 OPENBOOT := $(abspath ../../third_party/openboot)
@@ -39,9 +43,35 @@ WCHLINK_SERIAL ?=
 PYTHON := /usr/bin/python3 -I
 
 SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
+# The OpenBoot revision this build is pinned to. Declared rather than read from
+# the submodule so it is a deterministic parse-time value, and asserted against
+# the actual checkout by check-deps below. It also lands in CONFIG_TEXT, which
+# is what finally puts the bootloader's identity into the build id - previously
+# CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
+# composed into a factory image with every gate green.
+OPENBOOT_REVISION := a3a492ccb0e1303731a8ce45e274d48c128e817e
 PROFILE_ID := ch592-product
 TARGET := opendongle-ch592-product
 BUILD := build/$(PROFILE_ID)
+
+# OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
+# copied here. openboot_app.c derives its boot-record address as
+# SLOT_BASE + SLOT_SIZE - erase block, so a local copy that drifted from the
+# bootloader's own build would point the app's record read one slot away -
+# silently, because nothing calls it yet. See ../openboot_geometry.py, which
+# also cross-checks that the two slots are contiguous and fit the app region.
+OPENBOOT_BOARD := opendongle-ch592
+OPENBOOT_GEOM := $(shell $(PYTHON) ../openboot_geometry.py \
+    --openboot "$(OPENBOOT)" --chip ch592 --transport usb \
+    --board $(OPENBOOT_BOARD))
+ifneq ($(words $(OPENBOOT_GEOM)),5)
+$(error cannot read OpenBoot slot geometry - run: git submodule update --init --recursive)
+endif
+OPENBOOT_SLOT_BASE := $(word 1,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_SIZE := $(word 2,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_CAP := $(word 3,$(OPENBOOT_GEOM))
+OPENBOOT_RECORD_SZ := $(word 4,$(OPENBOOT_GEOM))
+OPENBOOT_SRC_BIN := $(word 5,$(OPENBOOT_GEOM))
 
 ARCH := -march=rv32imac_zicsr_zifencei -mabi=ilp32
 ARCH += -msmall-data-limit=8 -mno-save-restore
@@ -71,15 +101,29 @@ CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
 # With BLE_SNV=FALSE the cfg.SNVAddr/readFlashCB/writeFlashCB assignments are
 # compiled out of CH59x_BLEInit - as are Lib_Read_Flash and Lib_Write_Flash,
 # which live under the same guard - so tmos_snv_init returns immediately on
-# SNVAddr == 0 and nothing in the application writes that page. Under OpenBoot
-# the SAME DataFlash block (logical 0x7000) holds the OBR1 boot record, so the
-# guard matters even more than it did for the OSW2 state it originally
-# protected. This product uses raw RF_Rx/RF_Tx and never BLE bonding, so SNV
-# has no other purpose here. If BLE features are ever enabled they must be
-# given their own DataFlash page, not this one.
+# SNVAddr == 0 and nothing in the application writes that page.
+#
+# BOTH collisions above are now HISTORICAL, not live. The stage-1 OSW2 state
+# went away with the OpenBoot cutover, and OpenBoot's boot record moved out of
+# DataFlash into the top erase block of each code-flash slot, so nothing of
+# ours sits at logical 0x7000 any more - all 32 KiB of DataFlash is the
+# application's again. The bench evidence above is kept because it is what
+# established that the library really does rewrite that page unbidden.
+#
+# The guard stays for the reasons that survive: this product uses raw
+# RF_Rx/RF_Tx and never BLE bonding, so SNV has no purpose here; the flag is
+# hashed into the build id and the whole CH592 matrix was validated with it
+# off; and re-enabling would put unaudited library writes into the DataFlash
+# that still holds the RF bond. If BLE features are ever enabled they must be
+# given their own DataFlash page.
 CFLAGS += -DBLE_SNV=FALSE
 # OpenBoot app companion (openboot_request_update / openboot_get_record).
+# openboot_app.c #errors without the two slot defines; they must match the
+# bootloader's own generated openboot_config.h, which is why they are derived
+# above rather than written out. Phase 1 builds slot A only.
 CFLAGS += -DOPENBOOT_CHIP_CH59X
+CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
+CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
@@ -128,20 +172,33 @@ endif
 VPATH := $(COMMON)/src:src:$(SDK)/BLE/HAL:$(SDK)/SRC/StdPeriphDriver:$(BLE_LIB_DIR)
 VPATH := $(VPATH):$(OPENBOOT)/firmware/app
 
-# App region under OpenBoot: [0x2000, 0x70000), matching link.ld and the
-# manifest's CHIP_LAYOUTS.
-APP_MAX_BYTES := 450560
-COMPOSE_TOOL := ../compose_factory.py
+# The app gets its slot's capacity - the slot minus the erase block holding
+# that slot's boot record. Derived, for the same reason the -D flags are.
+APP_MAX_BYTES := $(shell printf '%d' $$(($(OPENBOOT_SLOT_CAP))))
+
+# link.ld cannot read a make variable, so its LENGTH is written out - and then
+# checked here every build. Left too large, an app that outgrew its slot links
+# over the record block and is destroyed by the first COMMIT.
+LINK_LD_LENGTH := $(shell sed -n \
+    's/.*FLASH *(rx) *: *ORIGIN *= *[^,]*, *LENGTH *= *\(0x[0-9A-Fa-f]*\).*/\1/p' link.ld)
+ifneq ($(shell printf '%d' $$(($(LINK_LD_LENGTH)))),$(APP_MAX_BYTES))
+$(error link.ld FLASH LENGTH $(LINK_LD_LENGTH) != OpenBoot slot capacity $(OPENBOOT_SLOT_CAP))
+endif
+
 FINALIZE_TOOL := ../finalize_image.py
 CONFIG_STAMP := $(BUILD)/.config-stamp
 BUILD_ID_STAMP := $(BUILD)/.build-id-stamp
 BUILD_ID_TOOL := ../build_identity.py
+# Composed by OpenBoot's own `make factory`, which also writes slot A's boot
+# record into the image - so a blank part boots the app on first power-on.
+OPENBOOT_FACTORY_BIN := $(patsubst %.bin,%-factory.bin,$(OPENBOOT_SRC_BIN))
+OPENBOOT_MANIFEST := $(patsubst %.bin,%.manifest,$(OPENBOOT_SRC_BIN))
 FACTORY_BIN := $(BUILD)/$(TARGET)-factory.bin
+FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
 OPENBOOT_BIN := $(BUILD)/$(TARGET)-openboot.bin
-OPENBOOT_SRC_BIN := $(OPENBOOT)/firmware/build/ch592-usb+opendongle-ch592/openboot-ch592-usb.bin
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
-CONFIG_TEXT := schema=8||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
+CONFIG_TEXT := schema=9||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
@@ -164,18 +221,21 @@ endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
 .DEFAULT_GOAL := all
-.PHONY: all openboot-image factory flash-factory check-deps size size-check clean
+.PHONY: all openboot-image factory flash-factory check-deps \
+	check-openboot-toolchain size size-check clean
 
 all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
     $(FACTORY_BIN) size size-check
 
-# OpenBoot bootloader image, built from the pinned submodule with the
-# product board file. Recursive make every pass (OpenBoot's own build is
-# incremental); the copy below is content-guarded so downstream targets do
-# not rebuild unless the bytes changed.
+# The bootloader on its own, built from the pinned submodule with the product
+# board file. The factory image no longer goes through this - OpenBoot's own
+# `factory` target builds and composes it - but a standalone bootloader binary
+# is what the SWD recovery path writes, so it stays available on demand.
+# Recursive make every pass (OpenBoot's build is incremental); the copy below
+# is content-guarded so downstream targets do not rebuild unless bytes changed.
 openboot-image:
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
-	    BOARD=opendongle-ch592 MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
+	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
 
 $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
@@ -196,15 +256,18 @@ flash-factory: factory
 	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
 #	-E erases the whole user CODE flash. It does NOT touch DataFlash:
 #	ch5xx.c CH5xxErase() takes its whole-chip extent from flash_offset/flash_size,
-#	not from eeprom_offset/eeprom_size, so the OpenBoot boot record at 0x77000
-#	and the bond at 0x75000 both survive. A survivor record is HARMLESS here
-#	(unlike the old OSW2 state): OpenBoot CRC-checks the record's recorded
-#	length of app bytes at every boot (OB_BOOT_IMAGE_CRC), so a stale record
-#	either still validates (only possible when the flashed bytes contain the
-#	previously blessed image as a prefix - re-flashing the identical build is
-#	the normal case) or mismatches and the device stays in the bootloader
-#	until `openboot bless` re-attests. Never write DataFlash over SWD -
-#	bench-confirmed, minichlink leaves garbage there.
+#	not from eeprom_offset/eeprom_size.
+#
+#	The boot record is no longer among the survivors. It moved out of
+#	DataFlash into the top erase block of each code-flash slot with the A/B
+#	change, so -E DOES clear boot state on this part now - the earlier
+#	"a stale record either still validates or the device stays in the
+#	bootloader" analysis no longer applies, and the write below restores
+#	slot A's record from the factory image anyway.
+#
+#	What still survives -E is the bond at 0x75000, which is why the
+#	ALLOW_BONDED_FLASH guard below is unchanged. Never write DataFlash over
+#	SWD - bench-confirmed, minichlink leaves garbage there.
 	"$(MINICHLINK)" -E -C linke \
 	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
 	"$(MINICHLINK)" -C linke \
@@ -248,14 +311,62 @@ flash-factory: factory
 	@echo "factory image read back OK"
 	"$(MINICHLINK)" -C linke \
 	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)") -b
-	@echo "NOTE: first boot lands in OpenBoot unless a stale record matches"
-	@echo "      these exact app bytes. If the device enumerates as 1209:0001,"
-	@echo "      run: openboot bless $(abspath $(BUILD)/$(TARGET).bin) && openboot boot"
+	@echo "NOTE: this image is factory-blessed - it carries slot A's boot"
+	@echo "      record - so the unit boots the application on first power-on."
+	@echo "      No 'openboot bless' step, and none is possible: the device"
+	@echo "      comes up active=A/write=B, and bless resolves against the"
+	@echo "      write slot, so a slot-A image is refused there by design."
 
-check-deps:
+check-deps: check-openboot-toolchain
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
 	    --tool-prefix "$(CROSS)"
+#	Assert the submodule IS the pinned revision and its worktree is clean.
+#	--skip-toolchain because OpenBoot's own recursive build checks its
+#	compiler; requiring GCC12 to be installed merely to verify a SHA would
+#	make `make ch592` unbuildable for anyone not composing a factory image.
+	$(PYTHON) $(OPENBOOT)/firmware/check_dependencies.py \
+	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
+
+# OpenBoot's own compiler gate went ADVISORY at this pin: a compiler-hash
+# mismatch and an unvalidated GCC major both warn() and continue. Combined with
+# its new tool-prefix auto-detection, a routine `make ch592-factory` carrying a
+# single GCC15 toolchain now silently ships a GCC15 bootloader.
+#
+# That is not hypothetical. Upstream pins SUPPORTED_GCC_MAJORS = (12,) on the
+# strength of a CH572 bench where GCC15 fired the idle auto-boot at
+# 1.51/1.71/4.75 s against a configured 10 s, and failed to return from 4 of 32
+# software resets (GCC12: 0/32) - with the generated code for the timing
+# functions instruction-identical between the two. Cause unresolved. A dongle
+# that leaves the bootloader after 1.5 s instead of 10 does not look broken; it
+# just loses its update window.
+#
+# So OpenDongle keeps a HARD gate where upstream now warns. Override only to
+# reproduce that investigation:
+#   make ... OPENBOOT_ALLOW_UNVALIDATED_GCC=1
+check-openboot-toolchain:
+	@if [ "$(OPENBOOT_ALLOW_UNVALIDATED_GCC)" = "1" ]; then \
+	  echo "openboot toolchain: check bypassed (OPENBOOT_ALLOW_UNVALIDATED_GCC=1)"; \
+	  exit 0; \
+	fi; \
+	gcc=""; \
+	for p in riscv-wch-elf-gcc riscv32-wch-elf-gcc; do \
+	  if [ -x "$(OPENBOOT_TOOLCHAIN)/$$p" ]; then \
+	    gcc="$(OPENBOOT_TOOLCHAIN)/$$p"; break; \
+	  fi; \
+	done; \
+	test -n "$$gcc" || { \
+	  echo "no riscv-wch-elf-gcc or riscv32-wch-elf-gcc under OPENBOOT_TOOLCHAIN='$(OPENBOOT_TOOLCHAIN)'" >&2; \
+	  exit 1; }; \
+	major=$$("$$gcc" -dumpversion | cut -d. -f1); \
+	test "$$major" = "12" || { \
+	  echo "OpenBoot must be built with GCC 12; $$gcc is GCC $$major" >&2; \
+	  echo "  GCC15 is not validated - upstream benched erratic idle auto-boot" >&2; \
+	  echo "  (1.5-4.8 s against a configured 10 s) and 4/32 failed" >&2; \
+	  echo "  software-reset returns on CH572. Point OPENBOOT_TOOLCHAIN at a" >&2; \
+	  echo "  GCC12 bin directory, or set OPENBOOT_ALLOW_UNVALIDATED_GCC=1." >&2; \
+	  exit 1; }; \
+	echo "openboot toolchain: GCC $$major ($$gcc)"
 
 $(BUILD):
 	mkdir -p "$@"
@@ -300,9 +411,41 @@ $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).bin &: $(RAW_ELF) $(FINALIZE_TOOL) \
 $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
 	"$(OBJCOPY)" -O ihex "$<" "$@"
 
-$(FACTORY_BIN): $(OPENBOOT_BIN) $(BUILD)/$(TARGET).bin $(COMPOSE_TOOL)
-	$(PYTHON) $(COMPOSE_TOOL) --openboot "$(OPENBOOT_BIN)" \
-	    --app "$(BUILD)/$(TARGET).bin" --output "$@"
+# Factory composition lives in OpenBoot now. It is not a concatenation any
+# more: the image is bootloader || 0x00 pad || app || zeros || slot A's OBR2
+# boot record, so a blank part boots the application on FIRST POWER-ON with no
+# host and no `openboot bless`. Reproducing that here would mean reimplementing
+# the record layout and its CRC against a format that just changed.
+#
+# FACTORY_BLESS=1 is passed explicitly even though OpenBoot defaults it: if
+# that default ever flips, an unblessed image looks identical until a unit
+# reaches a customer and sits in the bootloader.
+$(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin | $(BUILD)
+	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
+	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
+	    FACTORY_BLESS=1 APP="$(abspath $(BUILD)/$(TARGET).bin)" factory
+#	The manifest is written by the same OpenBoot build that produced these
+#	bytes, so checking it here - rather than only in check-deps - is what
+#	closes the parallel-make hole: under -j, check-deps can finish AFTER the
+#	submodule was read.
+	@rev=$$(sed -n 's/^openboot_revision=//p' "$(OPENBOOT_MANIFEST)"); \
+	 dirty=$$(sed -n 's/^openboot_dirty=//p' "$(OPENBOOT_MANIFEST)"); \
+	 test "$$rev" = "$(OPENBOOT_REVISION)" || { \
+	   echo "OpenBoot built from $$rev, expected $(OPENBOOT_REVISION)" >&2; exit 1; }; \
+	 test "$$dirty" = "0" || { \
+	   echo "OpenBoot worktree is dirty; the image is not the pinned revision's bytes" >&2; \
+	   exit 1; }
+#	Size is a cheap, decisive check that the record is actually present:
+#	bootloader region + slot capacity + one record. A short image means
+#	FACTORY_BLESS did not take effect and the unit would not boot unattended.
+	@want=$$(( $(OPENBOOT_SLOT_BASE) + $(OPENBOOT_SLOT_CAP) + $(OPENBOOT_RECORD_SZ) )); \
+	 got=$$(stat -c%s "$(OPENBOOT_FACTORY_BIN)"); \
+	 test "$$got" -eq "$$want" || { \
+	   echo "factory image is $$got B, expected $$want B (blessed record missing?)" >&2; \
+	   exit 1; }
+	@cp "$(OPENBOOT_FACTORY_BIN)" "$(FACTORY_BIN)"
+	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
+	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
 
 size: $(BUILD)/$(TARGET).elf
 	"$(SIZE)" "$<"

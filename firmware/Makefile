@@ -74,15 +74,23 @@ ch592-factory-flash:
 # carries its own nested openwch submodules, pinned to the same revisions as
 # ours; init with --recursive.
 #
-# What is NOT checked, so nobody has to discover it from a build: `check-deps`
-# validates the two openwch SDKs and the compiler, and OpenBoot's own recursive
-# build validates ITS openwch submodules - but nothing validates the OpenBoot
-# checkout itself. Its revision is not compared against this repository's
-# gitlink, its worktree is not checked for local edits, and no OpenBoot revision
-# appears in CONFIG_TEXT or BUILD_ID_INPUTS. So a factory image can be composed
-# from an unpinned or locally modified bootloader while every gate passes, and
-# the build id will not record it. The application-side companion headers ARE
-# hashed; the bootloader image is not. Tracked in TODO.md.
+# The OpenBoot checkout IS validated now, in three places, because one was not
+# enough:
+#   - each chip's check-deps runs OpenBoot's check_dependencies.py
+#     --expect-revision, which fails on a wrong revision OR a dirty worktree;
+#   - OPENBOOT_REVISION is in CONFIG_TEXT, so the bootloader's identity is part
+#     of the application's build id rather than the bare literal
+#     "boot=openboot-usb" that used to stand in for it;
+#   - the factory rule re-checks the revision and dirty flag from the .manifest
+#     OpenBoot emits beside the image. That last one is not redundant: under -j,
+#     check-deps can finish AFTER the submodule was read, and the manifest is
+#     written by the same build that produced the bytes being packaged.
+#
+# What is still NOT checked: the bootloader BINARY is not hashed into
+# BUILD_ID_INPUTS. Deliberately - the manifest does not exist at parse time on
+# a clean checkout, and it carries a sha256 that depends on which GCC12 install
+# built OpenBoot, which would make DONGLE_BUILD_ID differ between developers
+# for byte-identical application images. That id must identify the app.
 ch570-openboot:
 	$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
 	    BOARD=opendongle-ch570 MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
@@ -94,8 +102,20 @@ ch592-openboot:
 # OpenBoot's own host suites. Not part of `test`: run this when the
 # submodule pin advances — the pin only moves onto OpenBoot commits whose
 # full suite is green.
+#
+# This is deliberately a SUPERSET of OpenBoot's own CI, not a subset. Its
+# workflow runs fmt and clippy as a separate job from the test job; a pin bump
+# taken from a green branch can still carry lint debt that only shows up the
+# next time someone builds the CLI with -D warnings. The pin gate is the right
+# place to catch that, since the pin is the thing being accepted.
+#
+# --expect-revision is per-chip (it needs OPENBOOT_REVISION, which the chip
+# Makefiles declare), so it runs from check-deps rather than here.
 openboot-test:
 	$(MAKE) -C $(OPENBOOT)/firmware test
+	cargo fmt --manifest-path $(OPENBOOT)/tools/Cargo.toml --check
+	cargo clippy --manifest-path $(OPENBOOT)/tools/Cargo.toml \
+	    --all-targets -- -D warnings
 	cargo test --manifest-path $(OPENBOOT)/tools/Cargo.toml
 
 check-deps:

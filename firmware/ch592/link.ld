@@ -3,10 +3,29 @@
  * Based on CH592 SDK Link.ld
  *
  * Flash base 0x2000: OpenBoot owns [0x0000, 0x2000) and hands off to the
- * application at 0x2000. The app region is [0x2000, 0x70000) — the whole
- * remaining code flash. There is no in-app staging region any more; updates
- * are performed inside OpenBoot over OBP, and OpenBoot's boot record lives
- * in DataFlash at offset 0x7000 (outside code flash).
+ * application at 0x2000. There is no in-app staging region any more; updates
+ * are performed inside OpenBoot over OBP.
+ *
+ * Under OpenBoot's A/B slots the app no longer owns the whole region.
+ * [0x2000, 0x70000) splits into slot A [0x2000, 0x39000) and slot B
+ * [0x39000, 0x70000). Each slot's 32-byte boot record lives in the TOP erase
+ * block of that slot, so slot A's record owns [0x38000, 0x39000) and the app
+ * gets 0x36000 (216 KiB).
+ *
+ * LENGTH must therefore be the slot CAPACITY, not the slot size: linking into
+ * [0x38000, 0x39000) still boots (the bootloader CRCs only img_len bytes) but
+ * the first COMMIT erases that block to store the record and takes the tail of
+ * the image with it. The Makefile asserts this value against OpenBoot's
+ * generated openboot_config.h on every build.
+ *
+ * The boot record is no longer in DataFlash. It moved into code flash with the
+ * A/B change, which releases all 32 KiB of DataFlash back to the application —
+ * and means `minichlink -E` now DOES clear boot state on this part, where it
+ * previously could not reach it.
+ *
+ * Phase 2 links this a second time at slot B. That wants ORIGIN to come from a
+ * generated memory.ld INCLUDEd here, the way OpenBoot does it for its own
+ * build, rather than a second copy of this file.
  */
 
 ENTRY( _start )
@@ -18,7 +37,7 @@ MEMORY
 {
     /* RAM stops at 0x200067F0: OpenBoot reserves the top 16 bytes of the
      * 26 KB SRAM (0x200067F0..0x200067FF) for its boot-request word. */
-    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x6E000
+    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x36000
     RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x67F0
 }
 
