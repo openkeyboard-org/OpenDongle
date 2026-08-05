@@ -26,6 +26,7 @@ at all, and it is not something a unit test on one chip can establish.
 | `ch570-asm-f` | CH570 | `ASM_F` | zero SRAM code; needs the loop buffer |
 | `ch570-c` | CH570 | portable C | the fallback any future chip gets first |
 | `ch572-hw` | CH572 | hardware engine | same driver as CH592, different silicon |
+| `ch572-asm-a` | CH572 | `ASM_A` | same-silicon software-vs-engine control |
 | `ch592-hw` | CH592 | hardware engine | |
 
 `ASM_F` requires `CORECFGR` bit 3 (`ROM_LOOP_ACC`). Production now boots

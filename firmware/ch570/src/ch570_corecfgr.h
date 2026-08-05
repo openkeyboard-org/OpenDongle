@@ -20,9 +20,10 @@
  *   2     ROM_JUMP_ACC   jump acceleration
  *   3     ROM_LOOP_ACC   128-byte ROM LOOP BUFFER -- not the general instruction
  *                        cache the datasheet calls it. Worth ~30x on a
- *                        flash-resident loop whose body is <=112 bytes, 1.44x on
- *                        the AES cipher, and it costs no memory. OFF today; see
- *                        the note below before turning it on.
+ *                        flash-resident loop whose body is <=112 bytes; measured
+ *                        on the AES paths, 1.16x-1.41x per block and 6.6x on the
+ *                        key schedule. Costs no memory. ON in production (this
+ *                        is bit 3 of the 0x2D below); see the rules above.
  *   5     IE_REMAP_EN    REQUIRED. With this clear, CSR 0x800 is read-only, which
  *                        silently breaks __enable_irq/__disable_irq and this
  *                        firmware's own csrrs/csrrc on 0x800 (rf_task.c,

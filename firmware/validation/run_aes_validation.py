@@ -191,14 +191,21 @@ def read_keep(probe, manifest):
         w = R.words_from_bytes(out.read_bytes())
     except R.LogError as exc:
         raise InfraError(f"malformed retained-diagnosis read: {exc}") from exc
-    if len(w) < 5 or w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
+    # The whole 8-word block or nothing: a short-but-word-aligned read is a
+    # transport fault, and quietly accepting 5-7 words would let truncated
+    # retained data pass as trustworthy -- exactly what the 32-byte request
+    # exists to prevent. Only a magic mismatch means "no baseline yet".
+    if len(w) != 8:
+        raise InfraError(
+            f"retained-diagnosis read returned {len(w)} words, expected 8")
+    if w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
         return None
     return {"boots": w[1], "reset_status": w[2],
             "wdog_ctrl": w[3] & 0xFF, "wdog_count": (w[3] >> 8) & 0xFF,
             "stage": w[4]}
 
 
-def read_log(probe, manifest, boots_before=0):
+def read_log(probe, manifest, boots_before=0, baseline_known=True):
     """Halt the device and read the log back.
 
     PREFERS THE RETAINED SNAPSHOT. `aes_log` is in .bss and a reset clears it,
@@ -227,7 +234,7 @@ def read_log(probe, manifest, boots_before=0):
         # otherwise pass the build-id check and be reported as this run's
         # result. Only a snapshot taken after the pre-flash boot count counts.
         if (w[0] == R.M["AES_LOG_SAVED_MAGIC"] and 0 < w[1] <= len(w) - 3
-                and w[2] > boots_before):
+                and baseline_known and w[2] > boots_before):
             return list(w[3:3 + w[1]]), True
 
     out = Path(manifest["bin"]).with_suffix(".log.bin")
@@ -246,10 +253,16 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     # Before writing anything: how many times has this part booted so far? Any
     # retained snapshot at or below this count predates the run and is stale.
     before = read_keep(probe, manifest)
-    boots_before = before["boots"] if before else 0
+    # An absent baseline is stated, not collapsed to 0: with a 0 sentinel the
+    # snapshot freshness gate degenerates to "any snapshot" and the reboot
+    # delta counts history as if it were this run. (Cross-build snapshot reuse
+    # is separately blocked by verify(): the snapshot content embeds the build
+    # id of the image that wrote it.)
+    baseline_known = before is not None
+    boots_before = before["boots"] if baseline_known else 0
 
     flash_and_run(probe, manifest, settle_s)
-    words, retained = read_log(probe, manifest, boots_before)
+    words, retained = read_log(probe, manifest, boots_before, baseline_known)
     keep = read_keep(probe, manifest)
     if probe.dry_run:
         return ["dry run: no device was contacted"], None
@@ -290,8 +303,8 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
         # normally, and it sent a whole investigation down the wrong path. Two
         # or three of those are the erase and the reboot this runner performs
         # itself, so a healthy arm shows a small delta.
-        booted = keep["boots"] - boots_before
-        if booted > 4:
+        booted = keep["boots"] - boots_before if baseline_known else None
+        if booted is not None and booted > 4:
             note = (f"the part booted {booted} times during this run "
                     f"(cumulative {keep['boots']}, reset status "
                     f"{keep['reset_status']:#04x}, furthest stage "
