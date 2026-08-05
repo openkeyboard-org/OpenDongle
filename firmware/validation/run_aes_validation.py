@@ -180,7 +180,10 @@ def read_keep(probe, manifest):
     if not addr or probe.dry_run:
         return None
     out = Path(manifest["bin"]).with_suffix(".keep.bin")
-    probe.check("-r", str(out), addr, "20", what="retained diagnosis read")
+    # 32 bytes = 8 words, the whole block. Reading only the first five silently
+    # hid every field beyond VK_STAGE, which defeated a later addition without
+    # any error -- the parse just saw a short list.
+    probe.check("-r", str(out), addr, "32", what="retained diagnosis read")
     # A short or odd-length read is a probe problem, not a device verdict. Left
     # unguarded it raised LogError out of run_arm, which only catches InfraError,
     # and the whole suite died with a traceback instead of reporting one bad arm.
@@ -188,7 +191,14 @@ def read_keep(probe, manifest):
         w = R.words_from_bytes(out.read_bytes())
     except R.LogError as exc:
         raise InfraError(f"malformed retained-diagnosis read: {exc}") from exc
-    if len(w) < 5 or w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
+    # The whole 8-word block or nothing: a short-but-word-aligned read is a
+    # transport fault, and quietly accepting 5-7 words would let truncated
+    # retained data pass as trustworthy -- exactly what the 32-byte request
+    # exists to prevent. Only a magic mismatch means "no baseline yet".
+    if len(w) != 8:
+        raise InfraError(
+            f"retained-diagnosis read returned {len(w)} words, expected 8")
+    if w[0] != R.M["AES_LOG_KEEP_MAGIC"]:
         return None
     return {"boots": w[1], "reset_status": w[2],
             "wdog_ctrl": w[3] & 0xFF, "wdog_count": (w[3] >> 8) & 0xFF,
@@ -219,10 +229,27 @@ def read_log(probe, manifest, boots_before=0):
             w = R.words_from_bytes(out.read_bytes())
         except R.LogError as exc:
             raise InfraError(f"malformed retained-log read: {exc}") from exc
+        # The whole block or a transport error -- same rule as read_keep. A
+        # short word-aligned read previously indexed off the end (traceback,
+        # not a verdict) or quietly fell through to the live log.
+        if len(w) != int(manifest["log_words"]) + 3:
+            raise InfraError(
+                f"retained-log read returned {len(w)} words, expected "
+                f"{int(manifest['log_words']) + 3}")
         # w[2] is the boot the snapshot was taken on. Retained RAM survives
         # reflashing, so a snapshot from an earlier run of the SAME build would
         # otherwise pass the build-id check and be reported as this run's
         # result. Only a snapshot taken after the pre-flash boot count counts.
+        #
+        # When there is NO baseline (boots_before == 0), any snapshot is
+        # accepted -- deliberately. The baseline is unknown on every first run
+        # of a freshly flashed build, and that is exactly the run where a part
+        # that reboots before the halt leaves the snapshot as the only
+        # complete record; rejecting it would discard the recovery this
+        # mechanism exists for. What keeps that safe: the snapshot carries its
+        # own magic (published last, so a torn copy never validates) and the
+        # log inside it embeds the build id of the image that wrote it, which
+        # verify() checks against the manifest.
         if (w[0] == R.M["AES_LOG_SAVED_MAGIC"] and 0 < w[1] <= len(w) - 3
                 and w[2] > boots_before):
             return list(w[3:3 + w[1]]), True
@@ -243,7 +270,13 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     # Before writing anything: how many times has this part booted so far? Any
     # retained snapshot at or below this count predates the run and is stale.
     before = read_keep(probe, manifest)
-    boots_before = before["boots"] if before else 0
+    # An absent baseline is stated, not collapsed to 0: with a 0 sentinel the
+    # snapshot freshness gate degenerates to "any snapshot" and the reboot
+    # delta counts history as if it were this run. (Cross-build snapshot reuse
+    # is separately blocked by verify(): the snapshot content embeds the build
+    # id of the image that wrote it.)
+    baseline_known = before is not None
+    boots_before = before["boots"] if baseline_known else 0
 
     flash_and_run(probe, manifest, settle_s)
     words, retained = read_log(probe, manifest, boots_before)
@@ -280,9 +313,18 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     # finding, and the retained snapshot deliberately hides it from the log.
     if keep:
         rec.keep = keep
-        if keep["boots"] > 1:
-            note = (f"the part booted {keep['boots']} times during this run "
-                    f"(reset status {keep['reset_status']:#04x}, furthest stage "
+        # CUMULATIVE, not per-run: retained RAM survives reflashing, so this
+        # counter climbs across runs. Reporting it raw once read "booted 50
+        # times during this run" when the run accounted for about five -- the
+        # difference between a part in a reset loop and a part behaving
+        # normally, and it sent a whole investigation down the wrong path. Two
+        # or three of those are the erase and the reboot this runner performs
+        # itself, so a healthy arm shows a small delta.
+        booted = keep["boots"] - boots_before if baseline_known else None
+        if booted is not None and booted > 4:
+            note = (f"the part booted {booted} times during this run "
+                    f"(cumulative {keep['boots']}, reset status "
+                    f"{keep['reset_status']:#04x}, furthest stage "
                     f"{keep['stage']})")
             if retained:
                 print(f"    note: {note}; results are from the retained "

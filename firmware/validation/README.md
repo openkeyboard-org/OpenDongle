@@ -23,18 +23,20 @@ at all, and it is not something a unit test on one chip can establish.
 | arm | chip | backend | notes |
 |---|---|---|---|
 | `ch570-asm-a` | CH570 | `ASM_A` | the shipping default |
-| `ch570-asm-f` | CH570 | `ASM_F` | **cannot build today** — see below |
+| `ch570-asm-f` | CH570 | `ASM_F` | zero SRAM code; needs the loop buffer |
 | `ch570-c` | CH570 | portable C | the fallback any future chip gets first |
 | `ch572-hw` | CH572 | hardware engine | same driver as CH592, different silicon |
+| `ch572-asm-a` | CH572 | `ASM_A` | same-silicon software-vs-engine control |
 | `ch592-hw` | CH592 | hardware engine | |
 
-`ASM_F` requires `CORECFGR` bit 3 (`ROM_LOOP_ACC`). Production boots `0x25`,
-which has it clear, so selecting that backend fails the build with an explicit
-`#error`. **That refusal is correct behaviour, not a broken arm** — without it
-the backend would be bit-exact but roughly 15× slower than its documented cost,
-silently. The runner detects the condition from `ch570_corecfgr.h` and reports
-the arm as skipped with the reason. It starts working by itself the day the
-startup value changes.
+`ASM_F` requires `CORECFGR` bit 3 (`ROM_LOOP_ACC`). Production now boots
+`0x2D`, which has it set, so the arm builds and runs. If the startup value ever
+returns to `0x25` the backend's `#error` guard resumes refusing the build, and
+the runner reports the arm as skipped with the reason — **that refusal is
+correct behaviour, not a broken arm**: without it the backend would be
+bit-exact but roughly 15× slower than its documented cost, silently. The
+runner derives the condition from `ch570_corecfgr.h`, so no configuration
+accompanies the flip in either direction.
 
 CH572 is the control that matters historically: it is the same family as CH570
 and *has* the AES engine at the same register block, which is how "CH570's
@@ -100,34 +102,40 @@ investigate, not a failure.
 
 ## Measured results
 
-All four buildable arms pass, and all four produce the same differential fold —
-which is the property the suite exists to prove:
+Production CORECFGR is `0x2D` (ROM loop buffer on). Every buildable arm passes
+and produces the same differential fold — the property the suite exists to
+prove:
 
 | arm | chip | fold | cycles/block | key schedule |
 |---|---|---|---|---|
-| `ch570-asm-a` | CH570 @100 MHz | `b106130c` | 1,944 | 59,113 |
-| `ch570-c` | CH570 @100 MHz | `b106130c` | 43,396 | 45,378 |
-| `ch572-hw` | CH572 @100 MHz | `b106130c` | 4,011 | 5,126 |
-| `ch572-asm-a` | CH572 @100 MHz | `b106130c` | 1,944 | 59,113 |
+| `ch570-asm-a` | V3C @100 MHz | `b106130c` | 1,672 | 8,899 |
+| `ch570-asm-f` | V3C @100 MHz | `b106130c` | 3,992 | 9,429 |
+| `ch570-c` | V3C @100 MHz | `b106130c` | 30,721 | 17,535 |
+| `ch572-hw` | CH572 @100 MHz | `b106130c` | 2,966 | 1,707 |
+| `ch572-asm-a` | CH572 @100 MHz | `b106130c` | 1,672 | 8,899 |
 | `ch592-hw` | CH592 @60 MHz | `b106130c` | 865 | 1,359 |
 
-`ch572-asm-a` exists so the software-vs-hardware comparison is same-silicon:
-**the assembly kernel is 2.06x faster than the hardware engine** on the part
-that has the engine (1,944 against 4,011). The engine core is not slow, its
-driver is -- it reloads the key and shuffles data through registers on every
-block. The key schedule inverts it, so the engine wins below ~27 blocks per key.
+The V3C rows measure identically on CH570 and CH572 silicon — same core, same
+buffer — which is what lets either part stand in for the other on the bench,
+and figures reproduce to the cycle across independent sweeps (key schedules
+within ±2). At the old `0x25` (buffer off) the same silicon measured ASM_A
+1,944 / 59,113, C 43,396 / 45,378, CH572 engine 4,011 / 5,126, with ASM_F
+unbuildable; those flash-dominated figures moved ~3% with unrelated link
+shifts, so read them to two significant figures.
 
-Precision: the SRAM-resident kernel is exactly reproducible (1,944 on every
-build, both chips). Flash-resident figures move up to ~3% when unrelated code
-shifts the link, since with the loop buffer off their cost is dominated by
-instruction fetch. Read the flash rows to two significant figures.
+`ch572-asm-a` exists so the software-vs-hardware comparison is same-silicon:
+**the assembly kernel is 1.8× faster than the hardware engine** on the part
+that has the engine (1,672 against 2,966). The engine core is not slow, its
+driver is — it reloads the key and shuffles data through registers on every
+block. The key schedule leans the other way (8,899 against 1,707), so the
+engine wins below ~6 blocks per key and the software kernel above.
 
 Cycle figures are measured in-loop and include call overhead, so they run a
-little above the kernel-only costs quoted in `hal_aes.h`. Two of them are not
-yet reconciled with that header and should not be copied into it as-is: the
-hardware arms report a key-schedule cost far above what caching four words can
-plausibly take, and the header's "CH592 hardware, 2,700 cycles" row was in fact
-measured on a CH572.
+little above kernel-only costs quoted in bench material. One number remains
+unreconciled and should not be over-read: the hardware arms report a
+key-schedule cost (CH572 1,707, CH592 1,359) far above what caching four words
+can plausibly take. Treat the hardware key-schedule column as a regression
+signal, not a cost model.
 
 ## How results come back
 
@@ -191,3 +199,33 @@ Every device written is left running a standalone image with no bootloader:
 ```sh
 make ch570-factory-flash WCHLINK_SERIAL=<serial>
 ```
+
+## CORECFGR bit 3 (ROM_LOOP_ACC): how 0x2D became production
+
+Measured on V3C silicon at 100 MHz; the AES table above is the 0x2D result.
+The flip's headline is the key schedule, not the block: ASM_A's went from
+67.6% of an 875 µs poll slot to 10.2% (59,113 → 8,899, 6.6×) for zero SRAM,
+and ASM_F became buildable and measurable at all (3,992 against its unverified
+bench figure of 3,797).
+
+RF at `0x2D`, end to end on a production keyboard: pairing, reconnect, typing,
+indicators, media keys and sleep/wake all pass; bench pairing was verified down
+to the bond write at `0x3A000` and HID reports arriving on the host. That
+exercises both sites that reach the vendor bring-up (boot, and the
+post-bond-save reconnect in `rf_task.c`), so the known delay-loop hazard — the
+calibration settle in `RFEND_DevInit` collapsing ~99 µs → ~3.3 µs — did not
+manifest on any functional path.
+
+Two rules were established the hard way and live in `ch570_corecfgr.h`:
+
+- **Write CORECFGR once, at reset, never again.** A guard that dropped to
+  `0x25` across the vendor RF init and restored `0x2D` after broke pairing
+  outright (0/2, bond never written) against a byte-exact passing control.
+  Both *consistent* configurations work; mixing them fails — the vendor init
+  appears to derive timing-dependent values that runtime consumes.
+- **Never read it.** CSR `0xBC0` is write-only on this silicon; `csrr`
+  destabilises the part (A/B: 3/3 failures with the read, 2/2 passes without).
+
+Residual risk, named rather than buried: RF **margin**. An under-settled
+calibration is exactly the fault that works at bench range and degrades at
+distance or under interference; functional passes do not retire it.

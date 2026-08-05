@@ -20,22 +20,42 @@
  *   2     ROM_JUMP_ACC   jump acceleration
  *   3     ROM_LOOP_ACC   128-byte ROM LOOP BUFFER -- not the general instruction
  *                        cache the datasheet calls it. Worth ~30x on a
- *                        flash-resident loop whose body is <=112 bytes, 1.44x on
- *                        the AES cipher, and it costs no memory. OFF today; see
- *                        the note below before turning it on.
+ *                        flash-resident loop whose body is <=112 bytes; measured
+ *                        on the AES paths, 1.16x-1.41x per block and 6.6x on the
+ *                        key schedule. Costs no memory. ON in production (this
+ *                        is bit 3 of the 0x2D below); see the rules above.
  *   5     IE_REMAP_EN    REQUIRED. With this clear, CSR 0x800 is read-only, which
  *                        silently breaks __enable_irq/__disable_irq and this
  *                        firmware's own csrrs/csrrc on 0x800 (rf_task.c,
  *                        usb_device.c). This is why ch32fun's 0x0f/0x1f must NOT
  *                        be copied here.
  *
- * TURNING ON ROM_LOOP_ACC (0x25 -> 0x2D) is a firmware-wide behavioural change,
- * not a local one, and it is NOT yet done. Measured consequences and the two
- * known hazards -- a delay loop inside libCH57xRF.a at RFEND_DevInit+0x76 that
- * would collapse from ~50-100 us to ~3 us, and the fact that code CALLED FROM a
- * loop also speeds up ~2.1x so the hazard surface is wider than loop bodies --
- * are written up in bench/aes_spike/CORE-FINDINGS.md. Do not flip it without
- * running the RF end-to-end A/B described there.
+ * ROM_LOOP_ACC IS ON IN PRODUCTION (0x25 -> 0x2D), validated on silicon:
+ *
+ *  - AES: every backend still folds b106130c; ASM_A 1,944 -> 1,672
+ *    cycles/block and its key schedule 59,113 -> 8,899 (6.6x, 68% of a poll
+ *    slot down to 10%); ASM_F becomes buildable and measures 3,992. Figures
+ *    reproduce to the cycle across independent sweeps (firmware/validation).
+ *  - RF end-to-end at 0x2D on a production keyboard: pairing, reconnect,
+ *    typing, indicators, media keys and sleep/wake all pass; bench pairing
+ *    verified down to the bond write and HID reports on the host. The known
+ *    hazard -- the calibration settle in libCH57xRF.a's RFEND_DevInit
+ *    collapsing ~99 us -> ~3.3 us -- did not manifest on any functional path.
+ *    Residual risk is RF margin at range, which bench-distance tests cannot
+ *    rule out.
+ *
+ * TWO RULES THIS VALUE MUST OBEY, both measured the hard way:
+ *
+ *  1. WRITE IT ONCE, AT RESET, AND NEVER TOUCH IT AGAIN. A guard that dropped
+ *     to 0x25 across the vendor RF bring-up and restored 0x2D after broke
+ *     pairing outright (0/2, bond never written) while both consistent
+ *     configurations pass (all-0x25 and all-0x2D). The vendor init appears to
+ *     derive timing-dependent values consumed at runtime; init and runtime
+ *     must therefore run under the SAME core configuration. See the note at
+ *     the RFRole_BasicInit call in hal_rf_ch570.c.
+ *  2. NEVER READ IT. CSR 0xBC0 is write-only on this silicon; csrr
+ *     destabilises the part (A/B: 3/3 failures with the read, 2/2 passes
+ *     without, changing nothing else).
  */
 #ifndef CH570_CORECFGR_H
 #define CH570_CORECFGR_H
@@ -43,7 +63,8 @@
 #define CH570_CORECFGR_ROM_LOOP_ACC  0x08
 #define CH570_CORECFGR_IE_REMAP_EN   0x20
 
-/* The value reset_handler_ch570.S writes to CSR 0xBC0. Change it in ONE place. */
-#define CH570_CORECFGR_VALUE         0x25
+/* The value reset_handler_ch570.S writes to CSR 0xBC0. Change it in ONE place,
+ * and only here -- see the two rules above. */
+#define CH570_CORECFGR_VALUE         0x2D
 
 #endif /* CH570_CORECFGR_H */

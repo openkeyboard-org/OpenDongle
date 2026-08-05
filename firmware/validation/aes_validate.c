@@ -535,14 +535,18 @@ int main(void)
      * (ROM_LOOP_ACC) changes the flash-resident backends' cost by roughly 15x,
      * so a cycle count is not interpretable without it.
      *
-     * THIS IS THE VALUE STARTUP WRITES, NOT A VALUE READ BACK. It used to be a
-     * `csrr 0xbc0`, and that instruction RESETS A CH570: production only ever
-     * writes CORECFGR, and reading it is fatal on this silicon. The symptom was
-     * vicious -- the part rebooted, .bss was cleared, and the log came back
-     * looking like the cipher had hung partway through the differential, at a
-     * deterministic block count. It cost a long debugging session to find, and
-     * the read existed only to record the configuration a measurement was taken
-     * under, so it destroyed the measurement it was there to qualify.
+     * THIS IS THE VALUE STARTUP WRITES, NOT A VALUE READ BACK, because on this
+     * silicon CORECFGR IS WRITE-ONLY. A `csrr 0xbc0` destabilises a CH570; it
+     * is not a readable register. Confirmed twice: an A/B against an otherwise
+     * identical harness fails 3/3 with the read and passes 2/2 without it,
+     * changing nothing else.
+     *
+     * The symptom is vicious, which is worth recording because it cost a long
+     * debugging session: the part reboots, .bss is cleared, and the log comes
+     * back looking like the cipher hung partway through the differential at a
+     * deterministic block count -- nothing points at the CSR. And the read
+     * existed only to record the configuration a measurement was taken under,
+     * so it destroyed the very measurement it was there to qualify.
      *
      * CH570_CORECFGR_VALUE is the same constant reset_handler_ch570.S writes, so
      * this still cannot drift from what the core is actually running -- it is

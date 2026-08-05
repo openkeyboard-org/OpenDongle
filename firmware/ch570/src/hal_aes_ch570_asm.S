@@ -507,20 +507,17 @@ aes_a_rk:
 
 /* ==========================================================================
  * VARIANT F — flash-resident, shaped to the 128-byte ROM loop buffer.
- * 3,797 cycles/block is a BENCH figure, not re-confirmed in this repository
- * (a bench build of the same kernel measured 3,796 -- link alignment, not a
- * behaviour change). It cannot be: this backend refuses to compile while
- * CORECFGR bit 3 is clear, which production leaves clear, so
- * firmware/validation reports the ASM_F arm as skipped and never measures it.
- * Since ASM_F only ever runs with the ROM loop buffer enabled, a
- * buffer-enabled bench measurement is the right one for it -- but it is
- * unverified here, and hal_aes.h marks it n/m for the same reason.
- * ZERO bytes of code in SRAM, 432 B of data (256 B S-box +
- * 176 B schedule). Leaves the radio .highcode entirely untouched.
+ * 3,992 cycles/block, measured by firmware/validation on V3C silicon at the
+ * production CORECFGR 0x2D and reproduced to the cycle across sweeps; fold
+ * b106130c on the 512-block differential. (Bench builds of the same kernel
+ * measured 3,796/3,797 -- link alignment and harness overhead, not a
+ * behaviour difference.) ZERO bytes of code in SRAM, 432 B of data (256 B
+ * S-box + 176 B schedule). Leaves the radio .highcode entirely untouched.
  *
  * REQUIRES CORECFGR bit 3 (ROM_LOOP_ACC). With it clear this is still
- * bit-exact but degrades to ~42,000-68,000 cycles/block. Production boots
- * 0x25 (bit 3 CLEAR) today — see hal_aes_ch570_impl.h.
+ * bit-exact but degrades to ~42,000-68,000 cycles/block, which is why the
+ * selector #errors rather than build it that way. Production boots 0x2D
+ * (bit 3 SET) — see hal_aes_ch570_impl.h and ch570_corecfgr.h.
  *
  * Its 108-byte inner loop body sits inside the measured <=112 B unconditional
  * band. Do not grow it: at 120 B it needs .balign 128 to work at all, and at

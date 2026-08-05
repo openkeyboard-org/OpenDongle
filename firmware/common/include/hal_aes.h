@@ -46,63 +46,52 @@
  *  - COST, so a caller can budget honestly. On CH570 this depends on which
  *    backend is selected (see ch570/src/hal_aes_ch570_impl.h).
  *
- *    CH570 backends, at 100 MHz. The slot is the 875 us connected poll, so
- *    87,500 cycles:
+ *    CH570 backends, at 100 MHz, with the production CORECFGR value 0x2D
+ *    (ROM loop buffer ON -- see ch570/src/ch570_corecfgr.h). The slot is the
+ *    875 us connected poll, so 87,500 cycles:
  *
  *      backend         cycles/block   % slot   key schedule   % slot
- *      ASM_A (default)      1,944      2.2%         59,113    67.6%
- *      ASM_F                3,797      4.3%            n/m      n/m
- *      C (portable)        43,396     49.6%         45,378    51.9%
+ *      ASM_A (default)      1,672      1.9%          8,899    10.2%
+ *      ASM_F                3,992      4.6%          9,429    10.8%
+ *      C (portable)        30,721       35%         17,535    20.0%
  *
  *    The hardware engines, measured on their own silicon and clock:
  *
- *      CH572 hardware, 100 MHz:  4,011 cycles/block,  40.1 us,  4.6% of slot
+ *      CH572 hardware, 100 MHz:  2,966 cycles/block,  29.7 us,  3.4% of slot
  *      CH592 hardware,  60 MHz:    865 cycles/block,  14.4 us,  1.6% of slot
  *
- *    THE SOFTWARE KERNEL BEATS THE HARDWARE ENGINE, measured on one CH572 so
- *    this is cipher-vs-engine and not part-vs-part: ASM_A 1,944 against the
- *    engine's 4,011, a factor of 2.06. The engine core is not slow; the driver
- *    around it is, because it reloads all four key words and shuffles four data
- *    words each way on EVERY block (the engine keeps no key across its reset
- *    pulse), flash-resident with the loop buffer off. The key schedule inverts
- *    it -- 59,113 against 5,126 -- so the engine wins below ~27 blocks per key
- *    and the software kernel above it. A CTR link re-keying per session is far
- *    above that crossover. *
- *    ON PRECISION. The SRAM-resident kernel is EXACTLY reproducible: ASM_A
- *    measures 1,944 on every build, on both a CH570 and a CH572. The
- *    flash-resident figures are not -- they move by up to ~3% when unrelated
- *    code shifts the link, because with the ROM loop buffer off their cost is
- *    dominated by instruction fetch and therefore by alignment. Adding three
- *    stores to a platform file moved the CH572 engine from 4,139 to 4,011 and
- *    the portable C from 43,510 to 43,396. Treat the flash rows as good to two
- *    significant figures, not to the digit, and do not chase small deltas.
-
+ *    Every figure is a true core-cycle count measured by firmware/validation on
+ *    silicon under the production startup, and reproduced to the cycle across
+ *    independent flash-and-run sweeps (key schedules within +/-2). They are
+ *    in-loop measurements and include call overhead, so they sit slightly above
+ *    kernel-only costs quoted in bench material. The V3C rows measure
+ *    identically on CH570 and CH572 -- same core, same buffer -- which is what
+ *    lets either part stand in for the other on the bench.
  *
- *    Every figure above is a true core-cycle count measured by
- *    firmware/validation on production-faithful silicon -- same startup, same
- *    CORECFGR, same clock as ships -- and reproduced bit-identically across
- *    repeated runs. They are in-loop measurements and include call overhead, so
- *    they sit slightly above the kernel-only costs quoted in bench material.
+ *    THE SOFTWARE KERNEL BEATS THE HARDWARE ENGINE on the part that has one:
+ *    ASM_A 1,672 against the engine's 2,966 on the same CH572, 1.8x. The
+ *    engine core is not slow; its driver reloads the key and shuffles four
+ *    data words each way on EVERY block (the engine keeps no key across its
+ *    reset pulse). The key schedule leans the other way -- 8,899 against
+ *    1,707 -- so the engine wins below ~6 blocks per key and the software
+ *    kernel above; a CTR link re-keying per session is far above that.
  *
- *    NOTE THE KEY SCHEDULE COLUMN. It is new, and it is the number that
- *    actually constrains a caller on CH570: ASM_A's schedule is 31x its block
- *    cost and eats 69% of a poll slot on its own. Publishing only cycles/block
- *    made the backend look nearly free and hid that entirely. The schedule runs
- *    once per key, so this is a scheduling constraint rather than a throughput
- *    one -- but do not call hal_aes_set_key() inside a poll slot.
+ *    THE KEY SCHEDULE COLUMN is the number that used to constrain callers
+ *    hard: at the old CORECFGR 0x25 it was 59,113 cycles -- 68% of a poll slot
+ *    -- and the seam had to forbid re-keying inside one. At 0x2D it is 89 us,
+ *    10.2%. Re-keying outside the poll grid remains the right design (it is
+ *    still 5.3x a block), but it is no longer prohibitive if a future path
+ *    needs it mid-session.
  *
- *    Three earlier figures in this file were wrong and are corrected here. The
- *    "~29,500 cycles" once quoted for the portable backend was taken with
- *    SysTick counting HCLK/8 AND under a bench harness that enabled the ROM
- *    loop buffer, while production boots with it disabled. The "2,700 cycles,
- *    CH592 hardware" row was measured on a CH572, not a CH592 -- the two differ
- *    by 4.7x -- and is replaced above by a measurement of each part.
- *
- *    ASM_F's 3,797 is NOT MEASURED here (n/m) and remains a bench figure. That
- *    backend cannot be built while CORECFGR bit 3 is clear, which production
- *    leaves clear; since it only ever runs with the ROM loop buffer enabled, a
- *    loop-buffer-enabled bench measurement is the right one for it, but nothing
- *    in this repository has re-confirmed it.
+ *    HISTORY, kept so nobody resurrects a stale number. At CORECFGR 0x25
+ *    (loop buffer off) the same silicon measured: ASM_A 1,944 / 59,113,
+ *    C 43,396 / 45,378, CH572 engine 4,011 / 5,126; ASM_F cannot build there
+ *    (its selector #errors, deliberately). Those 0x25 figures moved ~3% with
+ *    unrelated link shifts because flash fetch dominated them; at 0x2D the
+ *    sweep-to-sweep spread observed so far is zero. Two figures that predate
+ *    the validation suite were wrong and stay dead: "~29,500" for portable C
+ *    (SysTick counting HCLK/8 under a bench harness) and "2,700, CH592
+ *    hardware" (actually measured on a CH572).
  *
  *    The intended construction still precomputes keystream in task context and
  *    leaves only the XOR in the radio interrupt. With the default backend a

@@ -7,28 +7,32 @@
  * hal_aes_ch570_asm.S as well as by C, so anything the assembler cannot parse
  * must not appear here.
  *
- * Three backends, all producing identical ciphertext (512-vector differential
- * against a CH572 hardware AES engine, FNV-1a checksum b106130c, compared
- * byte-for-byte). Cycles measured on CH570 silicon at 100 MHz; SRAM and stack
- * margin measured from this firmware's own link, with the seam retained:
+ * Three backends, all producing identical ciphertext (512-vector differential,
+ * FNV-1a checksum b106130c, compared byte-for-byte across every backend and
+ * both hardware engines). Cycles measured on V3C silicon at 100 MHz under the
+ * production CORECFGR value 0x2D (ROM loop buffer ON -- ch570_corecfgr.h);
+ * SRAM and stack margin measured from this firmware's own link, with the seam
+ * retained:
  *
  *   IMPL    cycles/block   key sched   SRAM added   .highcode   stack margin
- *   ASM_A        1,944      59,113        840 B       404 B        2,164 B
- *   ASM_F        3,797         n/m        432 B         0 B        2,572 B
- *   C           43,396      45,378        432 B         0 B        2,572 B
+ *   ASM_A        1,672       8,899        840 B       404 B        2,164 B
+ *   ASM_F        3,992       9,429        432 B         0 B        2,572 B
+ *   C           30,721      17,535        432 B         0 B        2,572 B
  *
- * Cycles are measured by firmware/validation on production-faithful silicon and
- * reproduce bit-identically between runs; ASM_F's is a bench figure (n/m here)
- * because that backend cannot be built while CORECFGR bit 3 is clear.
+ * All figures are from firmware/validation and reproduce to the cycle across
+ * independent sweeps (key schedules within +/-2). They measure identically on
+ * CH570 and CH572 -- same core, same buffer. For the record at the OLD 0x25
+ * (buffer off): ASM_A 1,944 / 59,113, C 43,396 / 45,378, ASM_F unbuildable.
  *
- * ASM_A's KEY SCHEDULE IS SLOWER THAN THE PORTABLE ONE -- 59,113 against
- * 45,378 -- and that is deliberate, not a defect. Variant A holds the state as
- * four ROW words, so hal_aes_ch570.c transposes the schedule once at set_key
- * time, which is what makes AddRoundKey four plain word loads inside the
- * kernel. The extra ~13,700 cycles are repaid after 0.33 blocks, since each
- * block is 41,452 cycles cheaper than the portable backend. Both schedules are
- * ordinary C in flash; there is no hand-written assembly key schedule for any
- * backend, and adding one is not the lever here -- see the note below.
+ * ASM_A's key schedule holds the state as four ROW words, so hal_aes_ch570.c
+ * transposes the schedule once at set_key time -- that is what makes
+ * AddRoundKey four plain word loads inside the kernel. At 0x25 the transpose
+ * made ASM_A's schedule SLOWER than portable C's (59,113 vs 45,378); under the
+ * loop buffer the tight transpose loop accelerates 6.6x and the relationship
+ * flips (8,899 vs 17,535). Either way both schedules are ordinary C in flash;
+ * there is no hand-written assembly key schedule for any backend, and adding
+ * one is not a useful lever: 8,899 cycles once per key is 10.2% of one poll
+ * slot, and re-keying happens outside the poll grid regardless.
  *
  * The 875 us connected-poll slot is 87,500 cycles. The linker asserts a 2,048 B
  * stack floor (CH570_STACK_FLOOR), so ASM_A ships with 116 B to spare and
@@ -37,33 +41,18 @@
  * NOTE THE C ROW. The portable backend is FLASH-resident, because aes_sw.c is
  * shared with CH592 and carries no chip-specific section attributes -- putting
  * __HIGH_CODE in common code to suit one part would be wrong. So C costs
- * 43,396 cycles/block, 434 us, 50% of a poll slot. It exists for PORTABILITY,
+ * 30,721 cycles/block, 307 us, 35% of a poll slot. It exists for PORTABILITY,
  * not performance: it is what a future chip gets before anyone writes assembly
  * for it, and it is what firmware/tests/test_aes_sw.py exercises on the host.
  * Do not select it on CH570 expecting the 2,133-cycle figure quoted in
  * bench/aes_spike/ -- that was a bench build with the cipher forced into
  * .highcode and the unroll pragma disabled, which is not what ships here.
  *
- * ON THE KEY SCHEDULE COSTING 69% OF A POLL SLOT. It is flash-resident C for
- * every backend, on purpose: it runs once per key, so making it fast buys
- * nothing per block, and keeping it out of SRAM is what lets the cipher fit.
- * Hand-writing it in assembly is the wrong lever -- it would spend scarce SRAM
- * and review effort on a once-per-session cost. The cheap lever, if that 605 us
- * ever needs to come down, is CORECFGR bit 3: the schedule is a tight
- * flash-resident loop, exactly the shape the ROM loop buffer accelerates, and
- * the bench measured this same schedule at 8,890 cycles with the buffer on
- * (6.8x). That costs no SRAM at all. It is not yet done and carries
- * firmware-wide hazards -- see the ASM_F note below and CORE-FINDINGS.md.
- *
- * What the number really constrains is WHEN set_key may be called, not how it
- * is written: 605 us does not fit inside an 875 us slot alongside anything
- * else, so re-key outside the poll grid.
- *
  * Cycles are NOT the axis that matters between ASM_A and ASM_F; SRAM is. The
  * part has 12,272 B and the firmware already commits 9,268 B before any cipher.
  *
- * ASM_A is the default because it is 25x faster than the portable C for 408 B
- * more SRAM, and because it depends on no unadvertised ISA extension. (misa
+ * ASM_A is the default because it is 18x faster than the portable C for 408 B
+ * more SRAM (25x at the old 0x25, where flash fetch hurt C more), and because it depends on no unadvertised ISA extension. (misa
  * reads 0x40901106: RV32 I M B C U X, where ratified B is Zba+Zbb+Zbs and
  * excludes Zbc. clmul does work on this silicon, verified on both a CH570 and a
  * CH572, and two of the rejected variants needed it — ASM_A never does.)
@@ -91,11 +80,13 @@
  * Its kernel is a flash-resident loop shaped to fit the QingKe V3C 128-byte ROM
  * loop buffer. With bit 3 clear it stays bit-exact correct but degrades to an
  * estimated 42,000-68,000 cycles/block — no better than an unoptimised
- * flash-resident cipher and possibly worse. Production currently boots
- * CORECFGR = 0x25, which has bit 3 CLEAR. Do not select ASM_F until the startup
- * value is 0x2D. See bench/aes_spike/CORE-FINDINGS.md for the measurements and
- * for why 0x2D specifically (ch32fun's 0x0f/0x1f clear IE_REMAP_EN, which makes
- * CSR 0x800 read-only and silently breaks __enable_irq/__disable_irq).
+ * flash-resident cipher and possibly worse, which is why the guard below
+ * refuses the build rather than let that ship silently. Production now boots
+ * CORECFGR = 0x2D, so ASM_F builds and is silicon-validated (3,992
+ * cycles/block, fold b106130c); if the startup value ever returns to 0x25 the
+ * guard resumes refusing. See ch570_corecfgr.h for why 0x2D specifically
+ * (ch32fun's 0x0f/0x1f clear IE_REMAP_EN, which makes CSR 0x800 read-only and
+ * silently breaks __enable_irq/__disable_irq).
  *
  * C is kept permanently as the portable fallback for any future chip, and is
  * what firmware/tests/test_aes_sw.py exercises on the host.
