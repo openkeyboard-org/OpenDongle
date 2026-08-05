@@ -102,10 +102,31 @@
  *    context that preempts one in task context corrupts the result. Callers on
  *    the RF hot path should precompute keystream in task context and leave only
  *    the XOR in the IRQ-context receive path.
- *  - NOT CONSTANT-TIME. The software backend is table-driven and its timing
- *    depends on key and data. This is a considered trade: the threat model for
- *    this device is an attacker over the air, who cannot observe instruction
- *    timing. Do NOT reuse this seam anywhere a local attacker can measure it.
+ *  - TREAT AS NOT CONSTANT-TIME. Do NOT reuse this seam anywhere a local
+ *    attacker can measure it. That rule is unchanged by the measurements
+ *    below, which are stated so this note is accurate rather than merely
+ *    cautious -- an earlier version claimed the timing "depends on key and
+ *    data", which the bench falsified, and a false claim invites someone to
+ *    falsify it and then discard the caution with it.
+ *
+ *    What is actually known, per backend:
+ *      - ASM_A keeps its S-box and schedule in SRAM, where loads cost a fixed
+ *        2 cycles on this core regardless of address, and the kernel has no
+ *        data-dependent branches -- so it is plausibly constant-time BY
+ *        CONSTRUCTION on this silicon, and 512 random key/plaintext blocks
+ *        measured zero cycle spread. That is one backend, one compiler, one
+ *        configuration; it is corroboration, not a verified property.
+ *      - The portable C backend's tables live in flash, whose read cost is
+ *        measurably address- and alignment-sensitive on this part, and its
+ *        codegen is the compiler's to change -- assume data-dependent timing.
+ *      - The hardware engines are opaque; nothing is known about their
+ *        internal timing either way.
+ *
+ *    The considered trade stands: the threat model for this device is an
+ *    attacker over the air, who cannot observe instruction timing (keystream
+ *    is precomputed in task context, so cipher timing does not gate radio
+ *    responses). Anything more hostile than that needs its own analysis, not
+ *    this note.
  */
 #ifndef HAL_AES_H
 #define HAL_AES_H

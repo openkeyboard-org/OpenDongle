@@ -11,19 +11,28 @@
  * ought to be. An acknowledgement macro disconnected from startup would prevent
  * accidents but could still lie.
  *
- * Bit map (QingKe V3 processor manual V1.5; the CH570/CH572 datasheet's table is
- * lower fidelity and disagrees in several places):
+ * Bit map, from the QingKe V3 processor manual V1.5. The CH570/CH572 datasheet
+ * has a table for this register too and it is lower fidelity -- it marks bit 6
+ * Reserved where the manual documents INT_FENCE, marks FETCH_MODE=11 Reserved
+ * where the manual documents it as a valid mode, and calls bit 3 a general
+ * instruction cache when it is not one. Prefer the manual:
  *
  *   [1:0] FETCH_MODE     01 = prefetch on. Measured: 01 and 11 are
  *                        indistinguishable on this silicon, and the datasheet
  *                        marks 11 Reserved for this part, so leave it at 01.
  *   2     ROM_JUMP_ACC   jump acceleration
- *   3     ROM_LOOP_ACC   128-byte ROM LOOP BUFFER -- not the general instruction
- *                        cache the datasheet calls it. Worth ~30x on a
- *                        flash-resident loop whose body is <=112 bytes; measured
- *                        on the AES paths, 1.16x-1.41x per block and 6.6x on the
- *                        key schedule. Costs no memory. ON in production (this
- *                        is bit 3 of the 0x2D below); see the rules above.
+ *   3     ROM_LOOP_ACC   128-byte ROM LOOP BUFFER, not a cache: a flash loop
+ *                        whose body is <=112 bytes (120 with the head at
+ *                        .balign 128) runs at ~1.10 cycles/instruction instead
+ *                        of ~33, while straight-line flash code is unaffected.
+ *                        Never a slowdown at any loop count -- the first pass
+ *                        fills the buffer at unbuffered speed, so even a
+ *                        once-through loop breaks even. Costs no SRAM and no
+ *                        flash (8 KB of SRAM verified byte-for-byte across
+ *                        enabling, hammering and disabling it). Measured on
+ *                        the AES paths: 1.16x-1.41x per block, 6.6x on the key
+ *                        schedule. ON in production (bit 3 of the 0x2D below);
+ *                        see the rules above.
  *   5     IE_REMAP_EN    REQUIRED. With this clear, CSR 0x800 is read-only, which
  *                        silently breaks __enable_irq/__disable_irq and this
  *                        firmware's own csrrs/csrrc on 0x800 (rf_task.c,
