@@ -141,7 +141,41 @@ def make_mc(module, minichlink: str, dry_run: bool):
     return mc
 
 
-def patch_factory(module, minichlink: str):
+def patch_reboot_for_lifecycle(module):
+    """W9: make reboot() land in the bootloader deterministically.
+
+    scenario_lifecycle does `reboot(cfg)` then a single `probe(cfg)` and
+    expects the BOOTLOADER to answer. Whether it does is phase-dependent:
+    measured on this bench over SWD, the boot-request word at 0x200067F0 goes
+    0xB007CA11 -> 0x00000000 -> 0xB007CA11 as the bootloader consumes the magic
+    and the application re-arms it. That is the same alternation
+    enter_bootloader() documents and retries four times for -- but the
+    lifecycle path does not use it, so a single shot can land on the
+    application half, probe times out, and every later check fails as a
+    cascade.
+
+    A real power cut makes this materially more likely than a reset that leaves
+    SRAM intact, because the magic does not survive the cut: the part boots the
+    application first, and only the NEXT reset can be caught in the bootloader.
+    So this matters more once the cut actually cuts.
+
+    Only used for lifecycle. scenario_interrupted deliberately requires the
+    APPLICATION to be running after a cut, so it keeps the original.
+    """
+    original = module.reboot
+
+    def reboot(cfg, tries=4):
+        for _ in range(tries):
+            original(cfg)
+            if module.probe(cfg)[0]:
+                return
+        # Leave it to the scenario's own check to report the mismatch.
+
+    module.reboot = reboot
+    return original
+
+
+def patch_factory(module, dry_run: bool):
     """W6: read back and compare the bootloader after writing it."""
     original = module.factory
 
@@ -152,6 +186,8 @@ def patch_factory(module, minichlink: str):
             raise MinichlinkError(f"bootloader image missing: {image}")
         readback = image.with_suffix(".readback.bin")
         module.mc(cfg, "-r", str(readback), "0x0", str(image.stat().st_size))
+        if dry_run:
+            return
         if readback.read_bytes() != image.read_bytes():
             raise MinichlinkError(
                 f"bootloader readback differs from {image} - the write did not land")
@@ -160,10 +196,18 @@ def patch_factory(module, minichlink: str):
     module.factory = factory
 
 
-def whole_image_frames(module, cfg) -> int:
-    """W5: frames needed to cover the entire witness, not a literal 2."""
-    size = Path(cfg["boot"]).stat().st_size
-    return (size + 15) // 16
+def whole_image_frames(module, name: str) -> int:
+    """W5: frames needed to cover the entire witness, not a literal 2.
+
+    scenario_interrupted writes `<name>-A.bin` -- the witness -- 16 bytes at a
+    time, so the count must come from THAT file. Upstream's literal 2 covers 32
+    bytes of a 44-byte witness, leaving the case it is labelled with ("the
+    whole image, before COMMIT") unreached.
+    """
+    witness = Path(module.HERE) / f"{name}-A.bin"
+    if not witness.is_file():
+        raise MinichlinkError(f"witness image missing: {witness}")
+    return (witness.stat().st_size + 15) // 16
 
 
 def main() -> int:
@@ -188,8 +232,15 @@ def main() -> int:
         sys.exit(f"build the OBP 0.2 CLI first: cargo build --release "
                  f"--manifest-path {OPENBOOT}/tools/Cargo.toml")
 
+    # The scenarios name witness images by bare filename ("ch592-A.bin"), so
+    # they resolve against the CWD -- upstream's README runs them from the
+    # bench directory. Run from anywhere else and `openboot flash` exits 1 on a
+    # missing file, which the harness reports as "flash into slot A succeeds:
+    # 1" and every later check then fails as a cascade.
+    os.chdir(module.HERE)
+
     module.mc = make_mc(module, args.minichlink, args.dry_run)
-    patch_factory(module, args.minichlink)
+    patch_factory(module, args.dry_run)
 
     # W3/W4: rewrite the bench-local CHIPS table for THIS bench.
     for name, cfg in list(module.CHIPS.items()):
@@ -209,11 +260,15 @@ def main() -> int:
         print(f"\n=== {name} ===")
         try:
             if args.scenario in ("all", "lifecycle"):
-                module.scenario_lifecycle(name)
+                original_reboot = patch_reboot_for_lifecycle(module)
+                try:
+                    module.scenario_lifecycle(name)
+                finally:
+                    module.reboot = original_reboot
             if args.scenario in ("all", "interrupted"):
                 module.scenario_interrupted(name, 0, "after ERASE only")
                 module.scenario_interrupted(name, 1, "after ERASE + 1 write")
-                frames = whole_image_frames(module, cfg)
+                frames = whole_image_frames(module, name)
                 module.scenario_interrupted(
                     name, frames,
                     f"after ERASE + the whole image ({frames} frames), before COMMIT")
