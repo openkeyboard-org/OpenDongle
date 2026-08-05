@@ -57,15 +57,20 @@ ch592-factory:
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
 	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
 
+# OPENBOOT_TOOLCHAIN must be forwarded here too: flash-factory builds the
+# factory image, which reaches into the submodule. Without it the variable
+# falls back to MRS_TOOLCHAIN (GCC15) and check-openboot-toolchain refuses.
 ch570-factory-flash:
 	$(MAKE) -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
 	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
 	    flash-factory
 
 ch592-factory-flash:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
 	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
 	    flash-factory
 
