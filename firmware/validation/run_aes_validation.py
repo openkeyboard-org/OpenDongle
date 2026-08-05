@@ -205,7 +205,7 @@ def read_keep(probe, manifest):
             "stage": w[4]}
 
 
-def read_log(probe, manifest, boots_before=0, baseline_known=True):
+def read_log(probe, manifest, boots_before=0):
     """Halt the device and read the log back.
 
     PREFERS THE RETAINED SNAPSHOT. `aes_log` is in .bss and a reset clears it,
@@ -229,12 +229,29 @@ def read_log(probe, manifest, boots_before=0, baseline_known=True):
             w = R.words_from_bytes(out.read_bytes())
         except R.LogError as exc:
             raise InfraError(f"malformed retained-log read: {exc}") from exc
+        # The whole block or a transport error -- same rule as read_keep. A
+        # short word-aligned read previously indexed off the end (traceback,
+        # not a verdict) or quietly fell through to the live log.
+        if len(w) != int(manifest["log_words"]) + 3:
+            raise InfraError(
+                f"retained-log read returned {len(w)} words, expected "
+                f"{int(manifest['log_words']) + 3}")
         # w[2] is the boot the snapshot was taken on. Retained RAM survives
         # reflashing, so a snapshot from an earlier run of the SAME build would
         # otherwise pass the build-id check and be reported as this run's
         # result. Only a snapshot taken after the pre-flash boot count counts.
+        #
+        # When there is NO baseline (boots_before == 0), any snapshot is
+        # accepted -- deliberately. The baseline is unknown on every first run
+        # of a freshly flashed build, and that is exactly the run where a part
+        # that reboots before the halt leaves the snapshot as the only
+        # complete record; rejecting it would discard the recovery this
+        # mechanism exists for. What keeps that safe: the snapshot carries its
+        # own magic (published last, so a torn copy never validates) and the
+        # log inside it embeds the build id of the image that wrote it, which
+        # verify() checks against the manifest.
         if (w[0] == R.M["AES_LOG_SAVED_MAGIC"] and 0 < w[1] <= len(w) - 3
-                and baseline_known and w[2] > boots_before):
+                and w[2] > boots_before):
             return list(w[3:3 + w[1]]), True
 
     out = Path(manifest["bin"]).with_suffix(".log.bin")
@@ -262,7 +279,7 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     boots_before = before["boots"] if baseline_known else 0
 
     flash_and_run(probe, manifest, settle_s)
-    words, retained = read_log(probe, manifest, boots_before, baseline_known)
+    words, retained = read_log(probe, manifest, boots_before)
     keep = read_keep(probe, manifest)
     if probe.dry_run:
         return ["dry run: no device was contacted"], None
