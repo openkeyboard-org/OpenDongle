@@ -90,7 +90,7 @@ VALIDATE_RETAINED volatile uint32_t validate_keep[8];
 /* Defined below, in the logging section; declared here for vkeep_save(). */
 extern volatile uint32_t aes_log[AES_LOG_WORDS];
 
-VALIDATE_RETAINED volatile uint32_t validate_saved[AES_LOG_WORDS + 3];
+VALIDATE_RETAINED volatile uint32_t validate_saved[AES_LOG_WORDS + 4];
 
 static void vkeep_save(uint32_t n)
 {
@@ -105,8 +105,20 @@ static void vkeep_save(uint32_t n)
      * count before flashing and refuses any snapshot not taken after it.
      */
     validate_saved[2] = validate_keep[VK_BOOTS];
+    /*
+     * Which EXECUTION produced this snapshot. The runner writes a fresh random
+     * word into flash at AES_LOG_NONCE_ADDR each run, after the image; echoing
+     * it here is what lets the host tell this run's snapshot from one left by
+     * any earlier run of the same build in surviving retained RAM. Hosted
+     * builds have no flash to read and no runner to satisfy.
+     */
+#ifdef DONGLE_VALIDATE_HOSTED
+    validate_saved[3] = 0u;
+#else
+    validate_saved[3] = *(volatile const uint32_t *)(uintptr_t)AES_LOG_NONCE_ADDR;
+#endif
     for (uint32_t i = 0; i < n && i < AES_LOG_WORDS; i++)
-        validate_saved[3u + i] = aes_log[i];
+        validate_saved[4u + i] = aes_log[i];
     validate_saved[0] = AES_LOG_SAVED_MAGIC;     /* publish only once complete */
 }
 

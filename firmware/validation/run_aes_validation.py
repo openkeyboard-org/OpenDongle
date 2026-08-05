@@ -169,9 +169,31 @@ def flash_and_run(probe, manifest, settle_s):
                 "land. minichlink reports success regardless, which is why this "
                 "is checked rather than assumed.")
 
+    # Per-run nonce: the authority on which EXECUTION a retained snapshot
+    # belongs to (see AES_LOG_NONCE_ADDR in aes_log_format.h). Random, but
+    # never the all-0/all-F words a blank or shorted line could produce.
+    # Written to FLASH because probe writes to RAM silently fail on this
+    # silicon (measured: "Image written", readback unchanged) -- and verified
+    # by read-back like every other write, for the same reason.
+    nonce = 0
+    if not probe.dry_run:
+        import secrets
+        while nonce in (0x00000000, 0xFFFFFFFF):
+            nonce = int.from_bytes(secrets.token_bytes(4), "little")
+        nfile = Path(manifest["bin"]).with_suffix(".nonce.bin")
+        nfile.write_bytes(nonce.to_bytes(4, "little"))
+        naddr = f"0x{R.M['AES_LOG_NONCE_ADDR']:08X}"
+        probe.check("-w", str(nfile), naddr, what="nonce write")
+        nread = Path(manifest["bin"]).with_suffix(".nonce-rb.bin")
+        probe.check("-r", str(nread), naddr, "4", what="nonce read-back")
+        if nread.read_bytes() != nfile.read_bytes():
+            raise InfraError("nonce read-back mismatch: the flash write did "
+                             "not land")
+
     probe.check("-b", what="reboot out of halt")
     if not probe.dry_run:
         time.sleep(settle_s)
+    return nonce
 
 
 def read_keep(probe, manifest):
@@ -205,7 +227,7 @@ def read_keep(probe, manifest):
             "stage": w[4]}
 
 
-def read_log(probe, manifest, boots_before=0):
+def read_log(probe, manifest, boots_before=0, nonce=0):
     """Halt the device and read the log back.
 
     PREFERS THE RETAINED SNAPSHOT. `aes_log` is in .bss and a reset clears it,
@@ -223,7 +245,7 @@ def read_log(probe, manifest, boots_before=0):
     saved_addr = manifest.get("saved_addr")
     if saved_addr and not probe.dry_run:
         out = Path(manifest["bin"]).with_suffix(".saved.bin")
-        probe.check("-r", str(out), saved_addr, str(nbytes + 12),
+        probe.check("-r", str(out), saved_addr, str(nbytes + 16),
                     what="retained log read")
         try:
             w = R.words_from_bytes(out.read_bytes())
@@ -232,27 +254,21 @@ def read_log(probe, manifest, boots_before=0):
         # The whole block or a transport error -- same rule as read_keep. A
         # short word-aligned read previously indexed off the end (traceback,
         # not a verdict) or quietly fell through to the live log.
-        if len(w) != int(manifest["log_words"]) + 3:
+        if len(w) != int(manifest["log_words"]) + 4:
             raise InfraError(
                 f"retained-log read returned {len(w)} words, expected "
-                f"{int(manifest['log_words']) + 3}")
-        # w[2] is the boot the snapshot was taken on. Retained RAM survives
-        # reflashing, so a snapshot from an earlier run of the SAME build would
-        # otherwise pass the build-id check and be reported as this run's
-        # result. Only a snapshot taken after the pre-flash boot count counts.
-        #
-        # When there is NO baseline (boots_before == 0), any snapshot is
-        # accepted -- deliberately. The baseline is unknown on every first run
-        # of a freshly flashed build, and that is exactly the run where a part
-        # that reboots before the halt leaves the snapshot as the only
-        # complete record; rejecting it would discard the recovery this
-        # mechanism exists for. What keeps that safe: the snapshot carries its
-        # own magic (published last, so a torn copy never validates) and the
-        # log inside it embeds the build id of the image that wrote it, which
-        # verify() checks against the manifest.
-        if (w[0] == R.M["AES_LOG_SAVED_MAGIC"] and 0 < w[1] <= len(w) - 3
-                and w[2] > boots_before):
-            return list(w[3:3 + w[1]]), True
+                f"{int(manifest['log_words']) + 4}")
+        # w[3] is the run nonce -- the authority on which EXECUTION wrote this
+        # snapshot. The runner wrote a fresh random word into flash after the
+        # image; only a snapshot echoing it can be from this run, which closes
+        # every staleness path at once: retained RAM survives power cycles and
+        # reflashing, and the build id only distinguishes builds, so without
+        # the nonce a snapshot from an earlier run of the SAME build could be
+        # reported as this run's result. The boot-count check stays as belt
+        # and braces for the baseline-known case; it costs nothing.
+        if (w[0] == R.M["AES_LOG_SAVED_MAGIC"] and 0 < w[1] <= len(w) - 4
+                and nonce and w[3] == nonce and w[2] > boots_before):
+            return list(w[4:4 + w[1]]), True
 
     out = Path(manifest["bin"]).with_suffix(".log.bin")
     probe.check("-r", str(out), manifest["log_addr"], str(nbytes),
@@ -278,8 +294,8 @@ def run_arm(arm, probe, manifest, settle_s, exp, fold):
     baseline_known = before is not None
     boots_before = before["boots"] if baseline_known else 0
 
-    flash_and_run(probe, manifest, settle_s)
-    words, retained = read_log(probe, manifest, boots_before)
+    nonce = flash_and_run(probe, manifest, settle_s)
+    words, retained = read_log(probe, manifest, boots_before, nonce)
     keep = read_keep(probe, manifest)
     if probe.dry_run:
         return ["dry run: no device was contacted"], None

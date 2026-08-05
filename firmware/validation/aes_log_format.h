@@ -167,7 +167,25 @@
  *                    for a whole one.
  */
 #define AES_LOG_KEEP_MAGIC       0x564B3031  /* "VK01" */
-#define AES_LOG_SAVED_MAGIC      0x56533031  /* "VS01" */
+/* "VS02" -- bumped from VS01 when the snapshot gained the run nonce below, so
+ * a pre-upgrade snapshot can never validate against a post-upgrade runner. */
+#define AES_LOG_SAVED_MAGIC      0x56533032
+
+/*
+ * Per-run nonce, the authority on WHICH EXECUTION a retained snapshot belongs
+ * to. Retained RAM survives power cycles and reflashing on this silicon, and
+ * the build id only distinguishes builds -- so a snapshot from an earlier run
+ * of the same build could otherwise be reported as the current run's result.
+ * The runner writes a fresh random word at this FLASH address after flashing
+ * the image (RAM writes via the probe silently fail on this part -- measured;
+ * flash writes are read-back verified like everything else). The harness
+ * copies the word into the snapshot; the runner accepts only snapshots
+ * carrying the nonce it wrote for this run. The address sits far above every
+ * validation image (~34 KB, linked at 0x0) and inside both chips' app-region
+ * flash; the whole-chip erase each run clears it, so a runner that forgot to
+ * write it reads back the erased pattern and no snapshot can match.
+ */
+#define AES_LOG_NONCE_ADDR       0x00030000
 
 /* Set in place of AES_LOG_END if the harness ran out of log space. */
 #define AES_LOG_OVERFLOW         0x0F10FF00
