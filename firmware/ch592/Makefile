@@ -309,8 +309,16 @@ flash-factory: factory
 	    exit 1; \
 	  fi; fi
 	@echo "factory image read back OK"
-	"$(MINICHLINK)" -C linke \
-	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)") -b
+#	A REAL power cycle, not -b. "-b" reboots out of halt: it resumes the core
+#	rather than resetting through the boot path, so the boot decision does not
+#	re-run from a cold start and the unit has not actually demonstrated the
+#	claim printed below. CH59x has no F26 stale-XIP errata, so the stakes are
+#	lower here than on CH57x - but a factory install whose whole promise is
+#	"boots unattended on first power-on" should end by doing exactly that.
+	"$(MINICHLINK)" -kt \
+	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
+	"$(MINICHLINK)" -k3 \
+	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
 	@echo "NOTE: this image is factory-blessed - it carries slot A's boot"
 	@echo "      record - so the unit boots the application on first power-on."
 	@echo "      No 'openboot bless' step, and none is possible: the device"

@@ -250,8 +250,18 @@ flash-factory: factory
 	    -r "$(BUILD)/.flash-readback.bin" 0 $$(stat -c%s "$(FACTORY_BIN)")
 	cmp "$(BUILD)/.flash-readback.bin" "$(FACTORY_BIN)"
 	@echo "factory image read back OK"
-	"$(MINICHLINK)" -C linke \
-	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)") -b
+#	Finish with a REAL power cycle, not -b. "-b" reboots out of halt: it
+#	resumes the core rather than resetting through the boot path, so the
+#	boot decision does not re-run from a cold start. That matters on CH57x
+#	specifically - errata F26 means the XIP view can serve stale data after a
+#	controller write within the same power cycle, which is exactly why
+#	OpenBoot's own BOOT command resets rather than jumping. Ending on -b
+#	leaves the unit in a state that has not demonstrated the claim printed
+#	below, and a bench part flashed that way did not come up on USB.
+	"$(MINICHLINK)" -kt \
+	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
+	"$(MINICHLINK)" -k3 \
+	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
 	@echo "NOTE: this image is factory-blessed - it carries slot A's boot"
 	@echo "      record - so the unit boots the application on first power-on."
 	@echo "      No 'openboot bless' step, and none is possible: the device"
