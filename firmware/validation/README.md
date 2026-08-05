@@ -247,8 +247,8 @@ make ch570-factory-flash WCHLINK_SERIAL=<serial>
 Measured on V3C silicon at 100 MHz; the AES table above is the 0x2D result.
 The flip's headline is the key schedule, not the block: ASM_A's went from
 67.6% of an 875 µs poll slot to 10.2% (59,113 → 8,899 under the flash-key semantics of the day, 6.6× — the field now times SRAM keys and reads 7,647) for zero SRAM,
-and ASM_F became buildable and measurable at all (3,992 against its unverified
-bench figure of 3,797).
+and ASM_F became buildable and measurable at all (3,960-3,992 across layouts,
+against its unverified bench figure of 3,797).
 
 RF at `0x2D`, end to end on a production keyboard: pairing, reconnect, typing,
 indicators, media keys and sleep/wake all pass; bench pairing was verified down

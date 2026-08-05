@@ -517,8 +517,8 @@ static void timings(void)
 /* ------------------------------------------------------- timing decomposition
  *
  * One-off experiment support for the "hardware arms report an implausible key
- * schedule" investigation. Emits extra timing records (tags 3..7) that the
- * reader prints as "timing N" (tags 3..9). Decomposes hal_aes_set_key's measured cost:
+ * schedule" investigation. Emits extra timing records (tags 3..9) that the
+ * reader prints as "timing N". Decomposes hal_aes_set_key's measured cost:
  * it compiles to a tail call into newlib-nano's one-byte-loop memcpy, all
  * flash-resident, with the KAT key itself in flash .rodata -- so the number
  * mixes call overhead, loop fetch rate, and flash DATA reads.
