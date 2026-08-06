@@ -285,11 +285,18 @@ SECTIONS
 
     /* CODEREVIEW F01: pin the image-id header so the firmware can trust its
      * fixed staged offset, and keep the startup .highcode copy correct. */
-    /* Under A/B this can no longer be "== 0x2000": slot B links at 0x39000 and
-     * is equally valid. What must still hold is that the app links at one of
-     * OpenBoot's TWO slot bases and nowhere else - a garbled geometry read that
-     * produced some other address would otherwise link cleanly and then be
-     * unbootable, because the bootloader only ever jumps to a slot base. */
+    /* Under A/B this can no longer be "== 0x2000": slot B links at a different
+     * base and is equally valid.
+     *
+     * Be honest about the strength of what replaced it. ORIGIN(FLASH) and both
+     * DONGLE_SLOT_*_BASE symbols come from the SAME generated memory.ld, so
+     * this cannot detect a geometry that was read wrongly - a consistent but
+     * wrong memory.ld satisfies it. What it does catch is the two halves of the
+     * link disagreeing: a MEMORY block reintroduced into this file, or a
+     * memory.ld describing a different slot from the one the rest of the build
+     * was configured for. Validating the geometry itself belongs to
+     * openboot_geometry.py, which cross-checks slot contiguity and app-region
+     * containment against OpenBoot's own generated config. */
     ASSERT(ORIGIN(FLASH) == DONGLE_SLOT_A_BASE || ORIGIN(FLASH) == DONGLE_SLOT_B_BASE,
         "F01: app must link at one of OpenBoot's slot bases (see memory.ld)")
     ASSERT(_dongle_id_start == ORIGIN(FLASH) + 0x20,

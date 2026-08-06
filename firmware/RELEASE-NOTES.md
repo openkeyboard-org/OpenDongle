@@ -137,9 +137,16 @@ recovered via USB ISP (`wchisp`) or, if the application still answers, by
 rebooting into OpenBoot and flashing from there:
 
 ```sh
-opendongle --enter-bootloader --image <app.bin>
-openboot flash --force <app.bin>
+opendongle --enter-bootloader --image <slot-a>.bin
+openboot --vid 0x0C45 --pid 0xFEFE flash <chip>-product.obb --force
 ```
+
+**Flash the bundle, not a bare `.bin`.** Under A/B the device refuses an image
+whose base is not its current `write_base`, and which slot that is depends on
+how many times the unit has been updated — so a bare `.bin` is right only by
+luck. The `.obb` carries both per-slot builds and the CLI picks the matching
+one. (`--image` on the first command still takes a plain `.bin`: it is only
+read host-side for the family guard, never flashed.)
 
 Naming the image on the first command is what engages the wrong-family guard,
 which compares the image's ODG2 family against the running application before

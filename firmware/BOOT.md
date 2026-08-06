@@ -154,8 +154,9 @@ remains unvalidated on ch57x.
 
 ## Updating: use the bundle, not a bare .bin
 
-`make bundles` produces `build/<profile>.obb` per chip, carrying **both**
-per-slot builds. OpenBoot alternates its write target after every COMMIT and
+`make bundles` produces one bundle per chip, carrying **both** per-slot builds —
+`ch570/build/ch570-product.obb` and `ch592/build/ch592-product.obb`, each
+relative to its chip directory. OpenBoot alternates its write target after every COMMIT and
 refuses an image whose base is not the current `write_base`, so a bare `.bin` is
 only ever right for one slot — by luck. `openboot flash app.obb` picks the
 variant matching the device.

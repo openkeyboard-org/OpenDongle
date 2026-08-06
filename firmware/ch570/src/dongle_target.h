@@ -8,9 +8,10 @@
 
 /* CODEREVIEW F01: the app carries the ODG2 identity header (family/kind/base/
  * magic at image offset 0x20; dongle_id.c stamps it). DONGLE_IAP_APP_BASE must
- * equal this chip's app ORIGIN(FLASH) — 0x2000 under OpenBoot, which owns
- * [0, 0x2000) and performs all flash updates in-bootloader (linker-asserted
- * in link.ld). */
+ * equal this chip's app ORIGIN(FLASH), which under OpenBoot's A/B slots is
+ * the base of the slot THIS image was linked for, not a fixed address.
+ * OpenBoot owns [0, 0x2000) and performs all flash updates in-bootloader
+ * (linker-asserted in link.ld). */
 #define DONGLE_IAP_IMAGE_ID 1
 /* The app's load address IS its slot's base, so this must move with the slot:
  * dongle_id.c stamps it into the ODG2 header, and a slot-B image advertising
@@ -20,7 +21,10 @@
 #ifdef OPENBOOT_SLOT_BASE
 #define DONGLE_IAP_APP_BASE ((uint32_t)(OPENBOOT_SLOT_BASE))
 #else
-#define DONGLE_IAP_APP_BASE 0x2000u   /* standalone compiles (host tests) */
+/* Only reachable where openboot_app.c is NOT compiled: it #errors without
+ * OPENBOOT_SLOT_BASE and is in APP_SRC for both chips, so no firmware build
+ * can reach this line. Host/standalone compiles of individual sources can. */
+#define DONGLE_IAP_APP_BASE 0x2000u
 #endif
 
 /* The Bridge75 needs a short PAIR_BCAST-to-ACK turnaround gap. */

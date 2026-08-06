@@ -52,11 +52,6 @@ SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 OPENBOOT_REVISION := a3a492ccb0e1303731a8ce45e274d48c128e817e
 PROFILE_ID := ch592-product
 TARGET := opendongle-ch592-product
-# Per-slot object and artifact tree. PROFILE_ID and TARGET stay slot-agnostic:
-# the two builds are the same firmware at different link bases, and they are
-# already distinguished by DONGLE_BUILD_ID, since CFLAGS (which carries
-# -DOPENBOOT_SLOT_BASE) is hashed into it.
-BUILD := build/$(PROFILE_ID)-slot$(SLOT)
 
 # OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
 # copied here. openboot_app.c derives its boot-record address as
@@ -92,6 +87,12 @@ OPENBOOT_SLOT_BASE := $(OPENBOOT_SLOT_B_BASE)
 else
 $(error SLOT must be A or B, got '$(SLOT)')
 endif
+
+# Per-slot object and artifact tree. PROFILE_ID and TARGET stay slot-agnostic:
+# the two builds are the same firmware at different link bases, and they are
+# already distinguished by DONGLE_BUILD_ID, since CFLAGS (which carries
+# -DOPENBOOT_SLOT_BASE) is hashed into it.
+BUILD := build/$(PROFILE_ID)-slot$(SLOT)
 
 ARCH := -march=rv32imac_zicsr_zifencei -mabi=ilp32
 ARCH += -msmall-data-limit=8 -mno-save-restore
@@ -140,7 +141,7 @@ CFLAGS += -DBLE_SNV=FALSE
 # OpenBoot app companion (openboot_request_update / openboot_get_record).
 # openboot_app.c #errors without the two slot defines; they must match the
 # bootloader's own generated openboot_config.h, which is why they are derived
-# above rather than written out. Phase 1 builds slot A only.
+# above rather than written out. Both are per-slot: SLOT selects which.
 CFLAGS += -DOPENBOOT_CHIP_CH59X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)

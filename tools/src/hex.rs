@@ -11,16 +11,21 @@ use anyhow::{anyhow, bail, Result};
 /// embedded base is assumed to be linked for.
 const APP_BASE: u32 = 0x2000;
 
-/// Every address OpenBoot may hand control to. Slot A is uniform; slot B is
-/// chip-specific, and this tool accepts an image for either because it does not
-/// know which chip it is looking at until the ODG2 family byte is read — the
-/// device-side check that matters (base == the device's current write_base) is
-/// OpenBoot's, at flash time. This list exists to reject an address that is not
-/// a slot base at all, which would link cleanly and then never boot.
-const SLOT_BASES: [u32; 3] = [0x2000, 0x1E000, 0x39000];
-
-fn is_slot_base(base: u32) -> bool {
-    SLOT_BASES.contains(&base)
+/// The addresses OpenBoot may hand control to, PER CHIP FAMILY. Slot A is
+/// uniform; slot B is chip-specific, so the pair is only meaningful once the
+/// ODG2 family byte says which chip the image is for.
+///
+/// Checking a family-independent union would accept a CH570 image based at
+/// 0x39000 — CH592's slot B, and an address that on CH570 sits inside the RF
+/// bond page's neighbourhood rather than a slot. OpenBoot would refuse it later
+/// (base != write_base), but late rejection is worse than early: the point of a
+/// host-side check is to fail before anyone gets as far as a device.
+fn slot_bases_for_family(family: u8) -> Option<[u32; 2]> {
+    match family {
+        0x70 => Some([0x2000, 0x1E000]), // CH570: OB_APP_END clamped to 0x3A000
+        0x92 => Some([0x2000, 0x39000]), // CH592: app region to 0x70000
+        _ => None,
+    }
 }
 const MIN_APP_LEN: usize = 0x1000;
 const ODG2_OFFSET: usize = 0x20;
@@ -91,16 +96,19 @@ fn parse_odg2(base: u32, image: &[u8]) -> Result<Option<Odg2Identity>> {
     // will actually jump to, AND the header must agree with where the file says
     // it is loaded. A header claiming slot A on an image linked for slot B is
     // legal by the first test and caught only by the second.
-    if !is_slot_base(base) {
-        bail!(
-            "ODG2 application base 0x{base:X} is not an OpenBoot slot base \
-             (expected {})",
-            SLOT_BASES
-                .iter()
-                .map(|b| format!("0x{b:X}"))
-                .collect::<Vec<_>>()
-                .join(" or ")
-        );
+    let family = h[5];
+    match slot_bases_for_family(family) {
+        Some(bases) if bases.contains(&base) => {}
+        Some(bases) => bail!(
+            "ODG2 application base 0x{base:X} is not a slot base for chip family \
+             0x{family:02X} (expected 0x{:X} or 0x{:X})",
+            bases[0],
+            bases[1]
+        ),
+        // An unknown family is not this check's business to reject: the legacy
+        // CH582 path carries no ODG2 header at all, and validate_for_device
+        // owns the family question. Only skip the base check.
+        None => {}
     }
     if base != header_base {
         bail!(
@@ -497,19 +505,34 @@ mod tests {
         assert!(parse_odg2(0, &image)
             .unwrap_err()
             .to_string()
-            .contains("not an OpenBoot slot base"));
+            .contains("not a slot base for chip family"));
     }
 
     /// Slot B is a legitimate link base under A/B, so an image based there must
     /// parse. Before dual-slot builds this was rejected outright.
     #[test]
     fn odg2_slot_b_bases_are_accepted() {
-        for base in [0x1E000u32, 0x39000u32] {
-            let image = odg2_image_at(0x70, base);
+        for (family, base) in [(0x70u8, 0x1E000u32), (0x92u8, 0x39000u32)] {
+            let image = odg2_image_at(family, base);
             let identity = parse_odg2(base, &image)
-                .unwrap_or_else(|e| panic!("slot base 0x{base:X} rejected: {e}"))
+                .unwrap_or_else(|e| panic!("family 0x{family:02X} base 0x{base:X}: {e}"))
                 .expect("identity");
-            assert_eq!(identity.family, 0x70);
+            assert_eq!(identity.family, family);
+        }
+    }
+
+    /// The other chip's slot B is NOT a valid base for this family. A flat
+    /// union of every slot address would accept this and leave the rejection
+    /// to the device, long after the point where it is cheap.
+    #[test]
+    fn odg2_other_chips_slot_b_is_rejected() {
+        for (family, wrong) in [(0x70u8, 0x39000u32), (0x92u8, 0x1E000u32)] {
+            let image = odg2_image_at(family, wrong);
+            let err = parse_odg2(wrong, &image).unwrap_err().to_string();
+            assert!(
+                err.contains("not a slot base for chip family"),
+                "family 0x{family:02X} base 0x{wrong:X} got: {err}"
+            );
         }
     }
 
@@ -523,7 +546,7 @@ mod tests {
         assert!(parse_odg2(0x10000, &image)
             .unwrap_err()
             .to_string()
-            .contains("not an OpenBoot slot base"));
+            .contains("not a slot base for chip family"));
     }
 
     /// The case a single-constant check could not express: both values are
