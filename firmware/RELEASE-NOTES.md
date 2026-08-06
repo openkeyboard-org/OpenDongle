@@ -56,14 +56,26 @@ Behavioural properties worth knowing:
   idle auto-boot, and factory-blessed first-power-on boot. Product level:
   pairing, typing, media keys, indicator LEDs, reconnect and sleep/wake.
   CH592 covers the same protocol and geometry over UART plus a verified COMMIT.
-- **Not yet validated on hardware: the A->B slot transition and the
-  interrupted-update paths.** The application is slot-A only in Phase 1, so
-  there is no slot-B image to transition to, and the upstream bench harness
-  reaches the bootloader through a CDC-open target reset that this bench does
-  not exhibit. Both are Phase 2 work. Neither gap implicates the bootloader:
-  a source audit of `firmware/core/`, `ports/` and `transports/` against every
-  hardware observation found no defect, and the harness limitations are in
-  OpenBoot's test code rather than the product.
+- **The A->B slot transition is validated on hardware** as of the dual-slot
+  build. A CH570 was taken through a full A->B->A round trip over USB with the
+  real application, using a `.obb` bundle:
+
+  | step | device reported | bundle selected |
+  |---|---|---|
+  | start | `active A, writing B`, window `0x1E000..0x39000` | slot B, crc32 `0x893FE89B` |
+  | after | `active B, writing A`, window `0x2000..0x1D000` | slot A, crc32 `0xD7958914` |
+  | after | `active A, writing B` | — |
+
+  The running build id matched the selected slot's image each time
+  (`0x44126E29` for slot B, `0x9F666DEE` for slot A), so the variant really was
+  chosen by the device's `write_base` rather than assumed. **The RF bond
+  survived both updates** - it sits at `0x3A000`, above the `OB_APP_END` clamp,
+  so OBP cannot reach it.
+- **Still not validated on hardware: the interrupted-update paths.** Upstream's
+  bench harness reaches the bootloader through a CDC-open target reset that this
+  bench does not exhibit. That is a limitation of OpenBoot's test code, not the
+  product: a source audit of `firmware/core/`, `ports/` and `transports/`
+  against every hardware observation found no bootloader defect.
 
 ## Security property: the RF link provides no confidentiality
 
