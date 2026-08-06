@@ -37,6 +37,9 @@ Behavioural properties worth knowing:
 - Finish an SWD factory flash with a real power cycle, not `minichlink -b`:
   `-b` resumes the core instead of resetting through the boot path, so the boot
   decision never re-runs from a cold start. `flash-factory` does this for you.
+  Established by controlled comparison on a CH570 — same part, same bytes, same
+  SWD path, only the final step differing: with `-b` nothing enumerated at all,
+  with a real power cycle the application came up and ran.
 - Hardware validation after the A/B adoption: CH570 covers bootloader and
   application USB enumeration under `0C45:FEFE` with usage-page
   disambiguation, OBP 0.2, on-silicon slot geometry and the bond clamp, the

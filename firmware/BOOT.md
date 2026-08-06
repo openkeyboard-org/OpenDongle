@@ -69,10 +69,18 @@ to corrupt it.
 boot path, so the boot decision never re-runs from a cold start. That matters
 most on CH57x, where errata F26 lets the XIP view serve stale data after a
 controller write within the same power cycle — which is exactly why OpenBoot's
-own BOOT command resets rather than jumping. A bench CH570 flashed with a
-trailing `-b` did not come up on USB at all; the same part, same application
-bytes, flashed afterwards through OBP (which does reset) enumerated
-immediately. `flash-factory` now ends with `-kt` then `-k3`.
+own BOOT command resets rather than jumping.
+
+Established by controlled comparison on a bench CH570 — same part, same
+application bytes, same SWD write and readback, same subsequent move to USB,
+with only the recipe's final step differing:
+
+| recipe ends with | result on USB |
+|---|---|
+| `minichlink -b` | nothing enumerates at all — neither application nor bootloader |
+| `-kt` then `-k3` | application enumerates and runs (`last reset: external`) |
+
+`flash-factory` now ends with the power cycle on both chips.
 
 ## Update flow
 
