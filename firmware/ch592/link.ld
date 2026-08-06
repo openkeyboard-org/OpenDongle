@@ -2,30 +2,14 @@
  * Copyright 2026 Eric Molitor (EMulator)
  * Based on CH592 SDK Link.ld
  *
- * Flash base 0x2000: OpenBoot owns [0x0000, 0x2000) and hands off to the
- * application at 0x2000. There is no in-app staging region any more; updates
- * are performed inside OpenBoot over OBP.
- *
- * Under OpenBoot's A/B slots the app no longer owns the whole region.
- * [0x2000, 0x70000) splits into slot A [0x2000, 0x39000) and slot B
- * [0x39000, 0x70000). Each slot's 32-byte boot record lives in the TOP erase
- * block of that slot, so slot A's record owns [0x38000, 0x39000) and the app
- * gets 0x36000 (216 KiB).
- *
- * LENGTH must therefore be the slot CAPACITY, not the slot size: linking into
- * [0x38000, 0x39000) still boots (the bootloader CRCs only img_len bytes) but
- * the first COMMIT erases that block to store the record and takes the tail of
- * the image with it. The Makefile asserts this value against OpenBoot's
- * generated openboot_config.h on every build.
+ * OpenBoot owns [0x0000, 0x2000) and hands off to the application at a SLOT
+ * base. There is no in-app staging region any more; updates are performed
+ * inside OpenBoot over OBP, into whichever slot is not currently running.
  *
  * The boot record is no longer in DataFlash. It moved into code flash with the
- * A/B change, which releases all 32 KiB of DataFlash back to the application —
+ * A/B change, which releases all 32 KiB of DataFlash back to the application -
  * and means `minichlink -E` now DOES clear boot state on this part, where it
  * previously could not reach it.
- *
- * Phase 2 links this a second time at slot B. That wants ORIGIN to come from a
- * generated memory.ld INCLUDEd here, the way OpenBoot does it for its own
- * build, rather than a second copy of this file.
  */
 
 ENTRY( _start )
@@ -33,13 +17,20 @@ ENTRY( _start )
 __stack_size = 2048;
 PROVIDE( _stack_size = __stack_size );
 
-MEMORY
-{
-    /* RAM stops at 0x200067F0: OpenBoot reserves the top 16 bytes of the
-     * 26 KB SRAM (0x200067F0..0x200067FF) for its boot-request word. */
-    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x36000
-    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x67F0
-}
+/* The MEMORY block is GENERATED per slot into $(BUILD)/memory.ld and pulled in
+ * here, the same way OpenBoot parameterises its own link script. It carries no
+ * literal addresses, so this file is identical for slot A and slot B.
+ *
+ *   slot A  [0x02000, 0x38000)   record [0x38000, 0x39000)
+ *   slot B  [0x39000, 0x6F000)   record [0x6F000, 0x70000)
+ *
+ * LENGTH is the slot CAPACITY, not the slot size: linking across the record
+ * block still boots (the bootloader CRCs only img_len bytes) and is then
+ * destroyed by the first COMMIT, which erases that block to store the record.
+ *
+ * RAM stops at 0x200067F0: OpenBoot reserves the top 16 bytes of the 26 KB
+ * SRAM for its boot-request word. */
+INCLUDE memory.ld
 
 SECTIONS
 {
@@ -294,8 +285,13 @@ SECTIONS
 
     /* CODEREVIEW F01: pin the image-id header so the firmware can trust its
      * fixed staged offset, and keep the startup .highcode copy correct. */
-    ASSERT(ORIGIN(FLASH) == 0x2000,
-        "F01: app base must be 0x2000 (OpenBoot handoff) to match DONGLE_IAP_APP_BASE")
+    /* Under A/B this can no longer be "== 0x2000": slot B links at 0x39000 and
+     * is equally valid. What must still hold is that the app links at one of
+     * OpenBoot's TWO slot bases and nowhere else - a garbled geometry read that
+     * produced some other address would otherwise link cleanly and then be
+     * unbootable, because the bootloader only ever jumps to a slot base. */
+    ASSERT(ORIGIN(FLASH) == DONGLE_SLOT_A_BASE || ORIGIN(FLASH) == DONGLE_SLOT_B_BASE,
+        "F01: app must link at one of OpenBoot's slot bases (see memory.ld)")
     ASSERT(_dongle_id_start == ORIGIN(FLASH) + 0x20,
         "F01: image-id header must be pinned at image offset 0x20")
     ASSERT(_dongle_id_end - _dongle_id_start == 0x20,

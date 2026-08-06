@@ -12,7 +12,14 @@
  * [0, 0x2000) and performs all flash updates in-bootloader (linker-asserted
  * in link.ld). */
 #define DONGLE_IAP_IMAGE_ID 1
-#define DONGLE_IAP_APP_BASE 0x2000u
+/* The app's load address IS its slot's base, so this must move with the slot:
+ * dongle_id.c stamps it into the ODG2 header, and a slot-B image advertising
+ * 0x2000 would be rejected by the host tooling that checks the two agree. */
+#ifdef OPENBOOT_SLOT_BASE
+#define DONGLE_IAP_APP_BASE ((uint32_t)(OPENBOOT_SLOT_BASE))
+#else
+#define DONGLE_IAP_APP_BASE 0x2000u   /* standalone compiles (host tests) */
+#endif
 
 /* CH592 is the validated power-management target: it advertises AND services
  * USB remote wakeup (main loop calls USB_ServiceRemoteWake). */
