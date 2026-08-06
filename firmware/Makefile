@@ -32,6 +32,7 @@ PYTHON ?= /usr/bin/python3 -I
 .PHONY: all ch570 ch592 ch570-factory ch592-factory \
 	ch570-factory-flash ch592-factory-flash \
 	ch570-openboot ch592-openboot openboot-test \
+	ch570-bundle ch592-bundle bundles \
 	aes-hw-build aes-hw-validate \
 	check-deps test clean
 
@@ -56,6 +57,22 @@ ch592-factory:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
 	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
+
+# Release artifacts: one .obb per chip carrying BOTH per-slot builds. OpenBoot
+# alternates its write target after every COMMIT and refuses an image whose base
+# is not the current write_base, so a bare .bin is only ever right for one slot
+# by luck. `openboot flash app.obb` picks the matching variant.
+ch570-bundle:
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" bundle
+
+ch592-bundle:
+	$(MAKE) -C ch592 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" bundle
+
+bundles: ch570-bundle ch592-bundle
 
 # OPENBOOT_TOOLCHAIN must be forwarded here too: flash-factory builds the
 # factory image, which reaches into the submodule. Without it the variable

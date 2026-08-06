@@ -204,6 +204,14 @@ APP_MAX_BYTES := $(shell printf '%d' $$(($(OPENBOOT_SLOT_CAP))))
 # literal is gone, so there is nothing left to drift.
 MEMORY_LD := $(BUILD)/memory.ld
 
+# Release artifact: ONE file carrying both per-slot builds. OpenBoot picks the
+# variant matching the device's current write_base, which alternates after every
+# COMMIT - so shipping a bare .bin means being right about the slot by luck.
+SLOT_A_BIN := build/$(PROFILE_ID)-slotA/$(TARGET).bin
+SLOT_B_BIN := build/$(PROFILE_ID)-slotB/$(TARGET).bin
+BUNDLE_BIN := build/$(PROFILE_ID).obb
+OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
+
 FINALIZE_TOOL := ../finalize_image.py
 CONFIG_STAMP := $(BUILD)/.config-stamp
 BUILD_ID_STAMP := $(BUILD)/.build-id-stamp
@@ -240,7 +248,7 @@ endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
 .DEFAULT_GOAL := all
-.PHONY: all openboot-image factory flash-factory check-deps FORCE \
+.PHONY: all openboot-image factory flash-factory bundle check-deps FORCE \
 	check-openboot-toolchain size size-check clean
 
 all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
@@ -507,6 +515,19 @@ size-check: $(BUILD)/$(TARGET).bin
 	 test "$$size" -le $(APP_MAX_BYTES) || { \
 	   echo "firmware is $$size B, exceeds $(APP_MAX_BYTES) B" >&2; exit 1; }; \
 	 echo "firmware: $$size / $(APP_MAX_BYTES) B"
+
+# Both slots plus the bundle. Recursive because SLOT selects the object tree,
+# the link base and the -D values, so the two builds cannot share a pass.
+bundle:
+	+$(MAKE) SLOT=A $(SLOT_A_BIN)
+	+$(MAKE) SLOT=B $(SLOT_B_BIN)
+	@test -x "$(OPENBOOT_CLI)" || { \
+	  echo "build the OpenBoot CLI first: cargo build --release --manifest-path $(OPENBOOT)/tools/Cargo.toml" >&2; \
+	  exit 1; }
+	"$(OPENBOOT_CLI)" bundle create -o "$(BUNDLE_BIN)" --chip ch592 \
+	    "$(SLOT_A_BIN)@$(OPENBOOT_SLOT_A_BASE)" \
+	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
+	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
 clean:
 	rm -rf "$(abspath build)"

@@ -12,6 +12,12 @@ IMAGE_ID_MAGIC = b"ODG2"
 IMAGE_ID_FORMAT = 2
 IMAGE_KIND_APP = 1
 IMAGE_CRC_FIELD_OFF = 0x10
+# Slot A's base, uniform across the supported chips. NOT "the app base" any
+# more: under OpenBoot's A/B slots an application is linked once per slot, and
+# slot B sits at a chip-specific address (0x1E000 on CH570, 0x39000 on CH592).
+# Callers that handle both pass valid_bases= to validate_app_image_identity;
+# this stays the default so an un-updated caller keeps rejecting slot B rather
+# than silently accepting any base.
 APP_BASE = 0x2000
 MIN_APP_IMAGE_LEN = 0x1000
 COMMIT_ALIGNMENT = 4
@@ -64,11 +70,29 @@ def finalize_image(image: bytes) -> bytes:
 
 def validate_app_image_identity(image, *, loaded_base, expected_family=None,
                                 expected_kind=IMAGE_KIND_APP,
-                                require_header=False, max_image_len=None):
+                                require_header=False, max_image_len=None,
+                                valid_bases=None):
+    """Check an application image against the ODG2 contract.
+
+    `valid_bases` is the set of addresses OpenBoot may hand control to - the
+    A/B slot bases for this chip. It defaults to (APP_BASE,), i.e. slot A only,
+    which is what a caller that has not been taught about slots should get:
+    accepting any base by default would let a mis-linked image through
+    silently.
+
+    The base is checked two ways, and they are different questions. The image
+    must be linked at a base OpenBoot actually jumps to, AND the ODG2 header
+    must agree with where the image is really loaded - a header claiming slot A
+    on an image linked for slot B is exactly the confusion the host tooling
+    exists to catch, and comparing both against one constant could not see it.
+    """
     problems = []
     actual_len = len(image)
-    if loaded_base != APP_BASE:
-        problems.append(f"load base must be 0x{APP_BASE:X} (image=0x{loaded_base:X})")
+    bases = tuple(valid_bases) if valid_bases is not None else (APP_BASE,)
+    if loaded_base not in bases:
+        allowed = ", ".join(f"0x{b:X}" for b in bases)
+        problems.append(
+            f"load base 0x{loaded_base:X} is not an OpenBoot slot base ({allowed})")
     if actual_len < MIN_APP_IMAGE_LEN:
         problems.append(f"image is only {actual_len} bytes; minimum is {MIN_APP_IMAGE_LEN}")
     if actual_len % COMMIT_ALIGNMENT:
@@ -89,8 +113,10 @@ def validate_app_image_identity(image, *, loaded_base, expected_family=None,
         problems.append(f"chip family 0x{identity['family']:02X} != 0x{expected_family:02X}")
     if expected_kind is not None and identity["kind"] != expected_kind:
         problems.append(f"image kind 0x{identity['kind']:02X} != 0x{expected_kind:02X}")
-    if identity["base"] != APP_BASE:
-        problems.append(f"header base 0x{identity['base']:X} != 0x{APP_BASE:X}")
+    if identity["base"] != loaded_base:
+        problems.append(
+            f"ODG2 header base 0x{identity['base']:X} != load base "
+            f"0x{loaded_base:X}")
     if identity["image_len"] != actual_len:
         problems.append(f"header image_len {identity['image_len']} != {actual_len}")
     if identity["extension_len"] != 0:
