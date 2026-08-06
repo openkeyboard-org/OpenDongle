@@ -29,8 +29,12 @@ image offset `0x20` with `base = 0x2000`.
 
 The CH570 board file clamps OpenBoot's `OB_APP_END` to `0x3A000`, so no OBP
 erase/write/commit can reach the bond. Confirmed on silicon: `openboot probe`
-on a CH570 reports `app region 0x00002000..0x0003A000` and
-`write window 0x00002000..0x0001D000`. `0x3B000` no longer holds anything —
+on a **blank** CH570 reports `app region 0x00002000..0x0003A000`,
+`slots 2 (active none, writing A)` and `write window 0x00002000..0x0001D000`.
+Once a factory image has installed slot A's record the device comes up
+`active=A, writing=B` and the window moves to `0x0001E000..0x00039000` — the
+window always describes the slot being written, not the one running.
+`0x3B000` no longer holds anything —
 OpenBoot reclaimed its old reserved record page when records moved into the
 slots, and our clamp keeps OBP off it anyway.
 

@@ -19,9 +19,17 @@ boot-record semantics, the update/factory/recovery flows, and the honest caveats
 
 Behavioural properties worth knowing:
 
-- An interrupted update leaves the unit **running the previous application**.
-  Under A/B, mutations target the inactive slot, so the running image is never
-  touched and BOOT falls back to it.
+- Two different interruptions have two different outcomes; they are not in
+  conflict, but they are easy to confuse:
+  - **The transfer dies** (host crashes, cable pulled, power cut mid-write).
+    The unit comes back **running the previous application**: mutations target
+    the inactive slot, so the running image is never touched and BOOT falls
+    back to it. Retry the flash.
+  - **A session is opened and then abandoned** (a successful HELLO, then the
+    host walks away without flashing or sending BOOT). The unit **stays in the
+    bootloader** — a HELLO suppresses idle auto-boot until reset, which is the
+    fail-stay rule. Power-cycle it, or end scripts with an explicit
+    `openboot boot`.
 - A factory image carries slot A's boot record, so a blank part boots the
   application on first power-on with no host and no bless step. On a blessed
   unit `openboot bless` is not merely unnecessary but impossible: the device is

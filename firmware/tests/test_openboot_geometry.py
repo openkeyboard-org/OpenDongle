@@ -46,13 +46,20 @@ def require_openboot() -> None:
 
 
 def geometry(chip: str) -> tuple[int, int, int, int]:
-    """(slot_base, slot_size, capacity, record_size) straight from OpenBoot."""
+    """(slot_base, slot_size, capacity, record_size) straight from OpenBoot.
+
+    A non-zero exit is a FAILURE, not a skip. require_openboot() has already
+    established the submodule is checked out, so anything that goes wrong past
+    that point is the tool being broken or OpenBoot's layout contract having
+    changed - exactly what these tests exist to catch. Skipping there would
+    make the whole module pass green on a tree where the build is broken.
+    """
     proc = subprocess.run(
         [sys.executable, "-I", str(GEOMETRY_TOOL), "--openboot", str(OPENBOOT),
          "--chip", chip, "--transport", "usb", "--board", BOARDS[chip]],
         capture_output=True, text=True)
     if proc.returncode != 0:
-        raise unittest.SkipTest(f"openboot geometry unavailable: {proc.stderr.strip()}")
+        raise AssertionError(f"openboot geometry failed: {proc.stderr.strip()}")
     fields = proc.stdout.split()
     return tuple(int(value, 0) for value in fields[:4])  # type: ignore[return-value]
 

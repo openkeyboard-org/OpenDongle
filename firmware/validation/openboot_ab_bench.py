@@ -148,6 +148,23 @@ def make_mc(module, minichlink: str, dry_run: bool):
     return mc
 
 
+def patch_run_for_dry_run(module):
+    """Make --dry-run cover the openboot CLI too, not just minichlink.
+
+    The harness reaches hardware two ways: mc() for minichlink, and run() for
+    the openboot CLI. Patching only mc() left `openboot flash ... --force` -
+    the single most destructive command here - executing for real under
+    --dry-run, which is precisely the flag whose job is to prevent that. It
+    survived earlier testing only because probe() returns nothing in dry-run,
+    so the scenarios crashed before reaching a flash.
+    """
+    def run(cmd, t=90):
+        print("  would run:", " ".join(str(c) for c in cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    module.run = run
+
+
 def patch_reboot_for_lifecycle(module):
     """W9: make reboot() land in the bootloader deterministically.
 
@@ -247,6 +264,8 @@ def main() -> int:
     os.chdir(module.HERE)
 
     module.mc = make_mc(module, args.minichlink, args.dry_run)
+    if args.dry_run:
+        patch_run_for_dry_run(module)
     patch_factory(module, args.dry_run)
 
     # W3/W4: rewrite the bench-local CHIPS table for THIS bench.
@@ -284,9 +303,24 @@ def main() -> int:
         except MinichlinkError as exc:
             print(f"  PROBE FAILURE: {exc}", file=sys.stderr)
             failures.append(f"{name}: probe")
+        except TypeError:
+            # Dry-run feeds the scenarios empty command output, so the first
+            # check that needs a parsed device response gets None and the
+            # harness raises. That is the end of what dry-run can show; it
+            # validates command CONSTRUCTION, not scenario logic.
+            if not args.dry_run:
+                raise
+            print("  (dry run: stopped where a real device response is needed)")
+            continue
         failures.extend(f"{name}: {f}" for f in getattr(module, "fails", []))
 
     print("\n=== RESULT ===")
+    if args.dry_run:
+        # Never print PASS here. A dry run contacts nothing, so every check
+        # either did not run or was fed empty output; reporting a pass would
+        # be indistinguishable from a real one in a log.
+        print("DRY RUN - commands shown, nothing executed, no verdict")
+        return 0
     if failures:
         print("FAIL: " + "; ".join(failures))
         return 1

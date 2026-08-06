@@ -150,8 +150,8 @@ part-way through. The prefix lives in the `CROSS` variable in each application
 Makefile and in `firmware/Makefile`, and `check_dependencies.py` validates the
 same prefix it is given, so overriding `CROSS` also moves what gets validated.
 
-OpenBoot is the exception and still needs GCC 12 — see the note further down
-about `OPENBOOT_TOOLCHAIN`.
+OpenBoot is the exception and still needs GCC 12 — see the `OPENBOOT_TOOLCHAIN`
+note above.
 
 `MRS_TOOLCHAIN`, `OPENWCH_ROOT`, `CH570_SDK`, and `CH592_SDK` use Make's `?=`
 assignment, so they may be supplied by the environment, command line, or a
@@ -226,16 +226,24 @@ gaps are worth stating rather than leaving implied, both documented above and in
   This is safe rather than merely tolerated: the factory image is
   OpenBoot ‖ pad ‖ application, two separately linked binaries that share no
   code, so the compilers never have to agree. `OPENBOOT_TOOLCHAIN` defaults to
-  `MRS_TOOLCHAIN`, so leaving it unset fails loudly in OpenBoot's own checker
-  rather than silently building something unexpected. It collapses back to one
-  toolchain the moment OpenBoot's pin moves.
-- No OpenBoot revision appears in `CONFIG_TEXT` or `BUILD_ID_INPUTS`. The
-  **factory** image is OpenBoot ‖ pad ‖ application, so its bytes depend on a
-  checkout the build id says nothing about. Comparing factory images across
-  hosts is only meaningful with `third_party/openboot` at the same commit and
-  clean — which nothing currently enforces.
+  `MRS_TOOLCHAIN`, and a factory build with it pointed at anything but GCC 12
+  is refused by `check-openboot-toolchain`. The split is permanent, not a wait
+  for OpenBoot's pin to move.
+- The OpenBoot **revision** is in `CONFIG_TEXT`, and `check-deps` asserts the
+  checkout matches it and is clean (`--expect-revision`). The bootloader
+  **binary** is still not hashed into `BUILD_ID_INPUTS`, deliberately: the
+  manifest does not exist at parse time on a clean checkout, and its digest
+  depends on which GCC 12 install built OpenBoot, which would make
+  `DONGLE_BUILD_ID` differ between developers for byte-identical application
+  images.
+- So the two identities are separate on purpose: `DONGLE_BUILD_ID` identifies
+  the **application**, and the `.manifest` copied beside each factory image
+  (`openboot_revision`, `openboot_dirty`, `image_sha256`) identifies the
+  **bootloader artifact**. Comparing factory images across hosts means
+  comparing both.
 
 So: same tree, same complete toolchain, same OpenBoot checkout → identical
-artifacts. A matching build id alone does not imply a matching factory image.
+artifacts. A matching build id alone does not imply a matching factory image;
+the manifest is what closes that gap.
 
 `make clean` removes generated output for both production targets.

@@ -205,7 +205,7 @@ all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
 # is what the SWD recovery path writes, so it stays available on demand.
 # Recursive make every pass (OpenBoot's build is incremental); the copy below
 # is content-guarded so downstream targets do not rebuild unless bytes changed.
-openboot-image:
+openboot-image: check-openboot-toolchain
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
 	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
 
@@ -258,9 +258,9 @@ flash-factory: factory
 #	OpenBoot's own BOOT command resets rather than jumping. Ending on -b
 #	leaves the unit in a state that has not demonstrated the claim printed
 #	below, and a bench part flashed that way did not come up on USB.
-	"$(MINICHLINK)" -kt \
+	"$(MINICHLINK)" -kt -C linke \
 	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
-	"$(MINICHLINK)" -k3 \
+	"$(MINICHLINK)" -k3 -C linke \
 	    $(if $(strip $(WCHLINK_SERIAL)),-l "$(WCHLINK_SERIAL)")
 	@echo "NOTE: this image is factory-blessed - it carries slot A's boot"
 	@echo "      record - so the unit boots the application on first power-on."
@@ -268,7 +268,13 @@ flash-factory: factory
 	@echo "      comes up active=A/write=B, and bless resolves against the"
 	@echo "      write slot, so a slot-A image is refused there by design."
 
-check-deps: check-openboot-toolchain
+# check-openboot-toolchain is deliberately NOT a prerequisite here. check-deps
+# gates every object build, so requiring GCC12 from it would make the
+# application-only .elf/.bin targets unbuildable for anyone who is not
+# composing a factory image - which is the opposite of the split's purpose.
+# The gate belongs on the paths that actually invoke OPENBOOT_TOOLCHAIN:
+# openboot-image and the factory rule.
+check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
 	    --tool-prefix "$(CROSS)"
@@ -371,7 +377,8 @@ $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
 # FACTORY_BLESS=1 is passed explicitly even though OpenBoot defaults it: if
 # that default ever flips, an unblessed image looks identical until a unit
 # reaches a customer and sits in the bootloader.
-$(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin | $(BUILD)
+$(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
+        | $(BUILD) check-openboot-toolchain
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
 	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
 	    FACTORY_BLESS=1 APP="$(abspath $(BUILD)/$(TARGET).bin)" factory
