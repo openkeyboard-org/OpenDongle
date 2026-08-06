@@ -19,15 +19,22 @@ site resolves `ab_bench.mc` at call time, so patching it intercepts all of them.
 What is patched, and why each one is a correctness fix rather than a
 preference:
 
-  W1  minichlink argument order. The harness emits `minichlink -l <serial>
-      <action>`. minichlink.c computes skip_startup from argv[1] ONLY, so with
-      -l first every invocation runs SetupInterface before reaching the action
-      -- and LESetupInterface asserts ndmreset (DMCONTROL 0x80000003). That
-      injects a target reset into the very observations the evidence chain is
-      built from, and it cannot act on a part that is not currently responding,
-      which is exactly the state a power-cut test creates. Action first, with
-      -k only on -t/-3: -E/-w/-r genuinely need DetermineChipType and must NOT
-      skip init.
+  W1  minichlink argument order, matching this bench's established discipline
+      (action first, then -l). minichlink.c computes skip_startup from argv[1]
+      only, so with -l first the -A and -t calls run SetupInterface, and
+      LESetupInterface asserts ndmreset (DMCONTROL 0x80000003).
+
+      SCOPE CORRECTION, from a later adversarial review with live measurement:
+      this does NOT clean up the harness's evidence path. "-r" is not in the
+      skip-startup set in EITHER ordering, so every state read resets the part
+      regardless. Measured on this bench: `minichlink -l <ser> -r + 0x200067F0
+      4` run four times returns 11ca07b0 / 00000000 / 11ca07b0 / 00000000 --
+      the read itself reboots the target. So reordering only restores the
+      intended no-reset behaviour for -A and -t; the reads are unfixable this
+      way and the harness's "an SWD observation never perturbs the part"
+      premise is false independently of argument order.
+
+      -k is added only for -t/-3; -E/-w/-r genuinely need DetermineChipType.
 
   W2  Assert on the exit status. The harness discards it. A silently failed
       power cut turns the acceptance test into a test of nothing that still
