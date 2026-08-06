@@ -94,7 +94,23 @@ def geometry(openboot: Path,
     # to retire.
     build_dir = Path(image).parent
     config = build_dir / CONFIG_HEADER
-    run_make(openboot, make_args, str(config))
+    # Ask make for the target the way OpenBoot DECLARES it: `$(CONFIG_H):` is
+    # `$(BUILD)/openboot_config.h`, a path relative to the directory make runs
+    # in. Requesting the absolute path finds no rule and fails with "No rule to
+    # make target".
+    #
+    # This only shows up on a clean checkout. Once the header exists, make
+    # treats the absolute path as an already-satisfied file and exits 0 without
+    # ever needing a rule -- so a developer tree hides it and a fresh clone
+    # fails at PARSE time in both chip Makefiles, before compiling anything.
+    firmware_dir = (openboot / "firmware").resolve()
+    try:
+        goal = str(config.resolve().relative_to(firmware_dir))
+    except ValueError:
+        raise RuntimeError(
+            f"bootloader image {image} is not under {firmware_dir}; "
+            "print-image-path's contract changed") from None
+    run_make(openboot, make_args, goal)
 
     cfg = parse_defines(
         config.read_text(),
