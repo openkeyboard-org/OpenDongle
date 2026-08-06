@@ -50,15 +50,19 @@ What it does, and why each step matters:
 1. `-kt` turns off the WCH-LinkE target supply.
 2. `-E` erases the entire user code flash. **The erase is required, not
    optional.** It clears the bond page (`0x3A000`) so a unit cannot inherit a
-   test fixture's pairing identity, and it clears the OpenBoot boot-record page
-   (`0x3B000`) so the first boot deterministically lands in the bootloader.
+   test fixture's pairing identity. It also clears both slots' boot records,
+   which now live inside the slots (`0x1D000` and `0x39000` on CH570) rather
+   than on a reserved page — but that no longer decides where the first boot
+   lands, because the factory image carries slot A's record and restores it.
 3. The factory image is written at address 0, read back, and compared.
 4. On CH592 only, the recipe additionally refuses to finish if a bond record
    survived in DataFlash, which `-E` cannot reach (`ALLOW_BONDED_FLASH=1`
    overrides this for a development unit).
 
-Finish with `openboot bless <app.bin>` + `openboot boot` over USB: with the
-record page erased, nothing attests the application yet (see BOOT.md).
+No bless step is needed, or possible: the factory image carries slot A's boot
+record, so the unit boots the application on first power-on (see BOOT.md).
+The recipe ends with a real power cycle rather than `minichlink -b`, so what it
+leaves behind is a unit that has actually demonstrated that.
 
 For a target placed in the WCH ROM USB bootloader instead of using the debug
 pin, the same raw image can be programmed with:
@@ -93,7 +97,7 @@ Two independent checksums are in play, and it is worth not confusing them.
 `finalize_image.py` stamps a CRC inside the ODG2 header; that is a host-side
 identity check, used by `opendongle` and by the build. OpenBoot never parses
 ODG2. What it verifies at every boot is its own `img_crc32`, computed over the
-committed bytes at bless time and stored out of band in the OBR1 boot record. A
+committed bytes at COMMIT time and stored in that slot's `OBR2` boot record. A
 raw OBP client can therefore bless and boot an image whose ODG2 CRC is invalid —
 consistent with wrong-family protection also being host-side only (see
 `BOOT.md`).
@@ -122,12 +126,21 @@ make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC15/bin
      OPENBOOT_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC12/bin
 ```
 
-`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, so omitting it does not
-silently build something unexpected — it fails in OpenBoot's own dependency
-checker, which pins the GCC 12 `riscv-wch-elf-*` tool names. If you only want
-the application binaries and no bootloader, the per-chip `.elf`/`.bin` targets
-need `MRS_TOOLCHAIN` alone. See the OpenBoot note below; this collapses back to
-one toolchain the moment its pin moves.
+`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, and omitting it now fails in
+**our** `check-openboot-toolchain`, not OpenBoot's. Upstream's compiler check
+went advisory at this pin — a hash mismatch and an unvalidated GCC major both
+warn and continue — and it auto-detects either tool prefix, so a factory build
+carrying one GCC 15 toolchain would otherwise silently ship a GCC 15
+bootloader. If you only want the application binaries and no bootloader, the
+per-chip `.elf`/`.bin` targets need `MRS_TOOLCHAIN` alone.
+
+**The split is permanent**, not a wait for OpenBoot's pin to catch up: GCC 15
+is explicitly unvalidated on ch57x. Upstream benched a CH572 where it fired the
+idle auto-boot at 1.51/1.71/4.75 s against a configured 10 s and failed to
+return from 4 of 32 software resets (GCC 12: 0/32), with the generated code for
+the timing functions instruction-identical. Cause unresolved.
+`OPENBOOT_ALLOW_UNVALIDATED_GCC=1` overrides the gate for anyone reproducing
+that investigation.
 
 **Note the tool prefix changed with this release.** GCC 12 shipped
 `riscv-wch-elf-*`; GCC 15 ships `riscv32-wch-elf-*`. Pointing `MRS_TOOLCHAIN` at

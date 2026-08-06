@@ -8,30 +8,44 @@ leaves the bench.
 ## Boot architecture: OpenBoot
 
 The dongle boots via the [OpenBoot](../third_party/openboot) bootloader (pinned
-submodule): bootloader at `[0x0000,0x2000)`, application at `0x2000`, an
-out-of-band boot record, and updates performed **inside the bootloader** over its
-OBP USB protocol — the dongle re-enumerates as `1209:0001` for the flash, then
-returns as the application. See [BOOT.md](BOOT.md) for the flash maps, the
+submodule): bootloader at `[0x0000,0x2000)`, application at `0x2000`, a boot
+record in the top erase block of each A/B slot, and updates performed **inside
+the bootloader** over its OBP USB protocol. The bootloader re-enumerates under
+the dongle's own `0C45:FEFE` identity, told apart from the application by its
+vendor HID usage page `0xFF00` (the application uses `0xFFFF` and `0xFF60`), and
+the flash returns it to the application. See [BOOT.md](BOOT.md) for the flash maps, the
 boot-record semantics, the update/factory/recovery flows, and the honest caveats
 (fail-stay after an abandoned session; wrong-family protection is host-side).
 
 Behavioural properties worth knowing:
 
-- An interrupted update leaves the unit **in the bootloader** until the host
-  retries — it never runs a half-written image. The boot record is invalidated
-  before the first flash mutation.
-- With the boot-time image CRC enabled, an SWD write of application bytes needs
-  `openboot bless <app.bin>` before the application will launch again — unless a
-  surviving boot record still validates against what was written. That happens
-  on CH592, where `minichlink -E` does not reach DataFlash: the record stores a
-  length and a CRC over that many bytes, so it still validates when the newly
-  written bytes have the recorded image as a prefix, which in practice means
-  re-flashing the same build. `BOOT.md` states the exact rule; treat blessing as
-  the thing you always do, and the surviving-record case as the reason a unit
-  sometimes boots without it rather than as something to rely on.
-- Both chips completed a hardware validation campaign covering install, update,
-  interrupted update, corrupt-image refusal, boot-request and idle behaviour, a
-  50-cycle power soak, pairing and the RF link.
+- An interrupted update leaves the unit **running the previous application**.
+  Under A/B, mutations target the inactive slot, so the running image is never
+  touched and BOOT falls back to it.
+- A factory image carries slot A's boot record, so a blank part boots the
+  application on first power-on with no host and no bless step. On a blessed
+  unit `openboot bless` is not merely unnecessary but impossible: the device is
+  `active=A, write=B`, and bless resolves against the write slot.
+- What the boot-time CRC proves is narrower than it looks: the record stores a
+  length and a CRC over that many bytes from the slot base, so it is protection
+  against accidental corruption, not an identity check. `BOOT.md` states the
+  exact rule.
+- `OB_IDLE_TIMEOUT_MS` is now **real milliseconds**. The boards' unchanged
+  `10000` means 10 seconds, where it previously bench-measured ~273 s on CH570
+  and ~86 s on CH592 — the value did not move, its meaning did. Anything that
+  waited out the old window is ~27x too slow.
+- Finish an SWD factory flash with a real power cycle, not `minichlink -b`:
+  `-b` resumes the core instead of resetting through the boot path, so the boot
+  decision never re-runs from a cold start. `flash-factory` does this for you.
+- Hardware validation after the A/B adoption: CH570 covers bootloader and
+  application USB enumeration under `0C45:FEFE` with usage-page
+  disambiguation, OBP 0.2, on-silicon slot geometry and the bond clamp, the
+  dry-run/`--force` flash path, `--enter-bootloader`, and the 10 s idle
+  auto-boot. CH592 covers the same protocol and geometry over UART plus a
+  verified COMMIT. **The A->B slot transition and the interrupted-update paths
+  are NOT yet validated on hardware** — the application is slot-A only in
+  Phase 1, and the upstream bench harness relies on a CDC-open target reset
+  that this bench does not exhibit.
 
 ## Security property: the RF link provides no confidentiality
 
