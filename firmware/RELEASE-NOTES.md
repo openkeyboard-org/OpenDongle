@@ -40,15 +40,22 @@ Behavioural properties worth knowing:
   Established by controlled comparison on a CH570 — same part, same bytes, same
   SWD path, only the final step differing: with `-b` nothing enumerated at all,
   with a real power cycle the application came up and ran.
-- Hardware validation after the A/B adoption: CH570 covers bootloader and
-  application USB enumeration under `0C45:FEFE` with usage-page
-  disambiguation, OBP 0.2, on-silicon slot geometry and the bond clamp, the
-  dry-run/`--force` flash path, `--enter-bootloader`, and the 10 s idle
-  auto-boot. CH592 covers the same protocol and geometry over UART plus a
-  verified COMMIT. **The A->B slot transition and the interrupted-update paths
-  are NOT yet validated on hardware** — the application is slot-A only in
-  Phase 1, and the upstream bench harness relies on a CDC-open target reset
-  that this bench does not exhibit.
+- Hardware validation after the A/B adoption, on a CH570 taken from blank
+  silicon to a working dongle: bootloader and application USB enumeration under
+  `0C45:FEFE` with usage-page disambiguation, OBP 0.2, on-silicon slot geometry
+  and the bond clamp (`write window 0x2000..0x1D000` as reported by the device
+  itself), the dry-run/`--force` flash path, `--enter-bootloader`, the 10 s
+  idle auto-boot, and factory-blessed first-power-on boot. Product level:
+  pairing, typing, media keys, indicator LEDs, reconnect and sleep/wake.
+  CH592 covers the same protocol and geometry over UART plus a verified COMMIT.
+- **Not yet validated on hardware: the A->B slot transition and the
+  interrupted-update paths.** The application is slot-A only in Phase 1, so
+  there is no slot-B image to transition to, and the upstream bench harness
+  reaches the bootloader through a CDC-open target reset that this bench does
+  not exhibit. Both are Phase 2 work. Neither gap implicates the bootloader:
+  a source audit of `firmware/core/`, `ports/` and `transports/` against every
+  hardware observation found no defect, and the harness limitations are in
+  OpenBoot's test code rather than the product.
 
 ## Security property: the RF link provides no confidentiality
 
