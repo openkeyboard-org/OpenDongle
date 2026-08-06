@@ -57,6 +57,21 @@ preference:
   W6  Read back and compare after writing the bootloader. The harness's
       factory() writes with no verify, which contradicts every other flash
       recipe in both repositories; minichlink does not check its own writes.
+
+  W7  Refuse to start unless the OBP 0.2 CLI has been built. The device
+      requires an exact protocol major+minor match, so a 0.1 binary cannot
+      HELLO this bootloader at all -- and the resulting timeouts look exactly
+      like a dead target rather than a stale tool.
+
+  W8  Make --dry-run cover the openboot CLI as well as minichlink. The harness
+      reaches hardware two ways: mc() and run(). Patching only mc() left
+      `openboot flash ... --force` executing for real under the flag whose
+      whole job is preventing that.
+
+  W9  Make reboot() land in the bootloader deterministically for the lifecycle
+      scenario, which does a bare power cycle then a SINGLE probe and expects
+      the bootloader to answer. Whether it does is phase-dependent; see the
+      function for the measured boot-request alternation.
 """
 
 from __future__ import annotations
@@ -149,7 +164,7 @@ def make_mc(module, minichlink: str, dry_run: bool):
 
 
 def patch_run_for_dry_run(module):
-    """Make --dry-run cover the openboot CLI too, not just minichlink.
+    """W8: make --dry-run cover the openboot CLI too, not just minichlink.
 
     The harness reaches hardware two ways: mc() for minichlink, and run() for
     the openboot CLI. Patching only mc() left `openboot flash ... --force` -

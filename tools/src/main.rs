@@ -269,7 +269,7 @@ const OB_USAGE: u16 = 0x0001;
 /// enumerate identically, and the application's keyboard, mouse and vendor
 /// interfaces sit behind that same VID:PID. The vendor usage page 0xFF00 /
 /// usage 0x01 is what separates them — the application deliberately uses
-/// 0xFFFF and 0xFF60 instead (common/src/usb_descriptors.c).
+/// 0xFFFF and 0xFF60 instead (firmware/common/src/usb_descriptors.c).
 ///
 /// An exact usage decides it. A 0/0 pair means the backend could not parse
 /// the report descriptor — "cannot tell", not "matches" — so it stands in for
