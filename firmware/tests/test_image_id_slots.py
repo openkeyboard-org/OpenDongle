@@ -62,11 +62,15 @@ class SlotBases(unittest.TestCase):
         self.assertTrue(any("not an OpenBoot slot base" in p for p in found), found)
 
     def test_slot_b_passes_when_declared(self):
-        for chip, slots in (("ch570", CH570_SLOTS), ("ch592", CH592_SLOTS)):
+        # The family must match the chip, or the ch592 case silently validates
+        # a CH570-family image and proves nothing about CH592.
+        for chip, family, slots in (("ch570", 0x70, CH570_SLOTS),
+                                    ("ch592", 0x92, CH592_SLOTS)):
             with self.subTest(chip=chip):
-                img = make_image(base=slots[1])
+                img = make_image(base=slots[1], family=family)
                 self.assertEqual(
-                    [], problems(img, loaded_base=slots[1], valid_bases=slots))
+                    [], problems(img, loaded_base=slots[1], valid_bases=slots,
+                                 expected_family=family))
 
     def test_an_address_between_slots_is_refused(self):
         """Not merely "different from slot A" -- it must be one of the two.

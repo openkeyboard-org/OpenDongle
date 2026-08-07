@@ -89,9 +89,13 @@ with only the recipe's final step differing:
 ## Update flow
 
 ```sh
-opendongle --enter-bootloader --image new-app.bin   # family-guarded reboot
-openboot --vid 0x0C45 --pid 0xFEFE flash --force new-app.bin   # in OpenBoot
+opendongle --enter-bootloader --image <slot-a>.bin              # family-guarded reboot
+openboot --vid 0x0C45 --pid 0xFEFE flash <chip>-product.obb --force
 ```
+
+Flash the **bundle**, not a bare `.bin` — see "Updating: use the bundle" below
+for why. `--image` still takes a plain `.bin`: it is read host-side for the
+family guard and never flashed.
 
 `--enter-bootloader` checks the image's ODG2 family against the device before
 rebooting. The firmware side (IAP command 0x85, armed session +
@@ -110,8 +114,9 @@ An interrupted update leaves the device **running the previous application**,
 not stranded in the bootloader. Under A/B, mutations target the *inactive*
 slot, so the running image is never touched and BOOT falls back to it. Retry
 the flash to recover. (This inverts the pre-A/B behaviour, where an interrupted
-transfer left the device in the bootloader.) Not yet exercised on this bench —
-see the Phase 1 note below.
+transfer left the device in the bootloader.) The A→B transition itself is
+validated on hardware; the interrupted-update paths are not — see "Updating:
+use the bundle" below.
 
 ## Idle timeout / fail-stay
 

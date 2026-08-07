@@ -105,10 +105,16 @@ fn parse_odg2(base: u32, image: &[u8]) -> Result<Option<Odg2Identity>> {
             bases[0],
             bases[1]
         ),
-        // An unknown family is not this check's business to reject: the legacy
-        // CH582 path carries no ODG2 header at all, and validate_for_device
-        // owns the family question. Only skip the base check.
-        None => {}
+        // An unsupported family cannot simply skip the base check. ODG2 is
+        // only produced for CH570/CH592; the legacy CH582 path carries no
+        // ODG2 header at all, so a header claiming any other family is
+        // malformed by construction. Skipping left such an image free to
+        // declare ANY load base and still pass validate_for_device, which
+        // only compares the family against the connected device.
+        None => bail!(
+            "ODG2 header declares chip family 0x{family:02X}, which has no slot \
+             layout (ODG2 is only produced for CH570 and CH592)"
+        ),
     }
     if base != header_base {
         bail!(
@@ -519,6 +525,21 @@ mod tests {
                 .expect("identity");
             assert_eq!(identity.family, family);
         }
+    }
+
+    /// An ODG2 header for a family with no slot layout is malformed - ODG2 is
+    /// only produced for CH570/CH592, and the legacy CH582 path carries no
+    /// header at all. Skipping the base check for it let such an image declare
+    /// any load base and still pass the family comparison downstream.
+    #[test]
+    fn odg2_unsupported_family_is_rejected() {
+        let image = odg2_image_at(0x82, 0x10000);
+        let err = parse_odg2(0x10000, &image).unwrap_err().to_string();
+        assert!(err.contains("no slot layout"), "got: {err}");
+        // Even at a legitimate slot-A base, the family alone disqualifies it.
+        let image = odg2_image_at(0x82, APP_BASE);
+        let err = parse_odg2(APP_BASE, &image).unwrap_err().to_string();
+        assert!(err.contains("no slot layout"), "got: {err}");
     }
 
     /// The other chip's slot B is NOT a valid base for this family. A flat

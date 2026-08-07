@@ -92,6 +92,17 @@ endif
 # -DOPENBOOT_SLOT_BASE) is hashed into it.
 BUILD := build/$(PROFILE_ID)-slot$(SLOT)
 
+# Factory composition is slot A ONLY, and that is not an arbitrary policy: the
+# factory image places the application at slot A's base and carries slot A's
+# boot record, so a slot-B-linked APP would be programmed at the wrong address
+# with a record describing bytes that are not there. Left to run, SLOT=B here
+# composes exactly that image before the size check rejects it with a message
+# about a missing record, which is not the real problem. Refuse up front.
+FACTORY_SLOT_B := 0
+ifeq ($(SLOT),B)
+FACTORY_SLOT_B := 1
+endif
+
 ARCH := -march=rv32imc_zba_zbb_zbc_zbs_xw -mabi=ilp32 -mcmodel=medany
 ARCH += -msmall-data-limit=8 -mno-save-restore
 CFLAGS := $(ARCH) -O2 -g -std=gnu99
@@ -223,7 +234,7 @@ CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 .PHONY: all openboot-image factory flash-factory bundle check-deps FORCE \
 	check-openboot-toolchain size size-check clean
 
-all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
+all: check-factory-slot check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
     $(FACTORY_BIN) size size-check
 
 # The bootloader on its own, built from the pinned submodule with the product
@@ -241,7 +252,7 @@ $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
 	  cp "$(OPENBOOT_SRC_BIN)" "$@"; echo "openboot image updated: $@"; fi
 
-factory: check-deps $(FACTORY_BIN) size-check
+factory: check-factory-slot check-deps $(FACTORY_BIN) size-check
 	@echo "factory image: $(abspath $(FACTORY_BIN))"
 
 flash-factory: factory
@@ -302,6 +313,12 @@ flash-factory: factory
 # composing a factory image - which is the opposite of the split's purpose.
 # The gate belongs on the paths that actually invoke OPENBOOT_TOOLCHAIN:
 # openboot-image and the factory rule.
+check-factory-slot:
+	@test "$(FACTORY_SLOT_B)" = 0 || { \
+	  echo "factory and all compose slot A only, so SLOT=B cannot be used here." >&2; \
+	  echo "Run make bundle to build both slots into one .obb instead." >&2; \
+	  exit 1; }
+
 check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
