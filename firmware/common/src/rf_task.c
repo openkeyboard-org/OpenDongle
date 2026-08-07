@@ -381,8 +381,10 @@ static __attribute__((noinline)) void rf_queue_led_relay(uint8_t led)
  * this only as a sanity floor. An absolute threshold encodes antenna and
  * geometry assumptions; relative selection targets the actual failure mode.
  *
- * Overridable for bench profiles without editing source:
- *   make ch592 PAIR_MIN_RSSI=-95
+ * Overridable for bench profiles without editing source (this file is shared,
+ * so substitute the chip you are building):
+ *   make -C firmware ch570 PAIR_MIN_RSSI=-95
+ *   make -C firmware ch592 PAIR_MIN_RSSI=-95
  * The live value is readable over IAP (status byte
  * DONGLE_STATUS_OFF_LAST_RSSI), so re-measuring at a different geometry
  * does not need four diagnostic builds the way this bisect did. */

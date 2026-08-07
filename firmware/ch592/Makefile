@@ -157,8 +157,11 @@ CFLAGS += -DOPENBOOT_CHIP_CH59X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 # Pair-acceptance RSSI floor in dBm, for bench profiles that need a different
-# one without editing source. Negative values need care: make strips nothing,
-# so quote it -- make ch592 PAIR_MIN_RSSI=-95
+# one without editing source. The negative value needs no quoting - it is an
+# ordinary command-line variable assignment:
+#   make -C firmware ch592 PAIR_MIN_RSSI=-95
+# (a command-line assignment reaches this sub-make via MAKEFLAGS, so it works
+# from the top level as well as from this directory).
 # The default (-90) and the reasoning live in common/src/rf_task.c. Measure
 # before changing it: `opendongle --info` reports the last RSSI seen.
 ifdef PAIR_MIN_RSSI

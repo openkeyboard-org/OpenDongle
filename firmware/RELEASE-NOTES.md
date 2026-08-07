@@ -119,7 +119,8 @@ relative selection targets the actual failure mode.
 Two supporting changes ship with it. `opendongle --info` now reports the last
 RSSI the RF task saw, so re-measuring needs one command rather than a bisect
 over four diagnostic builds; and the floor is overridable per build
-(`make ch592 PAIR_MIN_RSSI=-95`) so bench profiles do not need a source edit.
+(`make -C firmware ch592 PAIR_MIN_RSSI=-95`, or `ch570`) so bench profiles do
+not need a source edit.
 
 **This does not address the keyboard-reset-recovery regression** (EV10
 reacquire gating out rebooted keyboards). That is a separate v0.96.x fix, and
