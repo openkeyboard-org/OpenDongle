@@ -139,7 +139,13 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         );
                         return Ok(ExitCode::from(3));
                     }
-                    println!("next: openboot flash --force <app.bin>  (family NOT verified)");
+                    // The flags are not optional: openboot defaults to its
+                    // generic 1209:0001 and would not find this product.
+                    println!(
+                        "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
+                         <app.bin>  (family NOT verified)",
+                        cli.vid, cli.pid
+                    );
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -214,9 +220,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
 
     // The device resets within ~a second (RF quiesce + EP6 drain). Success
     // is not mere disappearance — wait for the OpenBoot bootloader to
-    // actually arrive on the bus. (With more than one dongle attached this
-    // check is not path-precise; the bench wrapper additionally requires
-    // exactly one matching device before flashing.)
+    // actually arrive on the bus.
+    //
+    // Success requires BOTH: our application interface has left AND a
+    // bootloader is present. Accepting "a bootloader is present" alone is
+    // wrong with more than one dongle attached — if unit B were already
+    // sitting in OpenBoot while the unit we just addressed carried on running
+    // its application, we would report success and the flash that follows
+    // (selected by VID:PID only) could write B. Neither this tool nor the
+    // openboot CLI can currently pin a physical device across the
+    // re-enumeration, so requiring our app to disappear is the strongest
+    // available check. See tools/README.md on the single-device requirement.
     let mut app_gone = false;
     let mut boot_here = false;
     for _ in 0..50 {
@@ -231,20 +245,42 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         }
         if openboot_present(&api, cli.vid, cli.pid) {
             boot_here = true;
-            break;
+            if app_gone {
+                break;
+            }
         }
     }
-    if boot_here {
+    if boot_here && app_gone {
         println!(
             "OpenBoot bootloader is on the bus ({:04X}:{:04X}, HID usage page {:04X} \
              usage {:02X})",
             cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
         );
         match &cli.image {
-            Some(p) => println!("next: openboot flash --force {}", p.display()),
-            None => println!("next: openboot flash --force <app.bin>"),
+            Some(p) => println!(
+                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force {}",
+                cli.vid,
+                cli.pid,
+                p.display()
+            ),
+            None => println!(
+                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force <app.bin>",
+                cli.vid, cli.pid
+            ),
         }
         Ok(ExitCode::SUCCESS)
+    } else if boot_here {
+        eprintln!(
+            "WARNING: an OpenBoot bootloader is on the bus, but the application \
+             interface we addressed ({:04X}:{:04X} if={}) never left it.",
+            cli.vid, cli.pid, cli.interface
+        );
+        eprintln!(
+            "         That is another unit in the bootloader, not this one. \
+             Refusing to report success: a flash selected by VID:PID alone \
+             could write the wrong device. Attach one dongle at a time."
+        );
+        Ok(ExitCode::from(2))
     } else if app_gone {
         eprintln!(
             "WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s"

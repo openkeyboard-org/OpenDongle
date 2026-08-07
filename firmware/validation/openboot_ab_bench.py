@@ -115,10 +115,17 @@ def load_harness():
     return module
 
 
-def port_for(serial: str) -> str:
-    """W3: the stable by-id symlink, derived from the same serial as the probe."""
+def port_for(serial: str, *, require_present: bool = True) -> str:
+    """W3: the stable by-id symlink, derived from the same serial as the probe.
+
+    require_present=False is for --dry-run, whose whole point is inspecting the
+    command sequence with no bench attached. Returning the by-id path unresolved
+    is honest there: it is deterministic, and it is what would be opened.
+    """
     link = Path(f"/dev/serial/by-id/usb-wch.cn_WCH-Link_{serial}-if01")
     if not link.exists():
+        if not require_present:
+            return str(link)
         sys.exit(f"no CDC port for probe {serial} at {link}; is it attached?")
     return os.path.realpath(link)
 
@@ -288,11 +295,19 @@ def main() -> int:
         if cfg["serial"] not in ALLOWED_PROBES:
             del module.CHIPS[name]
             continue
-        cfg["port"] = port_for(cfg["serial"])
+        cfg["port"] = port_for(cfg["serial"], require_present=not args.dry_run)
         print(f"{name}: probe {cfg['serial']} -> {cfg['port']}")
 
     if not module.CHIPS:
         sys.exit("no allowed probes present")
+
+    # A chip the allow-list filtered out would otherwise reach CHIPS[name] below
+    # and die with a bare KeyError traceback, which reads like a crash rather
+    # than "that probe is not on this bench".
+    if args.chip and args.chip not in module.CHIPS:
+        parser.error(
+            f"--chip {args.chip} is not available here; "
+            f"present: {', '.join(sorted(module.CHIPS)) or 'none'}")
 
     targets = [args.chip] if args.chip else list(module.CHIPS)
     failures = []

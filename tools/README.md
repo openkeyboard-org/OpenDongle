@@ -58,6 +58,18 @@ opendongle --enter-bootloader --force          # reboot with no family guard
 openboot --vid 0x0C45 --pid 0xFEFE flash --force app.bin
 ```
 
+**Attach one dongle at a time.** Neither this tool nor the `openboot` CLI can
+pin a *physical* device across the re-enumeration into the bootloader: both
+select by VID:PID (plus HID usage page), and `--serial` selects by ROM UID,
+which the application and the bootloader do not present identically. With two
+dongles attached, a flash could therefore target the wrong one.
+
+`--enter-bootloader` guards the half it can: it reports success only when the
+application interface it addressed has **left** the bus *and* a bootloader has
+appeared, so another unit already sitting in OpenBoot cannot be mistaken for
+the one you asked for. It exits 2 with an explanation if it sees a bootloader
+while the addressed application is still present.
+
 `--image` is the safety interlock: the image's ODG2 family is compared against
 the connected device's reported family **before** the reboot, while the
 application is still the thing answering, so a CH570 image cannot be sent toward
