@@ -150,12 +150,24 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         return Ok(ExitCode::from(3));
                     }
                     // The flags are not optional: openboot defaults to its
-                    // generic 1209:0001 and would not find this product.
-                    println!(
-                        "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
-                         <app.bin>  (family NOT verified)",
-                        cli.vid, cli.pid
-                    );
+                    // generic 1209:0001 and would not find this product. Name
+                    // the image when one was given, so the printed line can be
+                    // copied and run as-is rather than silently flashing a
+                    // placeholder the user has to remember to substitute.
+                    match &cli.image {
+                        Some(path) => println!(
+                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
+                             {}  (family NOT verified)",
+                            cli.vid,
+                            cli.pid,
+                            path.display()
+                        ),
+                        None => println!(
+                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
+                             <app.bin>  (family NOT verified)",
+                            cli.vid, cli.pid
+                        ),
+                    }
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -225,13 +237,49 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         ));
     }
 
+    // --hidraw opens a path directly, with no check that it carries cli.vid,
+    // cli.pid or cli.interface (iap.rs). Every check below is phrased in those
+    // CLI values, so an explicit path pointing somewhere else would have us
+    // watching one device and reporting on another. Resolve the opened path's
+    // real identity and track THAT; refuse if the path is not in the device
+    // list, since then nothing can be tracked at all.
+    let (track_vid, track_pid, track_if) = match cli.hidraw.as_deref() {
+        None => (cli.vid, cli.pid, cli.interface),
+        Some(path) => {
+            let api = HidApi::new()?;
+            let found = api
+                .device_list()
+                .find(|d| d.path().to_string_lossy() == path)
+                .map(|d| (d.vendor_id(), d.product_id(), d.interface_number()));
+            match found {
+                Some(ids) => {
+                    if ids != (cli.vid, cli.pid, cli.interface) {
+                        println!(
+                            "note: --hidraw {} is {:04X}:{:04X} if={}, not the \
+                             {:04X}:{:04X} if={} selectors; tracking the opened device",
+                            path, ids.0, ids.1, ids.2, cli.vid, cli.pid, cli.interface
+                        );
+                    }
+                    ids
+                }
+                None => {
+                    eprintln!(
+                        "ERROR: --hidraw {path} is not in the HID device list, so the \
+                         reboot cannot be observed."
+                    );
+                    return Ok(ExitCode::from(1));
+                }
+            }
+        }
+    };
+
     // Snapshot the bootloaders already on the bus. Anything present now is by
     // definition not the unit we are about to reboot, and the flash that
     // follows selects by VID:PID alone - so without this the tool cannot tell
     // "mine arrived" from "someone else's was already here".
     let preexisting: std::collections::BTreeSet<String> = {
         let api = HidApi::new()?;
-        openboot_paths(&api, cli.vid, cli.pid).into_iter().collect()
+        openboot_paths(&api, track_vid, track_pid).into_iter().collect()
     };
     // Refuse rather than warn. Not because the follow-up flash could hit the
     // wrong unit - it could not; openboot narrows by HID usage page and then
@@ -268,29 +316,41 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // re-enumeration, so requiring our app to disappear is the strongest
     // available check. See tools/README.md on the single-device requirement.
     let mut app_gone = false;
-    let mut arrived: Vec<String> = Vec::new();
+    let mut arrived: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Consecutive polls (200 ms each) the result must hold before we accept it.
+    const SETTLE_POLLS: u32 = 3;
+    let mut settled = 0u32;
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let api = HidApi::new()?;
-        if !app_gone {
-            app_gone = !api.device_list().any(|d| {
-                d.vendor_id() == cli.vid
-                    && d.product_id() == cli.pid
-                    && d.interface_number() == cli.interface
-            });
-        }
-        // Only bootloaders that were NOT there before count as ours.
-        let fresh: Vec<String> = openboot_paths(&api, cli.vid, cli.pid)
-            .into_iter()
-            .filter(|p| !preexisting.contains(p))
-            .collect();
-        if !fresh.is_empty() {
-            arrived = fresh;
-            if app_gone {
-                break;
+        // Re-evaluated every poll, not latched: a momentarily absent interface
+        // that comes back means the reboot did not stick, and treating the
+        // first disappearance as final would report success for it.
+        app_gone = !api.device_list().any(|d| {
+            d.vendor_id() == track_vid
+                && d.product_id() == track_pid
+                && d.interface_number() == track_if
+        });
+        // Accumulate rather than overwrite: a second bootloader appearing on a
+        // later poll must still count against uniqueness, which a per-poll
+        // snapshot would miss.
+        for path in openboot_paths(&api, track_vid, track_pid) {
+            if !preexisting.contains(&path) {
+                arrived.insert(path);
             }
         }
+        if arrived.len() == 1 && app_gone {
+            // Let it settle before believing it - a second device could still
+            // be mid-enumeration, and the application could still come back.
+            settled += 1;
+            if settled >= SETTLE_POLLS {
+                break;
+            }
+        } else {
+            settled = 0;
+        }
     }
+    let arrived: Vec<String> = arrived.into_iter().collect();
     let boot_here = arrived.len() == 1;
     if boot_here && app_gone {
         println!(
@@ -317,8 +377,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
              one addressed.",
             arrived.len()
         );
-        eprintln!("         Refusing to report success: the flash that follows selects");
-        eprintln!("         by VID:PID alone and could write either. One at a time.");
+        eprintln!("         Refusing the handoff: openboot narrows by HID usage page");
+        eprintln!("         and rejects a multi-match, so the flash would fail anyway.");
+        eprintln!("         Attach one dongle at a time.");
         Ok(ExitCode::from(2))
     } else if !arrived.is_empty() {
         eprintln!(
@@ -354,26 +415,29 @@ const OB_USAGE: u16 = 0x0001;
 /// usage 0x01 is what separates them — the application deliberately uses
 /// 0xFFFF and 0xFF60 instead (firmware/common/src/usb_descriptors.c).
 ///
-/// An exact usage decides it. A 0/0 pair means the backend could not parse
-/// the report descriptor — "cannot tell", not "matches" — so it stands in for
-/// the bootloader only when NOTHING on this VID:PID reported a usable usage,
-/// i.e. the platform does not report them at all.
+/// FAIL CLOSED: only an exact vendor usage counts.
 ///
-/// Deliberately stricter than OpenBoot's own `narrow_to_bootloader()`, which
-/// falls back to 0/0 whenever no exact match survives. Upstream can afford
-/// that: it returns a candidate list and errors out if more than one survives,
-/// so an ambiguous answer is caught. This returns a bare bool that nothing
-/// downstream re-checks, and the dongle's application shares the VID:PID — so
-/// a platform that parsed the app's keyboard descriptor but not some sibling's
-/// would otherwise report the bootloader present while the app is running.
+/// A 0/0 pair means the backend could not parse the report descriptor. It is
+/// "cannot tell", and on this product cannot-tell is indistinguishable from
+/// wrong: the application shares the bootloader's VID:PID, so a set of
+/// application interfaces all reporting 0/0 would otherwise be classified as
+/// OpenBoot and acted upon — rebooting or flashing against a running
+/// application.
+///
+/// Earlier revisions accepted 0/0 when nothing reported a real usage, on the
+/// grounds that a platform not reporting usages should still work. That trades
+/// a hard failure for a wrong answer, which is the wrong way round here: the
+/// caller uses this to decide which physical device to act on. On such a
+/// platform the tool now says it cannot identify the bootloader rather than
+/// guessing, and `--hidraw` remains available to name the device outright.
+///
+/// Stricter than OpenBoot's own `narrow_to_bootloader()`, which keeps the 0/0
+/// fallback — it can afford to, because it returns a candidate list and errors
+/// when more than one survives.
 fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
-    if usages
+    usages
         .iter()
         .any(|&(page, usage)| page == OB_USAGE_PAGE && usage == OB_USAGE)
-    {
-        return true;
-    }
-    !usages.is_empty() && usages.iter().all(|&(page, usage)| page == 0 && usage == 0)
 }
 
 /// Is the OpenBoot bootloader on the bus under this VID:PID?
@@ -400,19 +464,10 @@ fn openboot_paths(api: &HidApi, vid: u16, pid: u16) -> Vec<String> {
     if !has_bootloader_usage(&usages) {
         return Vec::new();
     }
-    // Mirror has_bootloader_usage's ordering: exact usages win outright, and
-    // the 0/0 "cannot tell" fallback applies only when nothing reported one.
-    let exact: Vec<String> = matching
-        .iter()
-        .filter(|d| d.usage_page() == OB_USAGE_PAGE && d.usage() == OB_USAGE)
-        .map(|d| d.path().to_string_lossy().into_owned())
-        .collect();
-    if !exact.is_empty() {
-        return exact;
-    }
+    // Same fail-closed rule: only interfaces declaring the vendor usage.
     matching
         .iter()
-        .filter(|d| d.usage_page() == 0 && d.usage() == 0)
+        .filter(|d| d.usage_page() == OB_USAGE_PAGE && d.usage() == OB_USAGE)
         .map(|d| d.path().to_string_lossy().into_owned())
         .collect()
 }
@@ -499,17 +554,19 @@ mod tests {
     }
 
     #[test]
-    fn unknown_usage_is_a_fallback_not_a_match() {
-        // 0/0 means the backend could not parse the report descriptor. Alone,
-        // it is the only thing we have to go on, so it counts.
-        assert!(has_bootloader_usage(&[(0, 0)]));
-        // But once ANY interface reports a real usage, the platform clearly
-        // does report them — so 0/0 no longer stands in for the bootloader.
-        // This is the case that regressed when the bootloader took the
-        // application's VID:PID: the app's keyboard interface would otherwise
-        // let a 0/0 sibling answer "bootloader present".
+    fn unknown_usage_never_stands_in_for_the_bootloader() {
+        // 0/0 means the backend could not parse the report descriptor. On a
+        // device whose application SHARES the bootloader's VID:PID, that is
+        // indistinguishable from wrong, so it must never count - not even when
+        // it is the only thing on the bus. Guessing here means rebooting or
+        // flashing against a running application.
+        assert!(!has_bootloader_usage(&[(0, 0)]));
+        // Several application interfaces all reporting 0/0 is the concrete
+        // case: without fail-closed behaviour this classified the running
+        // application as OpenBoot.
+        assert!(!has_bootloader_usage(&[(0, 0), (0, 0), (0, 0)]));
         assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0, 0)]));
-        // Exact match still wins when mixed with unknowns.
+        // Only the declared vendor usage counts, mixed in or not.
         assert!(has_bootloader_usage(&[(0, 0), (0xFF00, 0x0001)]));
     }
 
