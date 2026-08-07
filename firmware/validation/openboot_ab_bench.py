@@ -193,13 +193,20 @@ def stub_factory_for_dry_run(module):
     Upstream now reads the bootloader back and raises on mismatch - which is
     the behaviour this wrapper used to add, and the reason it no longer does.
     Under --dry-run the commands are printed rather than executed, so no
-    readback file exists and the comparison sees zero bytes. Run the same
-    command sequence, minus the compare.
+    readback file exists and the comparison would see zero bytes.
+
+    Be explicit about what this costs: a dry run VERIFIES NOTHING about the
+    factory write. The -r line it prints carries placeholder operands and is a
+    command-sequence illustration, not a simulated flash - so a dry run cannot
+    detect a failed or partial bootloader write, and is not evidence that a
+    real run would land one. That is the same reason the final verdict says
+    "no verdict" rather than PASS.
     """
     def factory(cfg):
         module.mc(cfg, "-E")
         module.mc(cfg, "-w", cfg["boot"], "0x0")
-        module.mc(cfg, "-r", "<readback>", "0x0", "<len>")
+        # Placeholder operands: illustrative only, see the docstring.
+        module.mc(cfg, "-r", "<readback-path>", "0x0", "<bootloader-len>")
         module.power_cycle(cfg)
 
     module.factory = factory
