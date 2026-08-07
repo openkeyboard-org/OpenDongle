@@ -71,12 +71,17 @@ exactly **one previously-absent** bootloader has appeared. It exits 2, with an
 explanation, if the addressed application never left, if more than one new
 bootloader appears, or — after warning — when bootloaders were already present.
 
-**What it still cannot do is aim the flash.** `openboot` selects by VID:PID
-(plus HID usage page); it is not told which hidraw path `--enter-bootloader`
-identified. So with several dongles attached the flash can still reach a
-different one, however cleanly the reboot was observed. Treat the single-device
-rule as the actual guarantee and these checks as a way of catching the obvious
-mistakes.
+If another bootloader is already on the bus it refuses **before** rebooting
+anything, leaving the dongle running.
+
+**The flash itself cannot be aimed at the wrong device**, which is worth stating
+because it is easy to assume otherwise. `openboot` is not told which hidraw path
+was identified — it selects by VID:PID — but it narrows by HID usage page first,
+so a sibling running its *application* is filtered out, and it then refuses
+outright when more than one bootloader interface matches. The failure mode with
+several dongles attached is a clear error, not a misdirected write. These checks
+exist so that error arrives before a working dongle has been rebooted for
+nothing, not because the write is unsafe.
 
 `--image` is the safety interlock: the image's ODG2 family is compared against
 the connected device's reported family **before** the reboot, while the
@@ -96,7 +101,7 @@ Exit codes:
 |---|---|
 | `0` | ok |
 | `1` | device/permission/runtime error, or a refused request |
-| `2` | EnterBootloader was accepted but OpenBoot never appeared on the bus within 10 s (or the application never left it) |
+| `2` | the handoff could not be pinned to one device. Either OpenBoot never appeared within 10 s, or the addressed application never left the bus, or more than one new bootloader appeared, or another bootloader was already present when the command started |
 | `3` | `--image` was given while only the OpenBoot bootloader is on the bus, so the image's ODG2 family could **not** be checked against the device. The guard lives in the application, which is not present. Pass `--force` to proceed anyway, and note the output says plainly that the family was not verified |
 
 `--info` reports an absent or invalid bond record as information rather than an

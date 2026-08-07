@@ -115,17 +115,27 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("no HID device") {
-                if cli.enter_bootloader && openboot_present(&api, cli.vid, cli.pid) {
+                let boots = openboot_paths(&api, cli.vid, cli.pid);
+                if cli.enter_bootloader && boots.len() > 1 {
+                    eprintln!(
+                        "ERROR: {} OpenBoot bootloaders are on the bus; cannot say \
+                         which one this is meant to be.",
+                        boots.len()
+                    );
+                    eprintln!("       openboot refuses a multi-match too. One at a time.");
+                    return Ok(ExitCode::from(2));
+                }
+                if cli.enter_bootloader && boots.len() == 1 {
                     // Already sitting in OpenBoot, so there is nothing to
                     // reboot. The family guard CANNOT run here: it compares the
                     // image against the family the *application* reports, and
                     // the application is not running. Say so rather than
                     // implying the image was checked.
                     println!(
-                        "no {:04X}:{:04X} app interface, but an OpenBoot bootloader \
-                         (same VID:PID, HID usage page {:04X} usage {:02X}) is on the \
-                         bus — already in the bootloader",
-                        cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
+                        "no {:04X}:{:04X} app interface, but an OpenBoot bootloader is \
+                         on the bus at {} (same VID:PID, HID usage page {:04X} usage \
+                         {:02X}) — already in the bootloader",
+                        cli.vid, cli.pid, boots[0], OB_USAGE_PAGE, OB_USAGE
                     );
                     if cli.image.is_some() && !cli.force {
                         eprintln!(
@@ -223,13 +233,22 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         let api = HidApi::new()?;
         openboot_paths(&api, cli.vid, cli.pid).into_iter().collect()
     };
+    // Refuse rather than warn. Not because the follow-up flash could hit the
+    // wrong unit - it could not; openboot narrows by HID usage page and then
+    // bails outright when more than one interface matches, so the worst case
+    // there is a clear error. The reason is that proceeding is pointless and
+    // costly: we would reboot a working dongle into a bootloader that openboot
+    // will then refuse to talk to, and it idles back to the application ten
+    // seconds later. Failing here leaves the device untouched.
     if !preexisting.is_empty() {
         eprintln!(
-            "WARNING: {} OpenBoot device(s) are already on the bus before this reboot.",
+            "ERROR: {} OpenBoot bootloader(s) are already on the bus.",
             preexisting.len()
         );
-        eprintln!("         They will be excluded, but a flash selected by VID:PID alone");
-        eprintln!("         still cannot be aimed. Attach one dongle at a time.");
+        eprintln!("       openboot selects by VID:PID plus HID usage page and refuses");
+        eprintln!("       when more than one matches, so the flash would fail anyway.");
+        eprintln!("       Unplug the other dongle(s) first; this one is left running.");
+        return Ok(ExitCode::from(2));
     }
 
     enter_bootloader(&dev)?;
@@ -363,10 +382,6 @@ fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
 /// failed to open, so the "cannot tell" fallback is the permissive answer we
 /// want there rather than a false negative on a platform that does not report
 /// HID usages.
-fn openboot_present(api: &HidApi, vid: u16, pid: u16) -> bool {
-    !openboot_paths(api, vid, pid).is_empty()
-}
-
 /// The hidraw paths of every OpenBoot interface on this VID:PID.
 ///
 /// Returning paths rather than a bool is what lets --enter-bootloader tell
