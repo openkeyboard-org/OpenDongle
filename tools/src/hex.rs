@@ -69,6 +69,14 @@ fn parse_odg2(base: u32, image: &[u8]) -> Result<Option<Odg2Identity>> {
     let build_id = le32(&h[20..24]);
     let flags = le32(&h[24..28]);
     let extension_len = le32(&h[28..32]);
+    // Phase 2 seam: under OpenBoot's A/B slots an application is linked once
+    // per slot, so a valid image may be based at its chip's slot-B base rather
+    // than slot A. Those bases are chip-specific and the numbers are easy to
+    // confuse across chips — 0x39000, for instance, is CH592's slot-B BASE and
+    // also CH570's slot-B RECORD address — so the per-slot check that replaces
+    // this must be keyed on the ODG2 family byte rather than a flat list.
+    // Phase 1 ships slot-A builds only, so pinning APP_BASE is still exactly
+    // right here and catches a mis-linked image.
     if base != APP_BASE || header_base != APP_BASE || base != header_base {
         bail!(
             "ODG2 application base must be 0x{APP_BASE:X} (file=0x{base:X}, header=0x{header_base:X})"

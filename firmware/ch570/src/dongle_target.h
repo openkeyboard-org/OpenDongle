@@ -58,9 +58,14 @@ _Static_assert((CH570_SYSCLK_HZ % 1000000u) == 0u,
 
 #define DONGLE_HAS_RF 1
 
-/* OpenBoot's boot record owns 0x3B000, so the bond moved to the ex-spare
- * page at 0x3A000 — still outside the OBP-clamped app region, which ends at
- * 0x3A000 (link.ld). */
+/* The bond sits at 0x3A000, immediately above the OBP-clamped app region
+ * (the OpenBoot board file sets OB_APP_END there), so no ERASE/WRITE/COMMIT
+ * can reach it.
+ *
+ * It is NOT displaced by an OpenBoot record any more: under A/B slots each
+ * slot's record lives in the top erase block of its own slot (0x1D000 for
+ * slot A, 0x39000 for slot B), and 0x3B000 — which used to hold the record —
+ * is now an unused spare page that our clamp keeps out of reach as well. */
 #define CH570_BOND_FLASH_ADDR 0x3A000u
 #define CH570_BOND_FLASH_SIZE 0x1000u
 

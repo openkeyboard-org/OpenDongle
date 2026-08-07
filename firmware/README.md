@@ -50,15 +50,19 @@ What it does, and why each step matters:
 1. `-kt` turns off the WCH-LinkE target supply.
 2. `-E` erases the entire user code flash. **The erase is required, not
    optional.** It clears the bond page (`0x3A000`) so a unit cannot inherit a
-   test fixture's pairing identity, and it clears the OpenBoot boot-record page
-   (`0x3B000`) so the first boot deterministically lands in the bootloader.
+   test fixture's pairing identity. It also clears both slots' boot records,
+   which now live inside the slots (`0x1D000` and `0x39000` on CH570) rather
+   than on a reserved page — but that no longer decides where the first boot
+   lands, because the factory image carries slot A's record and restores it.
 3. The factory image is written at address 0, read back, and compared.
 4. On CH592 only, the recipe additionally refuses to finish if a bond record
    survived in DataFlash, which `-E` cannot reach (`ALLOW_BONDED_FLASH=1`
    overrides this for a development unit).
 
-Finish with `openboot bless <app.bin>` + `openboot boot` over USB: with the
-record page erased, nothing attests the application yet (see BOOT.md).
+No bless step is needed, or possible: the factory image carries slot A's boot
+record, so the unit boots the application on first power-on (see BOOT.md).
+The recipe ends with a real power cycle rather than `minichlink -b`, so what it
+leaves behind is a unit that has actually demonstrated that.
 
 For a target placed in the WCH ROM USB bootloader instead of using the debug
 pin, the same raw image can be programmed with:
@@ -93,7 +97,7 @@ Two independent checksums are in play, and it is worth not confusing them.
 `finalize_image.py` stamps a CRC inside the ODG2 header; that is a host-side
 identity check, used by `opendongle` and by the build. OpenBoot never parses
 ODG2. What it verifies at every boot is its own `img_crc32`, computed over the
-committed bytes at bless time and stored out of band in the OBR1 boot record. A
+committed bytes at COMMIT time and stored in that slot's `OBR2` boot record. A
 raw OBP client can therefore bless and boot an image whose ODG2 CRC is invalid —
 consistent with wrong-family protection also being host-side only (see
 `BOOT.md`).
@@ -122,12 +126,21 @@ make MRS_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC15/bin
      OPENBOOT_TOOLCHAIN=/path/to/MounRiver_Studio/toolchain/RISC-V_Embedded_GCC12/bin
 ```
 
-`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, so omitting it does not
-silently build something unexpected — it fails in OpenBoot's own dependency
-checker, which pins the GCC 12 `riscv-wch-elf-*` tool names. If you only want
-the application binaries and no bootloader, the per-chip `.elf`/`.bin` targets
-need `MRS_TOOLCHAIN` alone. See the OpenBoot note below; this collapses back to
-one toolchain the moment its pin moves.
+`OPENBOOT_TOOLCHAIN` defaults to `MRS_TOOLCHAIN`, and omitting it now fails in
+**our** `check-openboot-toolchain`, not OpenBoot's. Upstream's compiler check
+went advisory at this pin — a hash mismatch and an unvalidated GCC major both
+warn and continue — and it auto-detects either tool prefix, so a factory build
+carrying one GCC 15 toolchain would otherwise silently ship a GCC 15
+bootloader. If you only want the application binaries and no bootloader, the
+per-chip `.elf`/`.bin` targets need `MRS_TOOLCHAIN` alone.
+
+**The split is permanent**, not a wait for OpenBoot's pin to catch up: GCC 15
+is explicitly unvalidated on ch57x. Upstream benched a CH572 where it fired the
+idle auto-boot at 1.51/1.71/4.75 s against a configured 10 s and failed to
+return from 4 of 32 software resets (GCC 12: 0/32), with the generated code for
+the timing functions instruction-identical. Cause unresolved.
+`OPENBOOT_ALLOW_UNVALIDATED_GCC=1` overrides the gate for anyone reproducing
+that investigation.
 
 **Note the tool prefix changed with this release.** GCC 12 shipped
 `riscv-wch-elf-*`; GCC 15 ships `riscv32-wch-elf-*`. Pointing `MRS_TOOLCHAIN` at
@@ -137,8 +150,8 @@ part-way through. The prefix lives in the `CROSS` variable in each application
 Makefile and in `firmware/Makefile`, and `check_dependencies.py` validates the
 same prefix it is given, so overriding `CROSS` also moves what gets validated.
 
-OpenBoot is the exception and still needs GCC 12 — see the note further down
-about `OPENBOOT_TOOLCHAIN`.
+OpenBoot is the exception and still needs GCC 12 — see the `OPENBOOT_TOOLCHAIN`
+note above.
 
 `MRS_TOOLCHAIN`, `OPENWCH_ROOT`, `CH570_SDK`, and `CH592_SDK` use Make's `?=`
 assignment, so they may be supplied by the environment, command line, or a
@@ -213,16 +226,24 @@ gaps are worth stating rather than leaving implied, both documented above and in
   This is safe rather than merely tolerated: the factory image is
   OpenBoot ‖ pad ‖ application, two separately linked binaries that share no
   code, so the compilers never have to agree. `OPENBOOT_TOOLCHAIN` defaults to
-  `MRS_TOOLCHAIN`, so leaving it unset fails loudly in OpenBoot's own checker
-  rather than silently building something unexpected. It collapses back to one
-  toolchain the moment OpenBoot's pin moves.
-- No OpenBoot revision appears in `CONFIG_TEXT` or `BUILD_ID_INPUTS`. The
-  **factory** image is OpenBoot ‖ pad ‖ application, so its bytes depend on a
-  checkout the build id says nothing about. Comparing factory images across
-  hosts is only meaningful with `third_party/openboot` at the same commit and
-  clean — which nothing currently enforces.
+  `MRS_TOOLCHAIN`, and a factory build with it pointed at anything but GCC 12
+  is refused by `check-openboot-toolchain`. The split is permanent, not a wait
+  for OpenBoot's pin to move.
+- The OpenBoot **revision** is in `CONFIG_TEXT`, and `check-deps` asserts the
+  checkout matches it and is clean (`--expect-revision`). The bootloader
+  **binary** is still not hashed into `BUILD_ID_INPUTS`, deliberately: the
+  manifest does not exist at parse time on a clean checkout, and its digest
+  depends on which GCC 12 install built OpenBoot, which would make
+  `DONGLE_BUILD_ID` differ between developers for byte-identical application
+  images.
+- So the two identities are separate on purpose: `DONGLE_BUILD_ID` identifies
+  the **application**, and the `.manifest` copied beside each factory image
+  (`openboot_revision`, `openboot_dirty`, `image_sha256`) identifies the
+  **bootloader artifact**. Comparing factory images across hosts means
+  comparing both.
 
 So: same tree, same complete toolchain, same OpenBoot checkout → identical
-artifacts. A matching build id alone does not imply a matching factory image.
+artifacts. A matching build id alone does not imply a matching factory image;
+the manifest is what closes that gap.
 
 `make clean` removes generated output for both production targets.

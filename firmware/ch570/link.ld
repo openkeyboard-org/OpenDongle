@@ -3,14 +3,32 @@ ENTRY( _start )
 MEMORY
 {
     /* CH570D has 240KB program flash. OpenBoot owns [0x0, 0x2000) and hands
-     * off to the app at 0x2000. App region [0x2000, 0x3A000) — OpenBoot
-     * clamps APP_END there too — then the bond page at 0x3A000 and the
-     * OpenBoot boot record at 0x3B000. The app links at the region base;
-     * OpenBoot jumps to _start here.
+     * off to the app at 0x2000.
+     *
+     * Under OpenBoot's A/B slots the app no longer owns the whole region.
+     * OpenBoot's board file clamps OB_APP_END to 0x3A000 (to keep OBP off the
+     * bond page), which splits [0x2000, 0x3A000) into slot A [0x2000, 0x1E000)
+     * and slot B [0x1E000, 0x3A000). Each slot's 32-byte boot record lives in
+     * the TOP erase block of that slot, so slot A's record owns
+     * [0x1D000, 0x1E000) and the app gets 0x1B000 (108 KiB).
+     *
+     * LENGTH must therefore be the slot CAPACITY, not the slot size: linking
+     * into [0x1D000, 0x1E000) still boots (the bootloader CRCs only img_len
+     * bytes) but the first COMMIT erases that block to store the record and
+     * takes the tail of the image with it. The Makefile asserts this value
+     * against OpenBoot's generated openboot_config.h on every build.
+     *
+     * Above the region: the bond page at 0x3A000, and 0x3B000 is now an unused
+     * spare page (OpenBoot reclaimed its old reserved record page there when
+     * records moved into the slots; our clamp keeps OBP out of both).
+     *
+     * Phase 2 links this a second time at slot B. That wants ORIGIN to come
+     * from a generated memory.ld INCLUDEd here, the way OpenBoot does it for
+     * its own build, rather than a second copy of this file.
      *
      * RAM stops at 0x20002FF0: OpenBoot reserves the top 16 bytes of the
      * 12 KB SRAM (0x20002FF0..0x20002FFF) for its boot-request word. */
-    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x38000
+    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x1B000
     RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x2FF0
 }
 

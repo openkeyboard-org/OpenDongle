@@ -21,9 +21,13 @@
 
 /* Logical bond-storage offset. CH59x maps this to DataFlash (physical
  * 0x75000 -- a page the stock firmware never touches: it uses 0x4000 AA /
- * 0x6000 BLE-bond / 0x7000 swap trigger, and our IAP End handler keeps
- * 0x7000); CH570 maps it to a reserved code-flash page because that part
- * has no CH59x-style DataFlash window. */
+ * 0x6000 BLE-bond / 0x7000 swap trigger); CH570 maps it to a reserved
+ * code-flash page because that part has no CH59x-style DataFlash window.
+ *
+ * Nothing of ours claims 0x7000 any longer: the IAP End handler that used to
+ * reserve it was retired at the OpenBoot cutover, and OpenBoot's own boot
+ * record moved out of DataFlash into the code-flash slots. Keep BLE_SNV off
+ * regardless -- see the rationale in ch592/Makefile. */
 #define BOND_EEPROM_OFF   0x5000u
 
 #define BOND_MAGIC        0x444E4F42u   /* 'B','O','N','D' little-endian */

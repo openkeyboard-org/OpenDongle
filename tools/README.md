@@ -50,9 +50,38 @@ opendongle --info                              # device, build, update, link, bo
 opendongle --enter-bootloader --image app.bin  # family-checked, then reboots into OpenBoot
 opendongle --enter-bootloader --force          # reboot with no family guard
 
-# then, with the device enumerated as OpenBoot (VID:PID 1209:0001):
-openboot flash --force app.bin
+# then, with the device enumerated as OpenBoot. The bootloader shares the
+# application's VID:PID, so the openboot CLI needs both flags — its own
+# defaults (1209:0001) are the generic/bench identity, not this product's.
+# It tells the two modes apart by HID usage page 0xFF00 usage 0x01, which the
+# application's interfaces (0xFFFF, 0xFF60) deliberately avoid.
+openboot --vid 0x0C45 --pid 0xFEFE flash --force app.bin
 ```
+
+**Attach one dongle at a time.** Neither this tool nor the `openboot` CLI can
+pin a *physical* device across the re-enumeration into the bootloader: both
+select by VID:PID (plus HID usage page), and `--serial` selects by ROM UID,
+which the application and the bootloader do not present identically. With two
+dongles attached, a flash could therefore target the wrong one.
+
+`--enter-bootloader` narrows the window but does not close it. It records which
+OpenBoot devices were already present before the reboot, and reports success
+only when the application interface it addressed has **left** the bus *and*
+exactly **one previously-absent** bootloader has appeared. It exits 2, with an
+explanation, if the addressed application never left, if more than one new
+bootloader appears, or — after warning — when bootloaders were already present.
+
+If another bootloader is already on the bus it refuses **before** rebooting
+anything, leaving the dongle running.
+
+**The flash itself cannot be aimed at the wrong device**, which is worth stating
+because it is easy to assume otherwise. `openboot` is not told which hidraw path
+was identified — it selects by VID:PID — but it narrows by HID usage page first,
+so a sibling running its *application* is filtered out, and it then refuses
+outright when more than one bootloader interface matches. The failure mode with
+several dongles attached is a clear error, not a misdirected write. These checks
+exist so that error arrives before a working dongle has been rebooted for
+nothing, not because the write is unsafe.
 
 `--image` is the safety interlock: the image's ODG2 family is compared against
 the connected device's reported family **before** the reboot, while the
@@ -72,7 +101,7 @@ Exit codes:
 |---|---|
 | `0` | ok |
 | `1` | device/permission/runtime error, or a refused request |
-| `2` | EnterBootloader was accepted but OpenBoot never appeared on the bus within 10 s (or the application never left it) |
+| `2` | the handoff could not be pinned to one device. Either OpenBoot never appeared within 10 s, or the addressed application never left the bus, or more than one new bootloader appeared, or another bootloader was already present when the command started |
 | `3` | `--image` was given while only the OpenBoot bootloader is on the bus, so the image's ODG2 family could **not** be checked against the device. The guard lives in the application, which is not present. Pass `--force` to proceed anyway, and note the output says plainly that the family was not verified |
 
 `--info` reports an absent or invalid bond record as information rather than an

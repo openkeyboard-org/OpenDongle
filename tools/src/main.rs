@@ -58,8 +58,9 @@ fn parse_u16_auto(s: &str) -> Result<u16, String> {
     long_about = "OpenDongle CH570/CH592 maintenance over USB HID IAP.\n\n\
         Safe by default: without an action, displays device, firmware, and \
         bond information. Updates happen in the OpenBoot bootloader: \
-        --enter-bootloader reboots the dongle into OpenBoot (1209:0001), \
-        then flash with the openboot CLI."
+        --enter-bootloader reboots the dongle into OpenBoot, which enumerates \
+        under this same VID:PID and is told apart by its HID usage page \
+        0xFF00. Flash there with `openboot --vid 0x0C45 --pid 0xFEFE`."
 )]
 struct Cli {
     /// USB VID (default 0x0C45)
@@ -82,8 +83,9 @@ struct Cli {
     #[arg(long, conflicts_with = "enter_bootloader")]
     info: bool,
 
-    /// Reboot the dongle into the OpenBoot bootloader (it re-enumerates as
-    /// VID:PID 1209:0001; flash there with the openboot CLI)
+    /// Reboot the dongle into the OpenBoot bootloader (it re-enumerates under
+    /// the same VID:PID on HID usage page 0xFF00; flash there with the
+    /// openboot CLI, passing --vid/--pid to match this device)
     #[arg(long)]
     enter_bootloader: bool,
 
@@ -113,16 +115,27 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("no HID device") {
-                if cli.enter_bootloader && openboot_present(&api) {
+                let boots = openboot_paths(&api, cli.vid, cli.pid);
+                if cli.enter_bootloader && boots.len() > 1 {
+                    eprintln!(
+                        "ERROR: {} OpenBoot bootloaders are on the bus; cannot say \
+                         which one this is meant to be.",
+                        boots.len()
+                    );
+                    eprintln!("       openboot refuses a multi-match too. One at a time.");
+                    return Ok(ExitCode::from(2));
+                }
+                if cli.enter_bootloader && boots.len() == 1 {
                     // Already sitting in OpenBoot, so there is nothing to
                     // reboot. The family guard CANNOT run here: it compares the
                     // image against the family the *application* reports, and
                     // the application is not running. Say so rather than
                     // implying the image was checked.
                     println!(
-                        "no {:04X}:{:04X} app, but an OpenBoot bootloader (1209:0001) \
-                         is on the bus — already in the bootloader",
-                        cli.vid, cli.pid
+                        "no {:04X}:{:04X} app interface, but an OpenBoot bootloader is \
+                         on the bus at {} (same VID:PID, HID usage page {:04X} usage \
+                         {:02X}) — already in the bootloader",
+                        cli.vid, cli.pid, boots[0], OB_USAGE_PAGE, OB_USAGE
                     );
                     if cli.image.is_some() && !cli.force {
                         eprintln!(
@@ -136,7 +149,25 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                         );
                         return Ok(ExitCode::from(3));
                     }
-                    println!("next: openboot flash --force <app.bin>  (family NOT verified)");
+                    // The flags are not optional: openboot defaults to its
+                    // generic 1209:0001 and would not find this product. Name
+                    // the image when one was given, so the printed line can be
+                    // copied and run as-is rather than silently flashing a
+                    // placeholder the user has to remember to substitute.
+                    match &cli.image {
+                        Some(path) => println!(
+                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
+                             {}  (family NOT verified)",
+                            cli.vid,
+                            cli.pid,
+                            path.display()
+                        ),
+                        None => println!(
+                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
+                             <app.bin>  (family NOT verified)",
+                            cli.vid, cli.pid
+                        ),
+                    }
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -206,38 +237,158 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         ));
     }
 
+    // --hidraw opens a path directly, with no check that it carries cli.vid,
+    // cli.pid or cli.interface (iap.rs). Every check below is phrased in those
+    // CLI values, so an explicit path pointing somewhere else would have us
+    // watching one device and reporting on another. Resolve the opened path's
+    // real identity and track THAT; refuse if the path is not in the device
+    // list, since then nothing can be tracked at all.
+    let (track_vid, track_pid, track_if) = match cli.hidraw.as_deref() {
+        None => (cli.vid, cli.pid, cli.interface),
+        Some(path) => {
+            let api = HidApi::new()?;
+            let found = api
+                .device_list()
+                .find(|d| d.path().to_string_lossy() == path)
+                .map(|d| (d.vendor_id(), d.product_id(), d.interface_number()));
+            match found {
+                Some(ids) => {
+                    if ids != (cli.vid, cli.pid, cli.interface) {
+                        println!(
+                            "note: --hidraw {} is {:04X}:{:04X} if={}, not the \
+                             {:04X}:{:04X} if={} selectors; tracking the opened device",
+                            path, ids.0, ids.1, ids.2, cli.vid, cli.pid, cli.interface
+                        );
+                    }
+                    ids
+                }
+                None => {
+                    eprintln!(
+                        "ERROR: --hidraw {path} is not in the HID device list, so the \
+                         reboot cannot be observed."
+                    );
+                    return Ok(ExitCode::from(1));
+                }
+            }
+        }
+    };
+
+    // Snapshot the bootloaders already on the bus. Anything present now is by
+    // definition not the unit we are about to reboot, and the flash that
+    // follows selects by VID:PID alone - so without this the tool cannot tell
+    // "mine arrived" from "someone else's was already here".
+    let preexisting: std::collections::BTreeSet<String> = {
+        let api = HidApi::new()?;
+        openboot_paths(&api, track_vid, track_pid).into_iter().collect()
+    };
+    // Refuse rather than warn. Not because the follow-up flash could hit the
+    // wrong unit - it could not; openboot narrows by HID usage page and then
+    // bails outright when more than one interface matches, so the worst case
+    // there is a clear error. The reason is that proceeding is pointless and
+    // costly: we would reboot a working dongle into a bootloader that openboot
+    // will then refuse to talk to, and it idles back to the application ten
+    // seconds later. Failing here leaves the device untouched.
+    if !preexisting.is_empty() {
+        eprintln!(
+            "ERROR: {} OpenBoot bootloader(s) are already on the bus.",
+            preexisting.len()
+        );
+        eprintln!("       openboot selects by VID:PID plus HID usage page and refuses");
+        eprintln!("       when more than one matches, so the flash would fail anyway.");
+        eprintln!("       Unplug the other dongle(s) first; this one is left running.");
+        return Ok(ExitCode::from(2));
+    }
+
     enter_bootloader(&dev)?;
     drop(dev);
 
     // The device resets within ~a second (RF quiesce + EP6 drain). Success
     // is not mere disappearance — wait for the OpenBoot bootloader to
-    // actually arrive on the bus. (With more than one dongle attached this
-    // check is not path-precise; the bench wrapper additionally requires
-    // exactly one 1209:0001 device before flashing.)
+    // actually arrive on the bus.
+    //
+    // Success requires BOTH: our application interface has left AND a
+    // bootloader is present. Accepting "a bootloader is present" alone is
+    // wrong with more than one dongle attached — if unit B were already
+    // sitting in OpenBoot while the unit we just addressed carried on running
+    // its application, we would report success and the flash that follows
+    // (selected by VID:PID only) could write B. Neither this tool nor the
+    // openboot CLI can currently pin a physical device across the
+    // re-enumeration, so requiring our app to disappear is the strongest
+    // available check. See tools/README.md on the single-device requirement.
     let mut app_gone = false;
-    let mut boot_here = false;
+    let mut arrived: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Consecutive polls (200 ms each) the result must hold before we accept it.
+    const SETTLE_POLLS: u32 = 3;
+    let mut settled = 0u32;
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let api = HidApi::new()?;
-        if !app_gone {
-            app_gone = !api.device_list().any(|d| {
-                d.vendor_id() == cli.vid
-                    && d.product_id() == cli.pid
-                    && d.interface_number() == cli.interface
-            });
+        // Re-evaluated every poll, not latched: a momentarily absent interface
+        // that comes back means the reboot did not stick, and treating the
+        // first disappearance as final would report success for it.
+        app_gone = !api.device_list().any(|d| {
+            d.vendor_id() == track_vid
+                && d.product_id() == track_pid
+                && d.interface_number() == track_if
+        });
+        // Accumulate rather than overwrite: a second bootloader appearing on a
+        // later poll must still count against uniqueness, which a per-poll
+        // snapshot would miss.
+        for path in openboot_paths(&api, track_vid, track_pid) {
+            if !preexisting.contains(&path) {
+                arrived.insert(path);
+            }
         }
-        if openboot_present(&api) {
-            boot_here = true;
-            break;
+        if arrived.len() == 1 && app_gone {
+            // Let it settle before believing it - a second device could still
+            // be mid-enumeration, and the application could still come back.
+            settled += 1;
+            if settled >= SETTLE_POLLS {
+                break;
+            }
+        } else {
+            settled = 0;
         }
     }
-    if boot_here {
-        println!("OpenBoot bootloader (1209:0001) is on the bus");
+    let arrived: Vec<String> = arrived.into_iter().collect();
+    let boot_here = arrived.len() == 1;
+    if boot_here && app_gone {
+        println!(
+            "OpenBoot bootloader is on the bus at {} ({:04X}:{:04X}, HID usage page \
+             {:04X} usage {:02X})",
+            arrived[0], cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
+        );
         match &cli.image {
-            Some(p) => println!("next: openboot flash --force {}", p.display()),
-            None => println!("next: openboot flash --force <app.bin>"),
+            Some(p) => println!(
+                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force {}",
+                cli.vid,
+                cli.pid,
+                p.display()
+            ),
+            None => println!(
+                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force <app.bin>",
+                cli.vid, cli.pid
+            ),
         }
         Ok(ExitCode::SUCCESS)
+    } else if arrived.len() > 1 {
+        eprintln!(
+            "WARNING: {} new OpenBoot devices appeared; cannot tell which is the \
+             one addressed.",
+            arrived.len()
+        );
+        eprintln!("         Refusing the handoff: openboot narrows by HID usage page");
+        eprintln!("         and rejects a multi-match, so the flash would fail anyway.");
+        eprintln!("         Attach one dongle at a time.");
+        Ok(ExitCode::from(2))
+    } else if !arrived.is_empty() {
+        eprintln!(
+            "WARNING: an OpenBoot bootloader appeared, but the application interface \
+             we addressed ({:04X}:{:04X} if={}) never left the bus.",
+            cli.vid, cli.pid, cli.interface
+        );
+        eprintln!("         Refusing to report success: that is not the unit asked for.");
+        Ok(ExitCode::from(2))
     } else if app_gone {
         eprintln!(
             "WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s"
@@ -249,10 +400,76 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     }
 }
 
-/// OpenBoot's USB identity (pid.codes test PID; see OpenBoot PROTOCOL.md §12).
-fn openboot_present(api: &HidApi) -> bool {
-    api.device_list()
-        .any(|d| d.vendor_id() == 0x1209 && d.product_id() == 0x0001)
+/// The bootloader's HID report descriptor: vendor usage page 0xFF00, usage
+/// 0x01 (OpenBoot PROTOCOL.md §12).
+const OB_USAGE_PAGE: u16 = 0xFF00;
+const OB_USAGE: u16 = 0x0001;
+
+/// Given every HID interface already filtered to one VID:PID, is one of them
+/// the bootloader?
+///
+/// VID:PID alone stopped being enough when the dongle's board files gave
+/// OpenBoot the application's own identity (0C45:FEFE). Both modes now
+/// enumerate identically, and the application's keyboard, mouse and vendor
+/// interfaces sit behind that same VID:PID. The vendor usage page 0xFF00 /
+/// usage 0x01 is what separates them — the application deliberately uses
+/// 0xFFFF and 0xFF60 instead (firmware/common/src/usb_descriptors.c).
+///
+/// FAIL CLOSED: only an exact vendor usage counts.
+///
+/// A 0/0 pair means the backend could not parse the report descriptor. It is
+/// "cannot tell", and on this product cannot-tell is indistinguishable from
+/// wrong: the application shares the bootloader's VID:PID, so a set of
+/// application interfaces all reporting 0/0 would otherwise be classified as
+/// OpenBoot and acted upon — rebooting or flashing against a running
+/// application.
+///
+/// Earlier revisions accepted 0/0 when nothing reported a real usage, on the
+/// grounds that a platform not reporting usages should still work. That trades
+/// a hard failure for a wrong answer, which is the wrong way round here: the
+/// caller uses this to decide which physical device to act on. On such a
+/// platform the tool now says it cannot identify the bootloader rather than
+/// guessing, and `--hidraw` remains available to name the device outright.
+///
+/// Stricter than OpenBoot's own `narrow_to_bootloader()`, which keeps the 0/0
+/// fallback — it can afford to, because it returns a candidate list and errors
+/// when more than one survives.
+fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
+    usages
+        .iter()
+        .any(|&(page, usage)| page == OB_USAGE_PAGE && usage == OB_USAGE)
+}
+
+/// Is the OpenBoot bootloader on the bus under this VID:PID?
+///
+/// Both call sites reach this only after the application's IAP interface
+/// failed to open, so the "cannot tell" fallback is the permissive answer we
+/// want there rather than a false negative on a platform that does not report
+/// HID usages.
+/// The hidraw paths of every OpenBoot interface on this VID:PID.
+///
+/// Returning paths rather than a bool is what lets --enter-bootloader tell
+/// "the unit I addressed arrived" from "some unit was already here": a count
+/// cannot distinguish those, and the flash that follows selects by VID:PID
+/// alone, so picking the wrong one is a real outcome rather than a hypothetical.
+fn openboot_paths(api: &HidApi, vid: u16, pid: u16) -> Vec<String> {
+    let matching: Vec<_> = api
+        .device_list()
+        .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
+        .collect();
+    let usages: Vec<(u16, u16)> = matching
+        .iter()
+        .map(|d| (d.usage_page(), d.usage()))
+        .collect();
+    if !has_bootloader_usage(&usages) {
+        return Vec::new();
+    }
+    // Same fail-closed rule: only interfaces declaring the vendor usage.
+    matching
+        .iter()
+        .filter(|d| d.usage_page() == OB_USAGE_PAGE && d.usage() == OB_USAGE)
+        .map(|d| d.path().to_string_lossy().into_owned())
+        .collect()
 }
 
 fn main() -> ExitCode {
@@ -315,6 +532,42 @@ mod tests {
         .unwrap();
         assert!(full.enter_bootloader);
         assert!(full.image.is_some());
+    }
+
+    // The dongle's bootloader shares the application's VID:PID, so these
+    // pairs are the ONLY thing distinguishing the two modes. Getting this
+    // wrong is silent in both directions: too permissive reports "already in
+    // the bootloader" while the app is running, too strict makes
+    // --enter-bootloader always report failure after a successful reboot.
+    #[test]
+    fn bootloader_usage_needs_the_exact_vendor_page() {
+        // The bootloader's own interface.
+        assert!(has_bootloader_usage(&[(0xFF00, 0x0001)]));
+        // The application's interfaces, as declared in usb_descriptors.c.
+        // None of these may pass.
+        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0xFF60, 0x0061)]));
+        // Right page, wrong usage — and vice versa.
+        assert!(!has_bootloader_usage(&[(0xFF00, 0x0002)]));
+        assert!(!has_bootloader_usage(&[(0xFF01, 0x0001)]));
+        // Nothing on the bus under this VID:PID.
+        assert!(!has_bootloader_usage(&[]));
+    }
+
+    #[test]
+    fn unknown_usage_never_stands_in_for_the_bootloader() {
+        // 0/0 means the backend could not parse the report descriptor. On a
+        // device whose application SHARES the bootloader's VID:PID, that is
+        // indistinguishable from wrong, so it must never count - not even when
+        // it is the only thing on the bus. Guessing here means rebooting or
+        // flashing against a running application.
+        assert!(!has_bootloader_usage(&[(0, 0)]));
+        // Several application interfaces all reporting 0/0 is the concrete
+        // case: without fail-closed behaviour this classified the running
+        // application as OpenBoot.
+        assert!(!has_bootloader_usage(&[(0, 0), (0, 0), (0, 0)]));
+        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0, 0)]));
+        // Only the declared vendor usage counts, mixed in or not.
+        assert!(has_bootloader_usage(&[(0, 0), (0xFF00, 0x0001)]));
     }
 
     #[test]
