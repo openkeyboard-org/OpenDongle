@@ -215,6 +215,23 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         ));
     }
 
+    // Snapshot the bootloaders already on the bus. Anything present now is by
+    // definition not the unit we are about to reboot, and the flash that
+    // follows selects by VID:PID alone - so without this the tool cannot tell
+    // "mine arrived" from "someone else's was already here".
+    let preexisting: std::collections::BTreeSet<String> = {
+        let api = HidApi::new()?;
+        openboot_paths(&api, cli.vid, cli.pid).into_iter().collect()
+    };
+    if !preexisting.is_empty() {
+        eprintln!(
+            "WARNING: {} OpenBoot device(s) are already on the bus before this reboot.",
+            preexisting.len()
+        );
+        eprintln!("         They will be excluded, but a flash selected by VID:PID alone");
+        eprintln!("         still cannot be aimed. Attach one dongle at a time.");
+    }
+
     enter_bootloader(&dev)?;
     drop(dev);
 
@@ -232,7 +249,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // re-enumeration, so requiring our app to disappear is the strongest
     // available check. See tools/README.md on the single-device requirement.
     let mut app_gone = false;
-    let mut boot_here = false;
+    let mut arrived: Vec<String> = Vec::new();
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(200));
         let api = HidApi::new()?;
@@ -243,18 +260,24 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     && d.interface_number() == cli.interface
             });
         }
-        if openboot_present(&api, cli.vid, cli.pid) {
-            boot_here = true;
+        // Only bootloaders that were NOT there before count as ours.
+        let fresh: Vec<String> = openboot_paths(&api, cli.vid, cli.pid)
+            .into_iter()
+            .filter(|p| !preexisting.contains(p))
+            .collect();
+        if !fresh.is_empty() {
+            arrived = fresh;
             if app_gone {
                 break;
             }
         }
     }
+    let boot_here = arrived.len() == 1;
     if boot_here && app_gone {
         println!(
-            "OpenBoot bootloader is on the bus ({:04X}:{:04X}, HID usage page {:04X} \
-             usage {:02X})",
-            cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
+            "OpenBoot bootloader is on the bus at {} ({:04X}:{:04X}, HID usage page \
+             {:04X} usage {:02X})",
+            arrived[0], cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
         );
         match &cli.image {
             Some(p) => println!(
@@ -269,17 +292,22 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             ),
         }
         Ok(ExitCode::SUCCESS)
-    } else if boot_here {
+    } else if arrived.len() > 1 {
         eprintln!(
-            "WARNING: an OpenBoot bootloader is on the bus, but the application \
-             interface we addressed ({:04X}:{:04X} if={}) never left it.",
+            "WARNING: {} new OpenBoot devices appeared; cannot tell which is the \
+             one addressed.",
+            arrived.len()
+        );
+        eprintln!("         Refusing to report success: the flash that follows selects");
+        eprintln!("         by VID:PID alone and could write either. One at a time.");
+        Ok(ExitCode::from(2))
+    } else if !arrived.is_empty() {
+        eprintln!(
+            "WARNING: an OpenBoot bootloader appeared, but the application interface \
+             we addressed ({:04X}:{:04X} if={}) never left the bus.",
             cli.vid, cli.pid, cli.interface
         );
-        eprintln!(
-            "         That is another unit in the bootloader, not this one. \
-             Refusing to report success: a flash selected by VID:PID alone \
-             could write the wrong device. Attach one dongle at a time."
-        );
+        eprintln!("         Refusing to report success: that is not the unit asked for.");
         Ok(ExitCode::from(2))
     } else if app_gone {
         eprintln!(
@@ -336,12 +364,42 @@ fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
 /// want there rather than a false negative on a platform that does not report
 /// HID usages.
 fn openboot_present(api: &HidApi, vid: u16, pid: u16) -> bool {
-    let usages: Vec<(u16, u16)> = api
+    !openboot_paths(api, vid, pid).is_empty()
+}
+
+/// The hidraw paths of every OpenBoot interface on this VID:PID.
+///
+/// Returning paths rather than a bool is what lets --enter-bootloader tell
+/// "the unit I addressed arrived" from "some unit was already here": a count
+/// cannot distinguish those, and the flash that follows selects by VID:PID
+/// alone, so picking the wrong one is a real outcome rather than a hypothetical.
+fn openboot_paths(api: &HidApi, vid: u16, pid: u16) -> Vec<String> {
+    let matching: Vec<_> = api
         .device_list()
         .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
+        .collect();
+    let usages: Vec<(u16, u16)> = matching
+        .iter()
         .map(|d| (d.usage_page(), d.usage()))
         .collect();
-    has_bootloader_usage(&usages)
+    if !has_bootloader_usage(&usages) {
+        return Vec::new();
+    }
+    // Mirror has_bootloader_usage's ordering: exact usages win outright, and
+    // the 0/0 "cannot tell" fallback applies only when nothing reported one.
+    let exact: Vec<String> = matching
+        .iter()
+        .filter(|d| d.usage_page() == OB_USAGE_PAGE && d.usage() == OB_USAGE)
+        .map(|d| d.path().to_string_lossy().into_owned())
+        .collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    matching
+        .iter()
+        .filter(|d| d.usage_page() == 0 && d.usage() == 0)
+        .map(|d| d.path().to_string_lossy().into_owned())
+        .collect()
 }
 
 fn main() -> ExitCode {

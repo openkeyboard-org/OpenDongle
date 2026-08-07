@@ -64,11 +64,19 @@ select by VID:PID (plus HID usage page), and `--serial` selects by ROM UID,
 which the application and the bootloader do not present identically. With two
 dongles attached, a flash could therefore target the wrong one.
 
-`--enter-bootloader` guards the half it can: it reports success only when the
-application interface it addressed has **left** the bus *and* a bootloader has
-appeared, so another unit already sitting in OpenBoot cannot be mistaken for
-the one you asked for. It exits 2 with an explanation if it sees a bootloader
-while the addressed application is still present.
+`--enter-bootloader` narrows the window but does not close it. It records which
+OpenBoot devices were already present before the reboot, and reports success
+only when the application interface it addressed has **left** the bus *and*
+exactly **one previously-absent** bootloader has appeared. It exits 2, with an
+explanation, if the addressed application never left, if more than one new
+bootloader appears, or — after warning — when bootloaders were already present.
+
+**What it still cannot do is aim the flash.** `openboot` selects by VID:PID
+(plus HID usage page); it is not told which hidraw path `--enter-bootloader`
+identified. So with several dongles attached the flash can still reach a
+different one, however cleanly the reboot was observed. Treat the single-device
+rule as the actual guarantee and these checks as a way of catching the obvious
+mistakes.
 
 `--image` is the safety interlock: the image's ODG2 family is compared against
 the connected device's reported family **before** the reboot, while the
