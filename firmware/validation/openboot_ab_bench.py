@@ -49,14 +49,14 @@ preference:
   W4  Refuse any probe not explicitly allowed. Structural, not procedural:
       this bench carries a CH570 whose dongle must never be written.
 
-  W5  Derive the frame count for the "whole image" case. Upstream passes a
-      literal 2, and each write is 16 bytes, so it covers 32 bytes of a witness
-      that is larger than that -- meaning the strongest pre-COMMIT case (slot
-      fully written, record not yet stored) is never actually exercised.
 
-  W6  Read back and compare after writing the bootloader. The harness's
-      factory() writes with no verify, which contradicts every other flash
-      recipe in both repositories; minichlink does not check its own writes.
+  W5 and W6 are GONE, and deliberately not renumbered. They derived the
+  "whole image" frame count from the witness, and read back the bootloader
+  after factory() wrote it. Upstream does both itself as of e1f132f
+  (scenario_interrupted takes writes=None, and factory() compares a readback
+  and raises on mismatch), so keeping them would duplicate the work and, for
+  the readback, run it twice. The numbering gap is left as a marker that the
+  wrapper should keep shrinking as upstream absorbs its patches.
 
   W7  Refuse to start unless the OBP 0.2 CLI has been built. The device
       requires an exact protocol major+minor match, so a 0.1 binary cannot
@@ -187,6 +187,31 @@ def patch_run_for_dry_run(module):
     module.run = run
 
 
+def stub_factory_for_dry_run(module):
+    """Dry-run only: skip upstream's factory() readback comparison.
+
+    Upstream now reads the bootloader back and raises on mismatch - which is
+    the behaviour this wrapper used to add, and the reason it no longer does.
+    Under --dry-run the commands are printed rather than executed, so no
+    readback file exists and the comparison would see zero bytes.
+
+    Be explicit about what this costs: a dry run VERIFIES NOTHING about the
+    factory write. The -r line it prints carries placeholder operands and is a
+    command-sequence illustration, not a simulated flash - so a dry run cannot
+    detect a failed or partial bootloader write, and is not evidence that a
+    real run would land one. That is the same reason the final verdict says
+    "no verdict" rather than PASS.
+    """
+    def factory(cfg):
+        module.mc(cfg, "-E")
+        module.mc(cfg, "-w", cfg["boot"], "0x0")
+        # Placeholder operands: illustrative only, see the docstring.
+        module.mc(cfg, "-r", "<readback-path>", "0x0", "<bootloader-len>")
+        module.power_cycle(cfg)
+
+    module.factory = factory
+
+
 def patch_reboot_for_lifecycle(module):
     """W9: make reboot() land in the bootloader deterministically.
 
@@ -221,39 +246,7 @@ def patch_reboot_for_lifecycle(module):
     return original
 
 
-def patch_factory(module, dry_run: bool):
-    """W6: read back and compare the bootloader after writing it."""
-    original = module.factory
 
-    def factory(cfg):
-        original(cfg)
-        image = Path(cfg["boot"])
-        if not image.is_file():
-            raise MinichlinkError(f"bootloader image missing: {image}")
-        readback = image.with_suffix(".readback.bin")
-        module.mc(cfg, "-r", str(readback), "0x0", str(image.stat().st_size))
-        if dry_run:
-            return
-        if readback.read_bytes() != image.read_bytes():
-            raise MinichlinkError(
-                f"bootloader readback differs from {image} - the write did not land")
-        print(f"  [ok] bootloader verified by readback ({image.stat().st_size} B)")
-
-    module.factory = factory
-
-
-def whole_image_frames(module, name: str) -> int:
-    """W5: frames needed to cover the entire witness, not a literal 2.
-
-    scenario_interrupted writes `<name>-A.bin` -- the witness -- 16 bytes at a
-    time, so the count must come from THAT file. Upstream's literal 2 covers 32
-    bytes of a 44-byte witness, leaving the case it is labelled with ("the
-    whole image, before COMMIT") unreached.
-    """
-    witness = Path(module.HERE) / f"{name}-A.bin"
-    if not witness.is_file():
-        raise MinichlinkError(f"witness image missing: {witness}")
-    return (witness.stat().st_size + 15) // 16
 
 
 def main() -> int:
@@ -288,7 +281,7 @@ def main() -> int:
     module.mc = make_mc(module, args.minichlink, args.dry_run)
     if args.dry_run:
         patch_run_for_dry_run(module)
-    patch_factory(module, args.dry_run)
+        stub_factory_for_dry_run(module)
 
     # W3/W4: rewrite the bench-local CHIPS table for THIS bench.
     for name, cfg in list(module.CHIPS.items()):
@@ -324,10 +317,10 @@ def main() -> int:
             if args.scenario in ("all", "interrupted"):
                 module.scenario_interrupted(name, 0, "after ERASE only")
                 module.scenario_interrupted(name, 1, "after ERASE + 1 write")
-                frames = whole_image_frames(module, name)
+                # writes=None means "the whole image" upstream now, derived
+                # from the witness rather than a literal frame count.
                 module.scenario_interrupted(
-                    name, frames,
-                    f"after ERASE + the whole image ({frames} frames), before COMMIT")
+                    name, None, "after ERASE + the whole image, before COMMIT")
             if args.scenario in ("all", "recovery"):
                 module.scenario_recovery(name)
         except MinichlinkError as exc:
