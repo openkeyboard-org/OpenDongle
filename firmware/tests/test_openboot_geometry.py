@@ -68,28 +68,35 @@ def makefile_text(chip: str) -> str:
     return (ROOT / chip / "Makefile").read_text()
 
 
-def link_ld_length(chip: str) -> int:
+def link_ld_carries_no_literal_geometry(chip: str) -> bool:
+    """link.ld must have NO MEMORY block of its own -- it INCLUDEs the generated
+    per-slot memory.ld instead. A literal reintroduced here would be used for
+    one slot and silently wrong for the other."""
     text = (ROOT / chip / "link.ld").read_text()
-    match = re.search(
-        r"FLASH\s*\(rx\)\s*:\s*ORIGIN\s*=\s*[^,]+,\s*LENGTH\s*=\s*(0[xX][0-9a-fA-F]+)",
-        text)
-    assert match is not None, f"{chip}/link.ld has no FLASH LENGTH"
-    return int(match.group(1), 0)
+    if "INCLUDE memory.ld" not in text:
+        return False
+    return re.search(r"FLASH\s*\(rx\)\s*:\s*ORIGIN", text) is None
 
 
 class SlotGeometry(unittest.TestCase):
-    def test_link_script_length_is_the_slot_capacity(self):
-        """The app gets slot size MINUS the erase block holding that slot's
+    def test_link_script_holds_no_literal_geometry(self):
+        """Addresses live in the generated per-slot memory.ld, not link.ld.
+
+        The app gets slot size MINUS the erase block holding that slot's
         record. Linking across that block still boots -- the bootloader CRCs
         only img_len bytes -- and is then destroyed by the first COMMIT, which
-        erases the block to store the record."""
+        erases the block to store the record. Since that bound is now per-slot,
+        a literal in link.ld could only ever be right for one of the two."""
         require_openboot()
         for chip in chip_dirs():
             with self.subTest(chip=chip):
                 _, size, capacity, _ = geometry(chip)
-                self.assertEqual(capacity, link_ld_length(chip))
                 self.assertLess(capacity, size,
                                 "capacity must exclude the record block")
+                self.assertTrue(
+                    link_ld_carries_no_literal_geometry(chip),
+                    f"{chip}/link.ld must INCLUDE memory.ld and define no "
+                    f"FLASH region of its own")
 
     def test_slot_defines_are_derived_not_literal(self):
         """The whole point: these come from OpenBoot's generated config, so a

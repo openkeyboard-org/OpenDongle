@@ -89,9 +89,13 @@ with only the recipe's final step differing:
 ## Update flow
 
 ```sh
-opendongle --enter-bootloader --image new-app.bin   # family-guarded reboot
-openboot --vid 0x0C45 --pid 0xFEFE flash --force new-app.bin   # in OpenBoot
+opendongle --enter-bootloader --image <slot-a>.bin              # family-guarded reboot
+openboot --vid 0x0C45 --pid 0xFEFE flash <chip>-product.obb --force
 ```
+
+Flash the **bundle**, not a bare `.bin` — see "Updating: use the bundle" below
+for why. `--image` still takes a plain `.bin`: it is read host-side for the
+family guard and never flashed.
 
 `--enter-bootloader` checks the image's ODG2 family against the device before
 rebooting. The firmware side (IAP command 0x85, armed session +
@@ -110,8 +114,9 @@ An interrupted update leaves the device **running the previous application**,
 not stranded in the bootloader. Under A/B, mutations target the *inactive*
 slot, so the running image is never touched and BOOT falls back to it. Retry
 the flash to recover. (This inverts the pre-A/B behaviour, where an interrupted
-transfer left the device in the bootloader.) Not yet exercised on this bench —
-see the Phase 1 note below.
+transfer left the device in the bootloader.) The A→B transition itself is
+validated on hardware; the interrupted-update paths are not — see "Updating:
+use the bundle" below.
 
 ## Idle timeout / fail-stay
 
@@ -152,19 +157,34 @@ must point at GCC 12 — `check-openboot-toolchain` refuses anything else,
 because OpenBoot's own compiler check went advisory upstream while GCC 15
 remains unvalidated on ch57x.
 
-## Phase 1 scope
+## Updating: use the bundle, not a bare .bin
 
-The application is currently built for **slot A only**. Consequences:
+`make bundles` produces one bundle per chip, carrying **both** per-slot builds —
+`ch570/build/ch570-product.obb` and `ch592/build/ch592-product.obb`, each
+relative to its chip directory. OpenBoot alternates its write target after every COMMIT and
+refuses an image whose base is not the current `write_base`, so a bare `.bin` is
+only ever right for one slot — by luck. `openboot flash app.obb` picks the
+variant matching the device.
 
-- **In-field OTA does not work, and this must not ship to users.** A
-  factory-blessed unit is `active=A, write=B` on its very first OBP session, so
-  a slot-A image is refused immediately. The 10 s idle timeout means the dongle
-  returns to its application on its own — a refusal, not a brick.
-- The A→B transition and the interrupted-update paths are therefore unexercised
-  with real product code.
+```sh
+opendongle --enter-bootloader --image <slot-a>.bin      # family-guarded reboot
+openboot --vid 0x0C45 --pid 0xFEFE flash app.obb --force
+```
 
-Phase 2 links the application a second time at the slot B base, ships both in
-an `.obb` bundle, and restores OTA.
+Run those back to back, or script them. The 10 s idle auto-boot starts as soon
+as the bootloader comes up and `--enter-bootloader` returns with most of it
+already spent, so a human typing the second command by hand will usually miss
+the window and find the application running again. Conversely, once any command
+has completed a HELLO the device **stays** in the bootloader until told
+otherwise (fail-stay) — end an interactive session with `openboot boot`.
+
+Validated on a CH570 over USB, A→B→A with the real application: the device
+reported `active A, writing B` and the bundle selected the slot-B variant, then
+`active B, writing A` and it selected slot A, with the running build id matching
+the chosen slot's image each time. The RF bond survived both updates: it sits
+**at** `0x3A000`, which is exactly `OB_APP_END`, and that bound is exclusive —
+the OBP-writable region is `[0x2000, 0x3A000)`, so the bond is the first
+address outside it rather than something above a margin.
 
 ## Pairing procedure
 

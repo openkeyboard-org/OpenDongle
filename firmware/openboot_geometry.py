@@ -18,7 +18,7 @@ what the bootloader was built with.
 
 Prints one line to stdout, for consumption by $(shell) in the chip Makefiles:
 
-    SLOT_BASE SLOT_SIZE CAPACITY RECORD_SIZE IMAGE_PATH
+    SLOT_A_BASE SLOT_SIZE CAPACITY RECORD_SIZE IMAGE_PATH SLOT_B_BASE
 
 the four sizes as 0x-prefixed hex. The bootloader image path rides along
 because it comes from the same `make print-image-path` call this already has to
@@ -78,8 +78,8 @@ def parse_defines(text: str, names: tuple[str, ...]) -> dict[str, int]:
 
 
 def geometry(openboot: Path,
-             make_args: list[str]) -> tuple[int, int, int, int, str]:
-    """Return (slot_base, slot_size, capacity, record_size, image_path)."""
+             make_args: list[str]) -> tuple[int, int, int, int, str, int]:
+    """Return (slot_a_base, slot_size, capacity, record_size, image, slot_b_base)."""
     image = run_make(openboot, make_args, "print-image-path")
     if not image:
         raise RuntimeError("print-image-path produced nothing")
@@ -145,7 +145,7 @@ def geometry(openboot: Path,
     if record > erase:
         raise RuntimeError(
             f"record 0x{record:X} does not fit its erase block 0x{erase:X}")
-    return base, size, size - erase, record, image
+    return base, size, size - erase, record, image, cfg["OB_SLOT_B_BASE"]
 
 
 def main() -> int:
@@ -160,11 +160,12 @@ def main() -> int:
     make_args = [f"CHIP={args.chip}", f"TRANSPORT={args.transport}",
                  f"BOARD={args.board}"]
     try:
-        base, size, capacity, record, image = geometry(args.openboot, make_args)
+        base, size, capacity, record, image, b_base = geometry(
+            args.openboot, make_args)
     except (RuntimeError, OSError) as exc:
         print(f"openboot geometry unavailable: {exc}", file=sys.stderr)
         return 1
-    print(f"0x{base:X} 0x{size:X} 0x{capacity:X} 0x{record:X} {image}")
+    print(f"0x{base:X} 0x{size:X} 0x{capacity:X} 0x{record:X} {image} 0x{b_base:X}")
     return 0
 
 

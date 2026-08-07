@@ -50,7 +50,6 @@ SDK_REVISION := 1e34c9450cd6df390153952c097cd09dd8a91aed
 OPENBOOT_REVISION := a3a492ccb0e1303731a8ce45e274d48c128e817e
 PROFILE_ID := ch570-product
 TARGET := opendongle-ch570-product
-BUILD := build/$(PROFILE_ID)
 
 # OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
 # copied here. openboot_app.c derives its boot-record address as
@@ -62,14 +61,47 @@ OPENBOOT_BOARD := opendongle-ch570
 OPENBOOT_GEOM := $(shell $(PYTHON) ../openboot_geometry.py \
     --openboot "$(OPENBOOT)" --chip ch570 --transport usb \
     --board $(OPENBOOT_BOARD))
-ifneq ($(words $(OPENBOOT_GEOM)),5)
+ifneq ($(words $(OPENBOOT_GEOM)),6)
 $(error cannot read OpenBoot slot geometry - run: git submodule update --init --recursive)
 endif
-OPENBOOT_SLOT_BASE := $(word 1,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_A_BASE := $(word 1,$(OPENBOOT_GEOM))
 OPENBOOT_SLOT_SIZE := $(word 2,$(OPENBOOT_GEOM))
 OPENBOOT_SLOT_CAP := $(word 3,$(OPENBOOT_GEOM))
 OPENBOOT_RECORD_SZ := $(word 4,$(OPENBOOT_GEOM))
 OPENBOOT_SRC_BIN := $(word 5,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_B_BASE := $(word 6,$(OPENBOOT_GEOM))
+
+# Which slot this build targets. OpenBoot alternates its write target after
+# every COMMIT, so a release needs BOTH: an update is refused outright unless
+# the image's base equals the device's current write_base. Objects are compiled
+# per slot rather than linked twice from one set, because the slot base reaches
+# the compiler - openboot_app.c derives its record address from it, and
+# dongle_id.c stamps it into the ODG2 header.
+SLOT ?= A
+ifeq ($(SLOT),A)
+OPENBOOT_SLOT_BASE := $(OPENBOOT_SLOT_A_BASE)
+else ifeq ($(SLOT),B)
+OPENBOOT_SLOT_BASE := $(OPENBOOT_SLOT_B_BASE)
+else
+$(error SLOT must be A or B, got '$(SLOT)')
+endif
+
+# Per-slot object and artifact tree. PROFILE_ID and TARGET stay slot-agnostic:
+# the two builds are the same firmware at different link bases, and they are
+# already distinguished by DONGLE_BUILD_ID, since CFLAGS (which carries
+# -DOPENBOOT_SLOT_BASE) is hashed into it.
+BUILD := build/$(PROFILE_ID)-slot$(SLOT)
+
+# Factory composition is slot A ONLY, and that is not an arbitrary policy: the
+# factory image places the application at slot A's base and carries slot A's
+# boot record, so a slot-B-linked APP would be programmed at the wrong address
+# with a record describing bytes that are not there. Left to run, SLOT=B here
+# composes exactly that image before the size check rejects it with a message
+# about a missing record, which is not the real problem. Refuse up front.
+FACTORY_SLOT_B := 0
+ifeq ($(SLOT),B)
+FACTORY_SLOT_B := 1
+endif
 
 ARCH := -march=rv32imc_zba_zbb_zbc_zbs_xw -mabi=ilp32 -mcmodel=medany
 ARCH += -msmall-data-limit=8 -mno-save-restore
@@ -83,7 +115,7 @@ CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
 # OpenBoot app companion (openboot_request_update / openboot_get_record).
 # openboot_app.c #errors without the two slot defines; they must match the
 # bootloader's own generated openboot_config.h, which is why they are derived
-# above rather than written out. Phase 1 builds slot A only.
+# above rather than written out. Both are per-slot: SLOT selects which.
 CFLAGS += -DOPENBOOT_CHIP_CH57X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
@@ -99,6 +131,7 @@ LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
+LDFLAGS += -L $(BUILD)          # so link.ld's `INCLUDE memory.ld` resolves
 LDFLAGS += $(EXTRA_LDFLAGS)
 
 INCLUDES := -I src -I $(COMMON)/include
@@ -146,14 +179,20 @@ VPATH := $(VPATH):$(OPENBOOT)/firmware/app
 # that slot's boot record. Derived, for the same reason the -D flags are.
 APP_MAX_BYTES := $(shell printf '%d' $$(($(OPENBOOT_SLOT_CAP))))
 
-# link.ld cannot read a make variable, so its LENGTH is written out - and then
-# checked here every build. Left too large, an app that outgrew its slot links
-# over the record block and is destroyed by the first COMMIT.
-LINK_LD_LENGTH := $(shell sed -n \
-    's/.*FLASH *(rx) *: *ORIGIN *= *[^,]*, *LENGTH *= *\(0x[0-9A-Fa-f]*\).*/\1/p' link.ld)
-ifneq ($(shell printf '%d' $$(($(LINK_LD_LENGTH)))),$(APP_MAX_BYTES))
-$(error link.ld FLASH LENGTH $(LINK_LD_LENGTH) != OpenBoot slot capacity $(OPENBOOT_SLOT_CAP))
-endif
+# link.ld's MEMORY block is GENERATED per slot into $(BUILD)/memory.ld and
+# pulled in with INCLUDE, following the same pattern OpenBoot uses for its own
+# link script. That retires the previous arrangement, where link.ld carried a
+# literal LENGTH and the Makefile asserted it matched the derived capacity: the
+# literal is gone, so there is nothing left to drift.
+MEMORY_LD := $(BUILD)/memory.ld
+
+# Release artifact: ONE file carrying both per-slot builds. OpenBoot picks the
+# variant matching the device's current write_base, which alternates after every
+# COMMIT - so shipping a bare .bin means being right about the slot by luck.
+SLOT_A_BIN := build/$(PROFILE_ID)-slotA/$(TARGET).bin
+SLOT_B_BIN := build/$(PROFILE_ID)-slotB/$(TARGET).bin
+BUNDLE_BIN := build/$(PROFILE_ID).obb
+OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
 
 FINALIZE_TOOL := ../finalize_image.py
 CONFIG_STAMP := $(BUILD)/.config-stamp
@@ -192,10 +231,10 @@ endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
 .DEFAULT_GOAL := all
-.PHONY: all openboot-image factory flash-factory check-deps \
+.PHONY: all openboot-image factory flash-factory bundle check-deps FORCE \
 	check-openboot-toolchain size size-check clean
 
-all: check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
+all: check-factory-slot check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
     $(FACTORY_BIN) size size-check
 
 # The bootloader on its own, built from the pinned submodule with the product
@@ -213,7 +252,7 @@ $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
 	  cp "$(OPENBOOT_SRC_BIN)" "$@"; echo "openboot image updated: $@"; fi
 
-factory: check-deps $(FACTORY_BIN) size-check
+factory: check-factory-slot check-deps $(FACTORY_BIN) size-check
 	@echo "factory image: $(abspath $(FACTORY_BIN))"
 
 flash-factory: factory
@@ -274,6 +313,12 @@ flash-factory: factory
 # composing a factory image - which is the opposite of the split's purpose.
 # The gate belongs on the paths that actually invoke OPENBOOT_TOOLCHAIN:
 # openboot-image and the factory rule.
+check-factory-slot:
+	@test "$(FACTORY_SLOT_B)" = 0 || { \
+	  echo "factory and all compose slot A only, so SLOT=B cannot be used here." >&2; \
+	  echo "Run make bundle to build both slots into one .obb instead." >&2; \
+	  exit 1; }
+
 check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
@@ -328,6 +373,24 @@ check-openboot-toolchain:
 $(BUILD):
 	mkdir -p "$@"
 
+# The MEMORY block, generated per slot so link.ld holds no literal addresses.
+# FORCE plus a content guard: it re-evaluates on every build (the geometry can
+# move when the submodule pin does) but only rewrites the file when the bytes
+# actually change, so an unchanged slot does not relink.
+$(MEMORY_LD): FORCE | $(BUILD)
+	@{ echo "/* Generated by ch570/Makefile for slot $(SLOT). DO NOT EDIT. */"; \
+	   echo "MEMORY"; \
+	   echo "{"; \
+	   echo "    FLASH (rx)  : ORIGIN = $(OPENBOOT_SLOT_BASE), LENGTH = $(OPENBOOT_SLOT_CAP)"; \
+	   echo "    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x2FF0"; \
+	   echo "}"; \
+	   echo "DONGLE_SLOT_A_BASE = $(OPENBOOT_SLOT_A_BASE);"; \
+	   echo "DONGLE_SLOT_B_BASE = $(OPENBOOT_SLOT_B_BASE);"; \
+	 } > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv -f "$@.tmp" "$@"; fi
+
+FORCE:
+
 $(CONFIG_STAMP): Makefile | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(CONFIG_TEXT)' > "$$tmp"; \
@@ -355,7 +418,7 @@ $(BUILD)/%.o: %.S | $(BUILD)
 	"$(AS)" $(CFLAGS) $(INCLUDES) -MMD -MP -MF "$(@:.o=.d)" -MT "$@" -c "$<" -o "$@"
 
 $(RAW_ELF): $(OBJS) $(SDK)/RF/LIB/libCH57xRF.a \
-        $(SDK)/SRC/StdPeriphDriver/libISP572.a link.ld
+        $(SDK)/SRC/StdPeriphDriver/libISP572.a link.ld $(MEMORY_LD)
 	"$(LD)" $(LDFLAGS) $(OBJS) $(SDK)/RF/LIB/libCH57xRF.a \
 	    $(SDK)/SRC/StdPeriphDriver/libISP572.a -o "$@"
 
@@ -377,8 +440,12 @@ $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
 # FACTORY_BLESS=1 is passed explicitly even though OpenBoot defaults it: if
 # that default ever flips, an unblessed image looks identical until a unit
 # reaches a customer and sits in the bootloader.
+# check-factory-slot belongs HERE, not only on `all` and `factory`. This rule
+# is a real file target: asking for the factory .bin directly reaches it
+# without passing through either convenience target, and would compose a
+# slot-B application into a slot-A image before the size check noticed.
 $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
-        | $(BUILD) check-openboot-toolchain
+        | $(BUILD) check-openboot-toolchain check-factory-slot
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch570 TRANSPORT=usb \
 	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
 	    FACTORY_BLESS=1 APP="$(abspath $(BUILD)/$(TARGET).bin)" factory
@@ -413,6 +480,19 @@ size-check: $(BUILD)/$(TARGET).bin
 	 test "$$size" -le $(APP_MAX_BYTES) || { \
 	   echo "firmware is $$size B, exceeds $(APP_MAX_BYTES) B" >&2; exit 1; }; \
 	 echo "firmware: $$size / $(APP_MAX_BYTES) B"
+
+# Both slots plus the bundle. Recursive because SLOT selects the object tree,
+# the link base and the -D values, so the two builds cannot share a pass.
+bundle:
+	+$(MAKE) SLOT=A $(SLOT_A_BIN)
+	+$(MAKE) SLOT=B $(SLOT_B_BIN)
+	@test -x "$(OPENBOOT_CLI)" || { \
+	  echo "build the OpenBoot CLI first: cargo build --release --manifest-path $(OPENBOOT)/tools/Cargo.toml" >&2; \
+	  exit 1; }
+	"$(OPENBOOT_CLI)" bundle create -o "$(BUNDLE_BIN)" --chip ch570 \
+	    "$(SLOT_A_BIN)@$(OPENBOOT_SLOT_A_BASE)" \
+	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
+	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
 clean:
 	rm -rf "$(abspath build)"

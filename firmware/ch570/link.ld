@@ -1,36 +1,24 @@
 ENTRY( _start )
 
-MEMORY
-{
-    /* CH570D has 240KB program flash. OpenBoot owns [0x0, 0x2000) and hands
-     * off to the app at 0x2000.
-     *
-     * Under OpenBoot's A/B slots the app no longer owns the whole region.
-     * OpenBoot's board file clamps OB_APP_END to 0x3A000 (to keep OBP off the
-     * bond page), which splits [0x2000, 0x3A000) into slot A [0x2000, 0x1E000)
-     * and slot B [0x1E000, 0x3A000). Each slot's 32-byte boot record lives in
-     * the TOP erase block of that slot, so slot A's record owns
-     * [0x1D000, 0x1E000) and the app gets 0x1B000 (108 KiB).
-     *
-     * LENGTH must therefore be the slot CAPACITY, not the slot size: linking
-     * into [0x1D000, 0x1E000) still boots (the bootloader CRCs only img_len
-     * bytes) but the first COMMIT erases that block to store the record and
-     * takes the tail of the image with it. The Makefile asserts this value
-     * against OpenBoot's generated openboot_config.h on every build.
-     *
-     * Above the region: the bond page at 0x3A000, and 0x3B000 is now an unused
-     * spare page (OpenBoot reclaimed its old reserved record page there when
-     * records moved into the slots; our clamp keeps OBP out of both).
-     *
-     * Phase 2 links this a second time at slot B. That wants ORIGIN to come
-     * from a generated memory.ld INCLUDEd here, the way OpenBoot does it for
-     * its own build, rather than a second copy of this file.
-     *
-     * RAM stops at 0x20002FF0: OpenBoot reserves the top 16 bytes of the
-     * 12 KB SRAM (0x20002FF0..0x20002FFF) for its boot-request word. */
-    FLASH (rx)  : ORIGIN = 0x00002000, LENGTH = 0x1B000
-    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x2FF0
-}
+/* The MEMORY block is GENERATED per slot into $(BUILD)/memory.ld and pulled in
+ * here, the same way OpenBoot parameterises its own link script. It carries no
+ * literal addresses, so this file is identical for slot A and slot B and the
+ * two builds differ only in what the Makefile derived from OpenBoot.
+ *
+ * Layout, for orientation (CH570D, 240 KB program flash, OB_APP_END clamped to
+ * 0x3A000 so OBP cannot reach the bond page):
+ *
+ *   slot A  [0x02000, 0x1D000)   record [0x1D000, 0x1E000)
+ *   slot B  [0x1E000, 0x39000)   record [0x39000, 0x3A000)
+ *   bond    0x3A000              spare  0x3B000
+ *
+ * LENGTH is the slot CAPACITY, not the slot size: linking across the record
+ * block still boots (the bootloader CRCs only img_len bytes) and is then
+ * destroyed by the first COMMIT, which erases that block to store the record.
+ *
+ * RAM stops at 0x20002FF0: OpenBoot reserves the top 16 bytes of the 12 KB
+ * SRAM (0x20002FF0..0x20002FFF) for its boot-request word. */
+INCLUDE memory.ld
 
 SECTIONS
 {
@@ -249,9 +237,22 @@ SECTIONS
         ALIGN(LOADADDR(.data) + SIZEOF(.data), 4) - ORIGIN(FLASH), 0x1000);
 
     /* CODEREVIEW F01: pin the image-id header at a fixed staged offset and keep
-     * the startup .highcode copy correct. */
-    ASSERT(ORIGIN(FLASH) == 0x2000,
-        "F01: app base must be 0x2000 (OpenBoot handoff) to match DONGLE_IAP_APP_BASE")
+     * the startup .highcode copy correct.
+     *
+     * Under A/B this can no longer be "== 0x2000": slot B links at a different
+     * base and is equally valid.
+     *
+     * Be honest about the strength of what replaced it. ORIGIN(FLASH) and both
+     * DONGLE_SLOT_*_BASE symbols come from the SAME generated memory.ld, so
+     * this cannot detect a geometry that was read wrongly - a consistent but
+     * wrong memory.ld satisfies it. What it does catch is the two halves of the
+     * link disagreeing: a MEMORY block reintroduced into this file, or a
+     * memory.ld describing a different slot from the one the rest of the build
+     * was configured for. Validating the geometry itself belongs to
+     * openboot_geometry.py, which cross-checks slot contiguity and app-region
+     * containment against OpenBoot's own generated config. */
+    ASSERT(ORIGIN(FLASH) == DONGLE_SLOT_A_BASE || ORIGIN(FLASH) == DONGLE_SLOT_B_BASE,
+        "F01: app must link at one of OpenBoot's slot bases (see memory.ld)")
     ASSERT(_dongle_id_start == ORIGIN(FLASH) + 0x20,
         "F01: image-id header must be pinned at image offset 0x20")
     ASSERT(_dongle_id_end - _dongle_id_start == 0x20,
