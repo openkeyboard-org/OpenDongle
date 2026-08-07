@@ -79,6 +79,52 @@ Behavioural properties worth knowing:
   product: a source audit of `firmware/core/`, `ports/` and `transports/`
   against every hardware observation found no bootloader defect.
 
+## Pair-acceptance RSSI floor: -75 -> -90 dBm
+
+The fresh-pair path (and a boot-window accept of a *different* keyboard) is
+gated on received signal strength. A bonded keyboard reconnecting is **not**
+gated, so this only ever affected pairing.
+
+**-75 had negative margin at the distance the product is for.** Bisected with
+diagnostic builds against stock v0.96.15 with a bonded link: -128 accepted,
+-90 accepted, -82 accepted, **-75 rejected**. The keyboard's pair broadcast
+therefore arrives at roughly -81..-76 dBm with both boards on one bench, so a
+dongle behind a PC case or across a desk sits in that band or below — the
+shipped default was rejecting its own primary scenario.
+
+**-90 keeps what the gate is for.** Its purpose is stopping an unprovisioned
+dongle auto-pairing with a distant keyboard in a dense environment. At 2.4 GHz
+a cross-room signal (several metres plus a wall) generally lands below -90
+while same-room stays above, so this keeps the "not the neighbour's office"
+property with ~10 dB of margin over what was measured.
+
+Two things to be honest about:
+
+- **The bracket is bench-specific.** It reflects one geometry and one pair of
+  boards. Before this ships, re-measure at the intended worst case — dongle on
+  a rear I/O port, keyboard at arm's length. If that lands below -90, prefer
+  -95 over deleting the gate.
+- **The gate is a heuristic, not a security boundary.** CH59x RSSI is coarse
+  and uncalibrated chip to chip, so the same number means different real
+  distances on different units, and the CH570 SKU is reported to run with it
+  effectively inert (constant RSSI byte) — the product line already tolerates a
+  no-gate configuration.
+
+If mispairing in dense environments ever becomes a real complaint, the fix is
+**not** a tighter floor: it is strongest-candidate selection — briefly collect
+broadcasters during pairing and take the highest RSSI, keeping this only as a
+sanity floor. An absolute threshold encodes antenna and geometry assumptions;
+relative selection targets the actual failure mode.
+
+Two supporting changes ship with it. `opendongle --info` now reports the last
+RSSI the RF task saw, so re-measuring needs one command rather than a bisect
+over four diagnostic builds; and the floor is overridable per build
+(`make ch592 PAIR_MIN_RSSI=-95`) so bench profiles do not need a source edit.
+
+**This does not address the keyboard-reset-recovery regression** (EV10
+reacquire gating out rebooted keyboards). That is a separate v0.96.x fix, and
+both want the same bench re-validation pass.
+
 ## Security property: the RF link provides no confidentiality
 
 The Bridge75 2.4 GHz data path applies **no confidentiality protection**, by

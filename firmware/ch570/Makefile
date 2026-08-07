@@ -126,6 +126,14 @@ CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 ifdef AES_IMPL
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
 endif
+# Pair-acceptance RSSI floor in dBm, for bench profiles that need a different
+# one without editing source. Negative values need care: make strips nothing,
+# so quote it -- make ch592 PAIR_MIN_RSSI=-95
+# The default (-90) and the reasoning live in common/src/rf_task.c. Measure
+# before changing it: `opendongle --info` reports the last RSSI seen.
+ifdef PAIR_MIN_RSSI
+CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
+endif
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage

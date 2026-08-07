@@ -313,6 +313,10 @@ static void handle_status(void)
     payload[DONGLE_STATUS_OFF_FAMILY] = DONGLE_CHIP_FAMILY_ID;
 #if DONGLE_HAS_RF
     payload[DONGLE_STATUS_OFF_CONNECTION] = RF_GetConnectionStatus();
+    /* Signed dBm in an unsigned byte; the host sign-extends. Reported so the
+     * pair-RSSI floor can be measured rather than guessed - it was previously
+     * only observable by flashing diagnostic builds. */
+    payload[DONGLE_STATUS_OFF_LAST_RSSI] = (uint8_t)RF_GetRSSI();
     memcpy(&payload[DONGLE_STATUS_OFF_DONGLE_MAC], RF_GetDongleMac(),
            DONGLE_MAC_LEN);
 #else
