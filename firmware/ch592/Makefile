@@ -497,8 +497,12 @@ $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
 # FACTORY_BLESS=1 is passed explicitly even though OpenBoot defaults it: if
 # that default ever flips, an unblessed image looks identical until a unit
 # reaches a customer and sits in the bootloader.
+# check-factory-slot belongs HERE, not only on `all` and `factory`. This rule
+# is a real file target: asking for the factory .bin directly reaches it
+# without passing through either convenience target, and would compose a
+# slot-B application into a slot-A image before the size check noticed.
 $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
-        | $(BUILD) check-openboot-toolchain
+        | $(BUILD) check-openboot-toolchain check-factory-slot
 	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=usb \
 	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
 	    FACTORY_BLESS=1 APP="$(abspath $(BUILD)/$(TARGET).bin)" factory

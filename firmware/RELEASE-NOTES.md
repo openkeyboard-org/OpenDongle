@@ -69,8 +69,10 @@ Behavioural properties worth knowing:
   The running build id matched the selected slot's image each time
   (`0x44126E29` for slot B, `0x9F666DEE` for slot A), so the variant really was
   chosen by the device's `write_base` rather than assumed. **The RF bond
-  survived both updates** - it sits at `0x3A000`, above the `OB_APP_END` clamp,
-  so OBP cannot reach it.
+  survived both updates** - it sits at `0x3A000`, which is exactly
+  `OB_APP_END`. That bound is exclusive, so the writable region is
+  `[0x2000, 0x3A000)` and the bond is the first address outside it; OBP cannot
+  reach it.
 - **Still not validated on hardware: the interrupted-update paths.** Upstream's
   bench harness reaches the bootloader through a CDC-open target reset that this
   bench does not exhibit. That is a limitation of OpenBoot's test code, not the

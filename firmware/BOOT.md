@@ -181,8 +181,10 @@ otherwise (fail-stay) — end an interactive session with `openboot boot`.
 Validated on a CH570 over USB, A→B→A with the real application: the device
 reported `active A, writing B` and the bundle selected the slot-B variant, then
 `active B, writing A` and it selected slot A, with the running build id matching
-the chosen slot's image each time. The RF bond at `0x3A000` survived both
-updates, being above the `OB_APP_END` clamp.
+the chosen slot's image each time. The RF bond survived both updates: it sits
+**at** `0x3A000`, which is exactly `OB_APP_END`, and that bound is exclusive —
+the OBP-writable region is `[0x2000, 0x3A000)`, so the bond is the first
+address outside it rather than something above a margin.
 
 ## Pairing procedure
 
