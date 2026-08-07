@@ -126,6 +126,17 @@ CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 ifdef AES_IMPL
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
 endif
+# Pair-acceptance RSSI floor in dBm, for bench profiles that need a different
+# one without editing source. The negative value needs no quoting - it is an
+# ordinary command-line variable assignment:
+#   make -C firmware ch570 PAIR_MIN_RSSI=-95
+# (a command-line assignment reaches this sub-make via MAKEFLAGS, so it works
+# from the top level as well as from this directory).
+# The default (-90) and the reasoning live in common/src/rf_task.c. Measure
+# before changing it: `opendongle --info` reports the last RSSI seen.
+ifdef PAIR_MIN_RSSI
+CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
+endif
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage

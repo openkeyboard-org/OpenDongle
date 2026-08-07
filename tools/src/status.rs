@@ -6,6 +6,8 @@ use crate::iap::{hexsp, op_status, IapDevice};
 
 const ACK_STATUS: u8 = 0x91;
 const STATUS_SCHEMA: u8 = 1;
+/// DONGLE_CAP_RF in dongle_status.h - gates whether last_rssi means anything.
+const CAP_RF: u8 = 0x01;
 const STATUS_LEN: usize = 32;
 const UID_LEN: usize = 8;
 const MAC_LEN: usize = 6;
@@ -17,6 +19,7 @@ pub struct DeviceStatus {
     update: u8,
     capabilities: u8,
     profile: u8,
+    last_rssi: i8,
     uid: [u8; UID_LEN],
     dongle_mac: [u8; MAC_LEN],
     build_id: u32,
@@ -66,11 +69,32 @@ impl DeviceStatus {
             update: payload[3],
             capabilities: payload[4],
             profile: payload[6],
+            // Signed dBm in an unsigned byte. 0 is the "no reading" sentinel:
+            // it is what firmware predating this field returns (the byte was
+            // reserved and zero-filled) and what an RF-less build reports. A
+            // real reading is negative, so 0 is unambiguous.
+            last_rssi: payload[7] as i8,
             uid,
             dongle_mac,
             build_id: u32::from_le_bytes(payload[16..20].try_into().unwrap()),
             image_len: u32::from_le_bytes(payload[20..24].try_into().unwrap()),
         })
+    }
+
+    /// Last RSSI the RF task saw, or why there is not one.
+    ///
+    /// Shown so the pair-acceptance floor can be measured directly instead of
+    /// bisected with diagnostic builds - and so a unit reporting an
+    /// implausible value (the CH570 SKU is reported to return a constant) is
+    /// visible rather than silently trusted.
+    fn last_rssi(&self) -> String {
+        if self.capabilities & CAP_RF == 0 {
+            return "n/a (no RF)".to_string();
+        }
+        if self.last_rssi == 0 {
+            return "none yet (or firmware predates this field)".to_string();
+        }
+        format!("{} dBm", self.last_rssi)
     }
 
     fn chip(&self) -> &'static str {
@@ -138,6 +162,7 @@ pub fn show_status(status: &DeviceStatus, firmware_version: &str) {
     println!("  image           {} bytes", status.image_len);
     println!("  update          {}", status.update());
     println!("  connection      {}", status.connection());
+    println!("  last RSSI       {}", status.last_rssi());
     println!("  capabilities    0x{:02X}", status.capabilities);
 }
 
@@ -181,6 +206,38 @@ mod tests {
         response[2 + 24..2 + 30].fill(0);
         let status = DeviceStatus::decode(&response).unwrap();
         assert_eq!(format_hex(&status.dongle_mac, ":"), "B2:59:21:62:32:DC");
+    }
+
+    /// The reserved byte became last-RSSI WITHOUT a schema bump, because the
+    /// host rejects an unknown schema outright. These pin both halves of that
+    /// bargain: a real reading decodes, and the zero an older firmware leaves
+    /// there is reported as absent rather than as "0 dBm".
+    #[test]
+    fn last_rssi_decodes_as_signed_dbm() {
+        let mut r = response();
+        r[2 + 7] = (-81i8) as u8;
+        let s = DeviceStatus::decode(&r).unwrap();
+        assert_eq!(-81, s.last_rssi);
+        assert_eq!("-81 dBm", s.last_rssi());
+    }
+
+    #[test]
+    fn zero_rssi_reads_as_absent_not_as_0_dbm() {
+        // What firmware predating the field returns: the byte was reserved
+        // and zero-filled. A genuine reading is negative, so this is
+        // unambiguous - but printing "0 dBm" would look like a measurement.
+        let s = DeviceStatus::decode(&response()).unwrap();
+        assert_eq!(0, s.last_rssi);
+        assert!(s.last_rssi().contains("none yet"), "got {}", s.last_rssi());
+    }
+
+    #[test]
+    fn rssi_is_not_reported_without_the_rf_capability() {
+        let mut r = response();
+        r[2 + 4] = 0x0E;          // capabilities with CAP_RF cleared
+        r[2 + 7] = (-81i8) as u8; // stale/meaningless on an RF-less build
+        let s = DeviceStatus::decode(&r).unwrap();
+        assert!(s.last_rssi().contains("no RF"), "got {}", s.last_rssi());
     }
 
     #[test]

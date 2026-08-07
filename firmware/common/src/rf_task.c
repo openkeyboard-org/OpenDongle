@@ -351,11 +351,46 @@ static __attribute__((noinline)) void rf_queue_led_relay(uint8_t led)
 /* Minimum RSSI for pair acceptance (dBm). Gates the fresh-pair path (no
  * valid bond) AND a boot-window accept of a DIFFERENT keyboard; the
  * known-peer reconnect path has no RSSI gate (a bonded keyboard must
- * reconnect at range). -55 was a cautious default but empirically the
- * keyboard broadcasts at -58 to -66 at normal desk distance, so that
- * threshold silently rejected most real captures. -75 admits pair attempts
- * at typical range without letting distant noise in. */
-#define RF_PAIR_MIN_RSSI        (-75)
+ * reconnect at range).
+ *
+ * This floor has now been raised twice for the same reason, which is the
+ * point worth carrying forward: -55 rejected most real captures, and -75
+ * rejected the product's primary scenario. Bisected with diagnostic builds
+ * on stock v0.96.15 with a bonded link: -128 accepted, -90 accepted, -82
+ * accepted, -75 REJECTED. So the keyboard's pair broadcast arrives at
+ * -81..-76 dBm with both boards on one bench - i.e. -75 had NEGATIVE margin
+ * at legitimate pairing distance, and a dongle behind a PC case or across a
+ * desk sits in that band or below.
+ *
+ * -90 keeps what the gate is actually for. Its job is stopping an
+ * unprovisioned dongle auto-pairing with a distant keyboard in a dense
+ * environment; at 2.4 GHz a cross-room signal (several metres plus a wall)
+ * generally lands below -90 while same-room stays above it. That preserves
+ * the "not the neighbour's office" property with ~10 dB over what we
+ * measured, instead of defending a threshold the bench already fails.
+ *
+ * Treat this as a heuristic sanity floor, not a security boundary. CH59x
+ * RSSI is coarse and uncalibrated chip to chip, so the same number means
+ * different real distances on different units, and the gate is reported
+ * inert on the CH570 SKU (its RSSI byte reads constant) - so the product
+ * line already tolerates a no-gate configuration.
+ *
+ * If mispairing in dense environments ever becomes a real complaint, the
+ * fix is NOT a tighter floor: it is strongest-candidate selection - collect
+ * broadcasters briefly during pairing and take the highest RSSI, keeping
+ * this only as a sanity floor. An absolute threshold encodes antenna and
+ * geometry assumptions; relative selection targets the actual failure mode.
+ *
+ * Overridable for bench profiles without editing source (this file is shared,
+ * so substitute the chip you are building):
+ *   make -C firmware ch570 PAIR_MIN_RSSI=-95
+ *   make -C firmware ch592 PAIR_MIN_RSSI=-95
+ * The live value is readable over IAP (status byte
+ * DONGLE_STATUS_OFF_LAST_RSSI), so re-measuring at a different geometry
+ * does not need four diagnostic builds the way this bisect did. */
+#ifndef RF_PAIR_MIN_RSSI
+#define RF_PAIR_MIN_RSSI        (-90)
+#endif
 
 /* Pairing packet payload length (exactly 10 bytes) */
 #define RF_PAIR_PKT_LEN         RF_PROTO_LEN_PAIR_BCAST
