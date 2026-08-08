@@ -33,7 +33,9 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -291,18 +293,42 @@ class ScenarioFailureHandling(unittest.TestCase):
 
         harness.scenario_recovery = scenario_recovery
         orig_load, orig_port = w.load_harness, w.port_for
+        orig_openboot, orig_cwd = w.OPENBOOT, os.getcwd()
         w.load_harness = lambda: harness
         w.port_for = lambda serial, require_present=True: "/dev/null"
         argv = sys.argv
         sys.argv = ["b", "--chip", "ch592", "--scenario", "recovery"]
         err = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(io.StringIO()), \
-                    contextlib.redirect_stderr(err):
-                rc = w.main()
-        finally:
-            w.load_harness, w.port_for = orig_load, orig_port
-            sys.argv = argv
+        with tempfile.TemporaryDirectory() as tmp:
+            # W7 requires the OBP CLI to exist, and `make -C firmware test`
+            # does not build it -- so on a clean checkout main() would exit
+            # before reaching a single assertion below. It passed here only
+            # because this tree happens to have the Rust binary built, which
+            # is the same "works by coincidence" trap as the --minichlink
+            # default.
+            #
+            # Satisfied by pointing OPENBOOT at a private tree rather than by
+            # materialising a stub at the real path. A stub there would sit
+            # exactly where the genuine CLI belongs, and if cleanup ever failed
+            # -- interrupt, crash, parallel run -- it would leave an empty file
+            # that makes W7 pass for every later invocation. Disarming the
+            # check this test runs past is a worse outcome than the bug.
+            cli = Path(tmp) / "tools" / "target" / "release" / "openboot"
+            cli.parent.mkdir(parents=True)
+            cli.touch()
+            w.OPENBOOT = Path(tmp)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), \
+                        contextlib.redirect_stderr(err):
+                    rc = w.main()
+            finally:
+                w.load_harness, w.port_for = orig_load, orig_port
+                w.OPENBOOT = orig_openboot
+                sys.argv = argv
+                # main() chdirs to the harness directory and never returns;
+                # leaving that in place would let this test steer any test
+                # that runs after it.
+                os.chdir(orig_cwd)
         return rc, err.getvalue()
 
     def test_bare_runtime_error_is_reported_not_raised(self):
