@@ -227,6 +227,15 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
         return;
     }
 
+    /* V2: key/flag canonical form. 0xB3 = a provisioned key that is blank/erased,
+     * or a key left in the record without BOND_FLAG_ENC_KEY set. Also rejects a
+     * redacted BondRead view written straight back (ENC_KEY set, key zeroed). */
+    if (!bond_key_flags_valid(&rec)) {
+        iap_err_count++;
+        send_status4(0xB3);
+        return;
+    }
+
     uint8_t status = (uint8_t)bond_save(&rec);
     if (status) {
         iap_err_count++;
@@ -275,11 +284,26 @@ static void handle_bond_read(void)
      * -- without this, a failed read would leak uninitialized stack over USB. */
     bond_record_t rec = {0};
     int valid = bond_load(&rec);
+    uint8_t redacted = 0u;
+
+    /* Never expose the link key over USB: BondRead is reachable by any host
+     * process that can open the vendor HID, so a readable key would be a
+     * disclosure oracle. Zero it, recompute the checksum so the view stays
+     * self-consistent for display, and flag it in status bit 1. The resulting
+     * ENC_KEY-set / zero-key combination is also non-importable -- BondWrite
+     * rejects it with 0xB3 -- so a redacted view cannot be written back. */
+    if (valid && (rec.flags & BOND_FLAG_ENC_KEY)) {
+        for (uint8_t i = 0; i < sizeof(rec.link_key); i++) {
+            rec.link_key[i] = 0u;
+        }
+        rec.checksum = bond_checksum(&rec);
+        redacted = 0x02u;
+    }
 
     uint8_t resp[3 + sizeof(bond_record_t)];
     resp[0] = ACK_BOND_READ;
     resp[1] = (uint8_t)sizeof(bond_record_t);
-    resp[2] = valid ? 0x00 : 0x01;
+    resp[2] = (uint8_t)((valid ? 0x00u : 0x01u) | redacted);
     for (uint8_t i = 0; i < sizeof(rec); i++) {
         resp[3 + i] = ((const uint8_t *)&rec)[i];
     }

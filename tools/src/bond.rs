@@ -7,9 +7,16 @@ use crate::iap::{
 };
 
 const BOND_MAGIC: u32 = 0x444E_4F42;
-const BOND_VERSION: u8 = 1;
-const BOND_RECORD_LEN: usize = 32;
+const BOND_VERSION: u8 = 2;
+const BOND_RECORD_LEN: usize = 48;
 const ACK_BOND_READ: u8 = 0x88;
+
+const BOND_FLAG_ENC_CAPABLE: u8 = 0x01;
+const BOND_FLAG_ENC_KEY: u8 = 0x02;
+
+// BondRead validity byte (response[2]) bits.
+const BOND_READ_INVALID: u8 = 0x01;
+const BOND_READ_REDACTED: u8 = 0x02;
 
 #[derive(Debug, PartialEq, Eq)]
 struct BondRecord {
@@ -21,6 +28,10 @@ struct BondRecord {
     reserved0: u16,
     peer_mac: [u8; 6],
     checksum: u32,
+    // The firmware zeroes link_key in the BondRead response and sets the
+    // redacted bit; the key is never transported. This records that the device
+    // held one, for display only.
+    redacted: bool,
 }
 
 enum BondRead {
@@ -29,7 +40,7 @@ enum BondRead {
 }
 
 impl BondRecord {
-    fn decode(raw: &[u8; BOND_RECORD_LEN]) -> Result<Self> {
+    fn decode(raw: &[u8; BOND_RECORD_LEN], redacted: bool) -> Result<Self> {
         let magic = u32::from_le_bytes(raw[0..4].try_into().unwrap());
         let record = Self {
             version: raw[4],
@@ -39,9 +50,10 @@ impl BondRecord {
             conn_timeout: u16::from_le_bytes(raw[12..14].try_into().unwrap()),
             reserved0: u16::from_le_bytes(raw[14..16].try_into().unwrap()),
             peer_mac: raw[22..28].try_into().unwrap(),
-            checksum: u32::from_le_bytes(raw[28..32].try_into().unwrap()),
+            checksum: u32::from_le_bytes(raw[44..48].try_into().unwrap()),
+            redacted,
         };
-        let expected_checksum: u32 = raw[..28].iter().map(|&byte| u32::from(byte)).sum();
+        let expected_checksum: u32 = raw[..44].iter().map(|&byte| u32::from(byte)).sum();
 
         if magic != BOND_MAGIC {
             bail!("BondRead: firmware marked a record valid with bad magic 0x{magic:08X}");
@@ -89,11 +101,15 @@ fn decode_response(response: &[u8]) -> Result<BondRead> {
     }
 
     let raw: [u8; BOND_RECORD_LEN] = response[3..3 + BOND_RECORD_LEN].try_into().unwrap();
-    match response[2] {
-        0 => Ok(BondRead::Valid(BondRecord::decode(&raw)?)),
-        1 => Ok(BondRead::Invalid(raw)),
-        status => bail!("BondRead: unknown validity status 0x{status:02X}"),
+    let status = response[2];
+    if status & !(BOND_READ_INVALID | BOND_READ_REDACTED) != 0 {
+        bail!("BondRead: unknown validity status 0x{status:02X}");
     }
+    if status & BOND_READ_INVALID != 0 {
+        return Ok(BondRead::Invalid(raw));
+    }
+    let redacted = status & BOND_READ_REDACTED != 0;
+    Ok(BondRead::Valid(BondRecord::decode(&raw, redacted)?))
 }
 
 fn format_mac(mac: &[u8; 6]) -> String {
@@ -131,9 +147,22 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
             println!("  raw             {}", hexsp(&raw, raw.len()));
         }
         BondRead::Valid(record) => {
+            let capable = record.flags & BOND_FLAG_ENC_CAPABLE != 0;
+            let has_key = record.flags & BOND_FLAG_ENC_KEY != 0;
+            let encryption = match (capable, has_key) {
+                (true, true) => "active (capable + key)",
+                (true, false) => "off (capable, no key)",
+                (false, true) => "off (key, peer not capable)",
+                (false, false) => "off (plaintext)",
+            };
             println!("  valid           yes");
             println!("  format          {}", record.version);
             println!("  flags           0x{:02X}", record.flags);
+            println!("  encryption      {encryption}");
+            if has_key {
+                let key = if record.redacted { "present (redacted)" } else { "present" };
+                println!("  link key        {key}");
+            }
             println!("  session AA      0x{:08X}", record.session_aa);
             println!(
                 "  interval        {} ticks ({:.3} ms)",
@@ -157,19 +186,24 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn valid_record() -> [u8; BOND_RECORD_LEN] {
+    fn record_with_flags(flags: u8) -> [u8; BOND_RECORD_LEN] {
         let mut raw = [0u8; BOND_RECORD_LEN];
         raw[0..4].copy_from_slice(&BOND_MAGIC.to_le_bytes());
         raw[4] = BOND_VERSION;
-        raw[5] = 0x02;
+        raw[5] = flags;
         raw[6..8].copy_from_slice(&28u16.to_le_bytes());
         raw[8..12].copy_from_slice(&0xAC12_34CEu32.to_le_bytes());
         raw[12..14].copy_from_slice(&600u16.to_le_bytes());
         raw[16..22].copy_from_slice(&[0, 0, 0, 0, 0, 0]);
         raw[22..28].copy_from_slice(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
-        let checksum: u32 = raw[..28].iter().map(|&byte| u32::from(byte)).sum();
-        raw[28..32].copy_from_slice(&checksum.to_le_bytes());
+        // link_key (raw[28..44]) left zero: matches a redacted-view checksum.
+        let checksum: u32 = raw[..44].iter().map(|&byte| u32::from(byte)).sum();
+        raw[44..48].copy_from_slice(&checksum.to_le_bytes());
         raw
+    }
+
+    fn valid_record() -> [u8; BOND_RECORD_LEN] {
+        record_with_flags(0x00)
     }
 
     #[test]
@@ -181,11 +215,28 @@ mod tests {
         let BondRead::Valid(record) = decode_response(&response).unwrap() else {
             panic!("expected valid record");
         };
+        assert_eq!(record.version, 2);
         assert_eq!(record.session_aa, 0xAC12_34CE);
         assert_eq!(record.conn_interval, 28);
         assert_eq!(record.conn_timeout, 600);
         assert_eq!(record.peer_mac, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
         assert_eq!(format_mac(&record.peer_mac), "10:20:30:40:50:60");
+        assert!(!record.redacted);
+    }
+
+    #[test]
+    fn decodes_redacted_encrypted_response() {
+        // ENC_CAPABLE | ENC_KEY, key zeroed by the firmware, redacted bit set.
+        let raw = record_with_flags(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+        let mut response =
+            vec![ACK_BOND_READ, BOND_RECORD_LEN as u8, BOND_READ_REDACTED];
+        response.extend_from_slice(&raw);
+
+        let BondRead::Valid(record) = decode_response(&response).unwrap() else {
+            panic!("expected valid record");
+        };
+        assert!(record.redacted);
+        assert_eq!(record.flags, BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
     }
 
     #[test]
