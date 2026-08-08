@@ -49,6 +49,13 @@ preference:
       scenario, which does a bare power cycle then a SINGLE probe and expects
       the bootloader to answer. Whether it does is phase-dependent; see the
       function for the measured boot-request alternation.
+
+  W10 Refuse to start unless every target's bench bootloader has been built,
+      and report the harness's own assertions as failures rather than as
+      tracebacks. W7's rule applied to the other prerequisite and to the other
+      exception types: a missing image or a busy CDC port is an OSError, and
+      upstream asserts with a bare RuntimeError, none of which the probe
+      handler catches. See check_boot_images() and main()'s except clauses.
 """
 
 from __future__ import annotations
@@ -251,6 +258,49 @@ def patch_reboot_for_lifecycle(module):
 
 
 
+def build_hint(image: Path) -> str:
+    """Reconstruct the make invocation that produces a bench bootloader.
+
+    Upstream's build dir is `<chip>-<transport>[+<board>]`, so the recipe can be
+    derived from the path the CHIPS table already names rather than restated
+    here and left to drift against it.
+    """
+    name = image.parent.name
+    head, _, board = name.partition("+")
+    chip, _, transport = head.partition("-")
+    goal = f"CHIP={chip} TRANSPORT={transport}"
+    if board:
+        goal += f" BOARD={board}"
+    return (f"make -C {OPENBOOT}/firmware {goal} "
+            f"MRS_TOOLCHAIN=<gcc12-bin> image")
+
+
+def check_boot_images(module, names) -> None:
+    """W10: refuse to start when a bench bootloader has not been built.
+
+    Same rule as W7, applied to the other prerequisite. Upstream's factory()
+    opens cfg["boot"] as its very first statement, before any minichlink call,
+    so a missing image is a FileNotFoundError - an OSError, which is neither a
+    MinichlinkError nor caught anywhere - and the run ends in a bare traceback
+    pointing at a line inside the vendored harness. That reads like the harness
+    is broken when the actual meaning is "you have not built this yet".
+
+    Checked for every target up front rather than per scenario, because the
+    scenarios are destructive: without this, `--scenario all` can whole-chip
+    erase the first part, run for minutes, and only then discover that the
+    second chip's image was never built.
+    """
+    missing = [(n, Path(module.CHIPS[n]["boot"])) for n in names
+               if not Path(module.CHIPS[n]["boot"]).is_file()]
+    if not missing:
+        return
+    lines = ["bench bootloader not built:"]
+    for name, image in missing:
+        lines.append(f"  {name}: {image}")
+        lines.append(f"    {build_hint(image)}")
+    sys.exit("\n".join(lines))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--chip", choices=["ch572", "ch592"], required=False,
@@ -305,6 +355,13 @@ def main() -> int:
             f"present: {', '.join(sorted(module.CHIPS)) or 'none'}")
 
     targets = [args.chip] if args.chip else list(module.CHIPS)
+
+    # Not under --dry-run: nothing is opened there (factory() is stubbed), and
+    # inspecting the command sequence without a built tree is a thing worth
+    # being able to do - same reasoning as the port check above.
+    if not args.dry_run:
+        check_boot_images(module, targets)
+
     failures = []
     for name in targets:
         cfg = module.CHIPS[name]
@@ -337,6 +394,30 @@ def main() -> int:
                 raise
             print("  (dry run: stopped where a real device response is needed)")
             continue
+        except OSError as exc:
+            # pyserial's SerialException IS an OSError, raised when the CDC
+            # port is busy or has been repointed by a replug - the failure W3
+            # exists to make rare, not one it can eliminate. Also covers any
+            # file the harness opens mid-scenario. Not a verdict about the
+            # firmware, so it is named as a bench fault rather than a FAIL
+            # anyone might read as "the bootloader is broken".
+            print(f"  BENCH FAILURE: {exc}", file=sys.stderr)
+            failures.append(f"{name}: bench")
+        except RuntimeError as exc:
+            # Upstream asserts with a bare RuntimeError, and MinichlinkError
+            # subclasses it - so this must stay BELOW the clause above or it
+            # would swallow probe failures and mislabel them.
+            #
+            # The one that matters is factory()'s readback mismatch: minichlink
+            # ignores the return values of its CH5xx erase/write calls, so a
+            # zero exit is not evidence the image landed, and upstream raises
+            # when the bootloader reads back wrong. That is the single most
+            # important signal this harness produces - it means the part has no
+            # working bootloader - and it was reaching the operator as a
+            # traceback, which is how a real finding gets mistaken for a bug in
+            # the script.
+            print(f"  HARNESS FAILURE: {exc}", file=sys.stderr)
+            failures.append(f"{name}: harness")
         failures.extend(f"{name}: {f}" for f in getattr(module, "fails", []))
 
     print("\n=== RESULT ===")
