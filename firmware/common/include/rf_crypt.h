@@ -56,6 +56,14 @@
 #define RF_CRYPT_TAG_SESSION   0xA5u
 #define RF_CRYPT_LEN_SESSION   14u
 
+/* Capability advertisement (keyboard->dongle, at pairing): [ctrl][tag][version].
+ * Purely additive -- a stock keyboard never sends it, so pairing is unchanged and
+ * the bond stays plaintext. Unauthenticated in this phase (no key exists yet at
+ * pairing); the future key-establishment handshake authenticates it. */
+#define RF_CRYPT_TAG_CAP       0xA6u
+#define RF_CRYPT_LEN_CAP        3u
+#define RF_CRYPT_CAP_VERSION    1u
+
 typedef enum {
     RF_CRYPT_OK = 0,
     RF_CRYPT_DROP_SHAPE,      /* not a well-formed encrypted frame */
