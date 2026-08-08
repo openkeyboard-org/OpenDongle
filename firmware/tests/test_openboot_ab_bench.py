@@ -206,5 +206,125 @@ class MinichlinkSelection(unittest.TestCase):
             "a disallowed probe reached the command layer")
 
 
+class BuildHint(unittest.TestCase):
+    """W10: the recipe is derived from the path, not restated beside it."""
+
+    def setUp(self):
+        self.wrapper = load_wrapper()
+
+    def test_board_suffix_becomes_a_board_variable(self):
+        hint = self.wrapper.build_hint(
+            Path("/x/firmware/build/ch592-uart+bench-ch592/openboot.bin"))
+        self.assertIn("CHIP=ch592", hint)
+        self.assertIn("TRANSPORT=uart", hint)
+        self.assertIn("BOARD=bench-ch592", hint)
+
+    def test_default_board_emits_no_board_variable(self):
+        """A BOARD= for the default board would be wrong, not merely noisy."""
+        hint = self.wrapper.build_hint(
+            Path("/x/firmware/build/ch572-uart/openboot.bin"))
+        self.assertIn("CHIP=ch572", hint)
+        self.assertIn("TRANSPORT=uart", hint)
+        self.assertNotIn("BOARD=", hint)
+
+
+class BootImagePreflight(unittest.TestCase):
+    """W10: a missing bootloader must not surface as a traceback."""
+
+    def setUp(self):
+        self.wrapper = load_wrapper()
+
+    def _module(self, boot_paths):
+        return types.SimpleNamespace(
+            CHIPS={n: {"boot": str(p)} for n, p in boot_paths.items()})
+
+    def test_missing_image_exits_naming_the_path_and_the_recipe(self):
+        module = self._module(
+            {"ch592": "/nope/firmware/build/ch592-uart+bench-ch592/ob.bin"})
+        with self.assertRaises(SystemExit) as caught:
+            self.wrapper.check_boot_images(module, ["ch592"])
+        msg = str(caught.exception)
+        self.assertIn("ch592-uart+bench-ch592/ob.bin", msg)
+        self.assertIn("BOARD=bench-ch592", msg,
+                      "the exit did not tell the operator how to build it")
+
+    def test_present_image_passes(self):
+        module = self._module({"ch592": WRAPPER})  # any real file
+        self.wrapper.check_boot_images(module, ["ch592"])
+
+    def test_every_target_is_checked_before_any_runs(self):
+        """The destructive-order point: chip 2 must not be found missing
+        only after chip 1 has already been whole-chip erased."""
+        module = self._module({"ch572": WRAPPER, "ch592": "/nope/b/ob.bin"})
+        with self.assertRaises(SystemExit) as caught:
+            self.wrapper.check_boot_images(module, ["ch572", "ch592"])
+        self.assertIn("ch592", str(caught.exception))
+
+    def test_only_targets_are_checked(self):
+        """An unbuilt image for a chip we are not running is not an error."""
+        module = self._module({"ch572": WRAPPER, "ch592": "/nope/b/ob.bin"})
+        self.wrapper.check_boot_images(module, ["ch572"])
+
+
+class ScenarioFailureHandling(unittest.TestCase):
+    """W10: upstream's own assertions are results, not crashes.
+
+    factory() raises a BARE RuntimeError when the bootloader reads back wrong,
+    and MinichlinkError subclasses RuntimeError -- so the probe clause must
+    stay above it or it would swallow probe failures and mislabel them. Both
+    orderings are pinned here.
+    """
+
+    def setUp(self):
+        self.wrapper = load_wrapper()
+
+    def _run_with(self, exc):
+        w = self.wrapper
+        harness = types.SimpleNamespace(
+            CHIPS={"ch592": {"serial": "CEBD8F0653EF", "boot": str(WRAPPER)}},
+            HERE=str(ROOT), mc=lambda *a, **k: None, run=lambda *a, **k: None,
+            fails=[], MC="unset",
+        )
+
+        def scenario_recovery(name):
+            raise exc
+
+        harness.scenario_recovery = scenario_recovery
+        orig_load, orig_port = w.load_harness, w.port_for
+        w.load_harness = lambda: harness
+        w.port_for = lambda serial, require_present=True: "/dev/null"
+        argv = sys.argv
+        sys.argv = ["b", "--chip", "ch592", "--scenario", "recovery"]
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(err):
+                rc = w.main()
+        finally:
+            w.load_harness, w.port_for = orig_load, orig_port
+            sys.argv = argv
+        return rc, err.getvalue()
+
+    def test_bare_runtime_error_is_reported_not_raised(self):
+        rc, err = self._run_with(
+            RuntimeError("factory(): bootloader readback mismatch (0 B read)"))
+        self.assertEqual(rc, 1)
+        self.assertIn("HARNESS FAILURE", err)
+        self.assertIn("readback mismatch", err)
+
+    def test_oserror_is_reported_not_raised(self):
+        rc, err = self._run_with(OSError("could not open port /dev/ttyACM0"))
+        self.assertEqual(rc, 1)
+        self.assertIn("BENCH FAILURE", err)
+
+    def test_probe_failure_keeps_its_own_label(self):
+        """MinichlinkError must not be captured by the RuntimeError clause."""
+        rc, err = self._run_with(
+            self.wrapper.MinichlinkError("probe CF14 is not in the allow-list"))
+        self.assertEqual(rc, 1)
+        self.assertIn("PROBE FAILURE", err)
+        self.assertNotIn("HARNESS FAILURE", err)
+
+
 if __name__ == "__main__":
     unittest.main()
