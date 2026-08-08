@@ -3436,7 +3436,7 @@ static void rf_persist_bond_task(void)
 
     /* Copy the IRQ-published snapshot under a brief IRQ-masked critical section
      * so a concurrent rf_request_bond_persist() (radio IRQ) cannot tear the
-     * 32-byte record mid-read; clear the pending flag atomically with the copy.
+     * bond record mid-read; clear the pending flag atomically with the copy.
      * (Brief, post-pair, well clear of boot -- no USB-enum interaction.) */
     bond_record_t want __attribute__((aligned(4)));
     uint32_t irq = __risc_v_disable_irq();
