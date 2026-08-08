@@ -125,7 +125,9 @@ else
   ASM_SRC := ../ch570/src/hal_aes_ch570_asm.S
 endif
 
-C_SRCS := aes_validate.c $(PLATFORM_SRC) $(AES_SRC) $(DRV_SRC)
+# rf_crypt is the CCM mode built on the seam; aes_validate runs it on every arm
+# so the encrypted-link cipher is proven identical across backends too.
+C_SRCS := aes_validate.c $(PLATFORM_SRC) $(AES_SRC) $(DRV_SRC) $(COMMON)/src/rf_crypt.c
 S_SRCS := $(STARTUP_SRC) $(ASM_SRC)
 
 # ----------------------------------------------------------------- toolchain

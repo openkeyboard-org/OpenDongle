@@ -41,6 +41,7 @@ import read_aes_log as R  # noqa: E402
 VALIDATION = ROOT / "validation"
 INC = ROOT / "common" / "include"
 AES_SW = ROOT / "common" / "src" / "aes_sw.c"
+RF_CRYPT = ROOT / "common" / "src" / "rf_crypt.c"
 
 # Mirrors what read_aes_log's CLI builds; vectors 7-11 are contract properties
 # that all reduce to the FIPS-197 C.1 answer.
@@ -154,6 +155,9 @@ class HarnessRunsOnTheHost(unittest.TestCase):
             )),
             compile_one(d / "shim.c"),
             compile_one(AES_SW),
+            # aes_validate.c now also exercises the CCM mode (rf_crypt) on each
+            # arm, so the host harness links it too, over the same shim backend.
+            compile_one(RF_CRYPT),
         ]
 
         binary = d / "validate"
