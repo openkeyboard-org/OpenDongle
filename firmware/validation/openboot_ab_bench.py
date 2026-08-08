@@ -19,27 +19,12 @@ site resolves `ab_bench.mc` at call time, so patching it intercepts all of them.
 What is patched, and why each one is a correctness fix rather than a
 preference:
 
-  W1  minichlink argument order, matching this bench's established discipline
-      (action first, then -l). minichlink.c computes skip_startup from argv[1]
-      only, so with -l first the -A and -t calls run SetupInterface, and
-      LESetupInterface asserts ndmreset (DMCONTROL 0x80000003).
-
-      SCOPE CORRECTION, from a later adversarial review with live measurement:
-      this does NOT clean up the harness's evidence path. "-r" is not in the
-      skip-startup set in EITHER ordering, so every state read resets the part
-      regardless. Measured on this bench: `minichlink -l <ser> -r + 0x200067F0
-      4` run four times returns 11ca07b0 / 00000000 / 11ca07b0 / 00000000 --
-      the read itself reboots the target. So reordering only restores the
-      intended no-reset behaviour for -A and -t; the reads are unfixable this
-      way and the harness's "an SWD observation never perturbs the part"
-      premise is false independently of argument order.
-
-      -k is added only for -t/-3; -E/-w/-r genuinely need DetermineChipType.
-
-  W2  Assert on the exit status. The harness discards it. A silently failed
-      power cut turns the acceptance test into a test of nothing that still
-      reports PASS -- the single most dangerous failure mode here, because it
-      fails green.
+  W1, W2, W5 and W6 are all UPSTREAM now, and none are renumbered - the gaps
+  record what this wrapper used to carry. W1 (action-first argv, -k on the
+  power rail) and W2 (raise on a non-zero exit, and on a zero exit carrying a
+  "never reached the chip" marker) landed in OpenBoot#12; W5 and W6 landed in
+  e957c4c. mc() below now DELEGATES to the pinned implementation rather than
+  restating those rules, so there is one copy of each.
 
   W3  Resolve the serial port from the probe serial via /dev/serial/by-id
       rather than a hardcoded /dev/ttyACM<n>. The numbering is assignment
@@ -49,14 +34,6 @@ preference:
   W4  Refuse any probe not explicitly allowed. Structural, not procedural:
       this bench carries a CH570 whose dongle must never be written.
 
-
-  W5 and W6 are GONE, and deliberately not renumbered. They derived the
-  "whole image" frame count from the witness, and read back the bootloader
-  after factory() wrote it. Upstream does both itself as of e1f132f
-  (scenario_interrupted takes writes=None, and factory() compares a readback
-  and raises on mismatch), so keeping them would duplicate the work and, for
-  the readback, run it twice. The numbering gap is left as a marker that the
-  wrapper should keep shrinking as upstream absorbs its patches.
 
   W7  Refuse to start unless the OBP 0.2 CLI has been built. The device
       requires an exact protocol major+minor match, so a 0.1 binary cannot
@@ -94,15 +71,6 @@ ALLOWED_PROBES = {
     "CEBD8F0653EF": "ch592 bench part",
 }
 
-# W2: minichlink exits 0 in cases where it never reached the chip, so the exit
-# status alone is not enough. These are the strings that mean "no target".
-FAILURE_MARKERS = (
-    "Could not setup interface",
-    "Chip Type unknown",
-    "link error",
-    "marchid : ffffffff",
-)
-
 
 def load_harness():
     if not HARNESS.is_file():
@@ -135,39 +103,77 @@ class MinichlinkError(RuntimeError):
 
 
 def make_mc(module, minichlink: str, dry_run: bool):
-    """Build the replacement for ab_bench.mc (W1, W2)."""
+    """Wrap upstream's mc() with the two things that remain ours.
 
-    def mc(cfg, *args, t=90):
+    W1 and W2 are UPSTREAM now (openkeyboard-org/OpenBoot#12), so this no
+    longer reimplements argument ordering or exit-status checking - it calls
+    the pinned mc() and lets it own both. Reimplementing them here would mean
+    two copies of a rule that has to match minichlink's argv[1] behaviour, and
+    the copy nobody runs is the one that rots.
+
+    What is still local:
+      W4  the probe allow-list, checked BEFORE anything is executed
+      W8  dry-run interception (upstream has no notion of a dry run) - of the
+          EXECUTION only. The command is still upstream's, built by the same
+          code the live path runs, so what a dry run prints cannot drift from
+          what a real run would do.
+
+    Delegating moved the argv construction into the harness, and with it the
+    choice of binary: upstream's mc() reads its module-level MC. So --minichlink
+    has to be pushed INTO the module rather than closed over. Before delegation
+    this wrapper built the argv itself and honoured the flag by construction;
+    after it, the live path used upstream's default while only the dry-run print
+    reflected the flag. That is the most misleading shape a bug can take here -
+    the flag looks correct exactly when you test it the cheap way - and it hid
+    because our default string is character-for-character upstream's default,
+    so it is only observable when someone actually overrides it.
+    """
+    module.MC = minichlink
+    original = module.mc
+
+    def mc(cfg, *args, t=90, **kw):
         serial = cfg["serial"]
         if serial not in ALLOWED_PROBES:
             raise MinichlinkError(
                 f"probe {serial} is not in the allow-list; refusing to drive it")
-        action, rest = args[0], list(args[1:])
-        # W1: -k ONLY for the power rail. -E/-w/-r need DetermineChipType.
-        if action in ("-t", "-3"):
-            action = "-k" + action.lstrip("-")
-        # The action leads (minichlink derives skip_startup from argv[1]) and
-        # -l trails, AFTER the action's own operands: -w takes <file> <addr>
-        # and -r takes <file> <addr> <len> positionally, so slipping "-l
-        # <serial>" between them would feed "-l" to -w as a filename.
-        cmd = [minichlink, action, *rest, "-l", serial]
+        # A dry run delegates too. It used to rebuild the argv here in order to
+        # print it, which put a SECOND copy of upstream's rule -- the -k
+        # transform and "-l trails the action's own operands" -- on the one
+        # path that never executes it. That is the exact hazard this docstring
+        # names, reintroduced by the thing meant to remove it, and the copies
+        # had already drifted: upstream refuses a call with no action (it would
+        # put an option at argv[1] and silently disable skip_startup), while
+        # the local copy printed `minichlink -l <serial>` and reported success.
+        #
+        # Executing is prevented by swapping the module's run() rather than by
+        # branching before it, because upstream's mc() resolves run from module
+        # globals at call time. Swapping it HERE rather than relying on
+        # patch_run_for_dry_run() keeps this closure self-contained: a dry run
+        # cannot execute even if that patch was never applied.
+        saved_run = module.run
         if dry_run:
-            print("  would run:", " ".join(cmd))
-            return subprocess.CompletedProcess(cmd, 0, "", "")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=t)
-        # W2
-        blob = f"{proc.stdout}\n{proc.stderr}"
-        if proc.returncode != 0:
-            raise MinichlinkError(
-                f"{' '.join(cmd)} -> exit {proc.returncode}\n{blob.strip()}")
-        for marker in FAILURE_MARKERS:
-            if marker in blob:
-                raise MinichlinkError(
-                    f"{' '.join(cmd)} exited 0 but never reached the chip "
-                    f"({marker!r})\n{blob.strip()}")
-        return proc
+            module.run = print_only
+        try:
+            return original(cfg, *args, t=t, **kw)
+        except RuntimeError as exc:
+            # Upstream raises RuntimeError; keep this module's error type so
+            # main()'s handler stays one except clause.
+            raise MinichlinkError(str(exc)) from exc
+        finally:
+            module.run = saved_run
 
     return mc
+
+
+def print_only(cmd, t=90):
+    """Show a command and report success without running it.
+
+    The single point where --dry-run turns an intent into output, shared by the
+    mc() wrapper and the openboot CLI path so that "what a dry run prints" has
+    one definition rather than one per call site.
+    """
+    print("  would run:", " ".join(str(c) for c in cmd))
+    return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
 def patch_run_for_dry_run(module):
@@ -180,11 +186,7 @@ def patch_run_for_dry_run(module):
     survived earlier testing only because probe() returns nothing in dry-run,
     so the scenarios crashed before reaching a flash.
     """
-    def run(cmd, t=90):
-        print("  would run:", " ".join(str(c) for c in cmd))
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    module.run = run
+    module.run = print_only
 
 
 def stub_factory_for_dry_run(module):
