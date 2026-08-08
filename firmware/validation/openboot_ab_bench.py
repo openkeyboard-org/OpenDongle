@@ -113,8 +113,22 @@ def make_mc(module, minichlink: str, dry_run: bool):
 
     What is still local:
       W4  the probe allow-list, checked BEFORE anything is executed
-      W8  dry-run interception (upstream has no notion of a dry run)
+      W8  dry-run interception (upstream has no notion of a dry run) - of the
+          EXECUTION only. The command is still upstream's, built by the same
+          code the live path runs, so what a dry run prints cannot drift from
+          what a real run would do.
+
+    Delegating moved the argv construction into the harness, and with it the
+    choice of binary: upstream's mc() reads its module-level MC. So --minichlink
+    has to be pushed INTO the module rather than closed over. Before delegation
+    this wrapper built the argv itself and honoured the flag by construction;
+    after it, the live path used upstream's default while only the dry-run print
+    reflected the flag. That is the most misleading shape a bug can take here -
+    the flag looks correct exactly when you test it the cheap way - and it hid
+    because our default string is character-for-character upstream's default,
+    so it is only observable when someone actually overrides it.
     """
+    module.MC = minichlink
     original = module.mc
 
     def mc(cfg, *args, t=90, **kw):
@@ -122,24 +136,44 @@ def make_mc(module, minichlink: str, dry_run: bool):
         if serial not in ALLOWED_PROBES:
             raise MinichlinkError(
                 f"probe {serial} is not in the allow-list; refusing to drive it")
+        # A dry run delegates too. It used to rebuild the argv here in order to
+        # print it, which put a SECOND copy of upstream's rule -- the -k
+        # transform and "-l trails the action's own operands" -- on the one
+        # path that never executes it. That is the exact hazard this docstring
+        # names, reintroduced by the thing meant to remove it, and the copies
+        # had already drifted: upstream refuses a call with no action (it would
+        # put an option at argv[1] and silently disable skip_startup), while
+        # the local copy printed `minichlink -l <serial>` and reported success.
+        #
+        # Executing is prevented by swapping the module's run() rather than by
+        # branching before it, because upstream's mc() resolves run from module
+        # globals at call time. Swapping it HERE rather than relying on
+        # patch_run_for_dry_run() keeps this closure self-contained: a dry run
+        # cannot execute even if that patch was never applied.
+        saved_run = module.run
         if dry_run:
-            # Mirror upstream's argv construction closely enough to be useful
-            # to read, without executing. Upstream is authoritative; this is
-            # an illustration, which is why a dry run reports no verdict.
-            action, rest = (args[0], list(args[1:])) if args else (None, [])
-            if action in ("-t", "-3"):
-                action = "-k" + action.lstrip("-")
-            cmd = [minichlink, *( [action] if action else [] ), *rest, "-l", serial]
-            print("  would run:", " ".join(str(c) for c in cmd))
-            return subprocess.CompletedProcess(cmd, 0, "", "")
+            module.run = print_only
         try:
             return original(cfg, *args, t=t, **kw)
         except RuntimeError as exc:
             # Upstream raises RuntimeError; keep this module's error type so
             # main()'s handler stays one except clause.
             raise MinichlinkError(str(exc)) from exc
+        finally:
+            module.run = saved_run
 
     return mc
+
+
+def print_only(cmd, t=90):
+    """Show a command and report success without running it.
+
+    The single point where --dry-run turns an intent into output, shared by the
+    mc() wrapper and the openboot CLI path so that "what a dry run prints" has
+    one definition rather than one per call site.
+    """
+    print("  would run:", " ".join(str(c) for c in cmd))
+    return subprocess.CompletedProcess(cmd, 0, "", "")
 
 
 def patch_run_for_dry_run(module):
@@ -152,11 +186,7 @@ def patch_run_for_dry_run(module):
     survived earlier testing only because probe() returns nothing in dry-run,
     so the scenarios crashed before reaching a flash.
     """
-    def run(cmd, t=90):
-        print("  would run:", " ".join(str(c) for c in cmd))
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    module.run = run
+    module.run = print_only
 
 
 def stub_factory_for_dry_run(module):
