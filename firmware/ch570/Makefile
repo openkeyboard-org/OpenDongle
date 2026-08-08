@@ -156,6 +156,7 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/rf_task.c src/hal_dispatch_ch570.c
 APP_SRC += src/hal_rf_ch570.c src/hal_timing_ch570.c
 APP_SRC += $(COMMON)/src/iap.c $(COMMON)/src/usb_descriptors.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch570.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. hal_aes_ch570.c supplies
