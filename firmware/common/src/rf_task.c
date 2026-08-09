@@ -1377,10 +1377,16 @@ static uint8_t rf_crypt_peer_capable;
 
 /* SPSC frame FIFO: the IRQ sink produces, the RF_EVT_CRYPT_RX task consumes.
  * Entries hold the LEN-covered bytes (from rxBuf[2]). A ring of N slots holds
- * N-1 frames, so N=3 rides out one executor pass of latency (hal_dispatch.h).
- * The producer publishes the tail AFTER the payload and the consumer the head
- * after the read -- the same one-way-preemption discipline as rf_app_tx_buf. */
-#define RF_CRYPT_FIFO_N 3u
+ * N-1 frames; N=2 (one in-flight frame) is what keeps CH570 under its 2 KB
+ * stack floor with encryption on. That is ample in normal use -- an encrypted
+ * frame arrives at most once per 875 us poll slot and the task drains it within
+ * the slot -- and only bites if the executor stalls (EP6 IAP flash traffic,
+ * hal_dispatch.h): a second encrypted frame arriving during a >875 us stall is
+ * dropped, fail-closed (never a security issue; the keyboard's next report
+ * recovers state). The producer publishes the tail AFTER the payload and the
+ * consumer the head after the read -- the one-way-preemption discipline of
+ * rf_app_tx_buf. */
+#define RF_CRYPT_FIFO_N 2u
 static uint8_t          rf_crypt_fifo_buf[RF_CRYPT_FIFO_N][RF_CRYPT_LEN_BOOT_KBD];
 static uint8_t          rf_crypt_fifo_len[RF_CRYPT_FIFO_N];
 static volatile uint8_t rf_crypt_fifo_head;   /* task consumer */
