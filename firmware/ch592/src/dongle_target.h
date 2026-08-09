@@ -51,6 +51,12 @@
  * polled pump (RF_TaskPump drains a pending mask each main-loop pass). */
 #define RF_TASK_EXECUTOR_TMOS 1
 
+/* Gate the durable bond write on a confirmed connected RX from the peer (Issue
+ * #23). Always on for CH59x — this is the executor that already shipped the
+ * confirm-before-persist state machine; the macro now names the feature so the
+ * CH570 build can share it. rf_task.c #errors if this is undefined. */
+#define RF_CONFIRM_BEFORE_PERSIST 1
+
 /* CODEREVIEW P4 (RF-liveness parity, ported from CH570): reschedule delay for a
  * failed RF_Rx/RF_Tx arm at a terminal camp (rf_arm_retry_if_failed). Same
  * 80 x 625 us = 50 ms as CH570. A 0 would hot-spin the delayed RF_EVT_RX_RESTART

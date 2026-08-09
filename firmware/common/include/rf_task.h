@@ -23,7 +23,8 @@
 #define RF_EVT_TX_PAIR_15        0x0040  /* LIVE fresh-pair entry: the FIRST burst 15-byte TX, posted by the pair-broadcast decoder (TX_FINISH then chains RF_EVT_TX_PAIR_15B) */
 #define RF_EVT_TX_PAIR_15B       0x0080  /* chained 15-byte TX on session AA after the initial pair-AA TX */
 #define RF_EVT_POST_POLL_RX      0x0100  /* stock-event-0x04-shaped post-poll-TX RX arm */
-#define RF_EVT_CONFIRM_TIMEOUT   0x0200  /* CODEREVIEW N11 (CH59x TMOS only): fresh-pair
+#define RF_EVT_CONFIRM_TIMEOUT   0x0200  /* CODEREVIEW N11 (RF_CONFIRM_BEFORE_PERSIST,
+                                          * both executors as of Issue #23): fresh-pair
                                           * confirmation deadline — durable bond persist is
                                           * deferred until a connected RX confirms the peer
                                           * accepted the session; this fires the fresh-pair
