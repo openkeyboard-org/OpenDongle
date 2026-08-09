@@ -2336,11 +2336,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * buffer is the same gp-0x604-equivalent control byte storage
          * used for empty-poll TX, sized here for the stock length-10
          * RX arm. */
-#if RF_TASK_EXECUTOR_TMOS
-        /* CODEREVIEW N11 (Codex impl-review): stale-event guard. A POST_POLL_RX
-         * co-dispatched with a confirm timeout that fell back to PAIRING (via
-         * rf_return_to_fresh_pair, which camps a fresh RX) must NOT re-prime the
-         * connected post-poll RX over that camp. Only arm while still CONNECTED. */
+#if RF_CONFIRM_BEFORE_PERSIST
+        /* CODEREVIEW N11 (Codex impl-review; widened to CH570 per review): stale-
+         * event guard. A POST_POLL_RX co-dispatched with a confirm timeout that
+         * fell back to PAIRING (via rf_return_to_fresh_pair, which camps a fresh
+         * RX) must NOT re-prime the connected post-poll RX over that camp. Now
+         * that CH570 runs the confirm-timeout fallback too, it needs this guard.
+         * Only arm while still CONNECTED. */
         if (rf_state != RF_STATE_CONNECTED) {
             return events ^ RF_EVT_POST_POLL_RX;
         }
@@ -3032,6 +3034,13 @@ static void rf_commit_bond_ram(void)
      * durable is written. Graceful skip, NOT an assert: on CH570 this runs in the
      * radio-IRQ __HIGH_CODE sink, where a halting assert would strand the link. */
     if (rf_bond_aa != rf_protocol_pair_ack_session_aa(rf_pair_ack15)) {
+        /* Review (CodeRabbit/Copilot): a bare early return would leave a STALE
+         * rf_bond_pending_rec that a later confirm -> rf_arm_bond_persist could
+         * still write. Zero the pending snapshot and drop rf_bond_valid so a
+         * divergence commits and persists NOTHING (rf_persist_bond_task's
+         * semantic readback also rejects the resulting zero-AA record). */
+        tmos_memset(&rf_bond_pending_rec, 0, sizeof(rf_bond_pending_rec));
+        rf_bond_valid = 0;
         return;
     }
     tmos_memset(&rf_bond_pending_rec, 0, sizeof(rf_bond_pending_rec));
