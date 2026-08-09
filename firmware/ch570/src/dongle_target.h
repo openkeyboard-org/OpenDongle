@@ -69,6 +69,13 @@ _Static_assert((CH570_SYSCLK_HZ % 1000000u) == 0u,
  * driven by the polled pump (hal_dispatch_ch570 + RF_TaskPump). */
 #define RF_TASK_EXECUTOR_TMOS 0
 
+/* Gate the durable bond write on a confirmed connected RX from the peer, so a
+ * fresh pair that promoted on our own pair-ACK TX-finish alone (no keyboard
+ * confirm) never persists a dead bond. Decoupled from the executor macro on
+ * purpose (Issue #23): the confirm-before-persist state machine is shared, only
+ * the durable-arm site and the CX4 write differ per executor. */
+#define RF_CONFIRM_BEFORE_PERSIST 1
+
 #define DONGLE_HAS_RF 1
 
 /* The bond sits at 0x3A000, immediately above the OBP-clamped app region

@@ -50,6 +50,14 @@
 #error "RF_CH570_PAIR_ACK_PRE_TX_TMOS must be defined by the target header"
 #endif
 
+/* Confirm-before-persist gate (Issue #23): defer the durable bond write until a
+ * connected RX confirms the peer accepted the session. Named as its own feature
+ * so both executors can share the state machine (the durable-arm site and the
+ * CX4 write stay per-executor). Every target header must set it explicitly. */
+#ifndef RF_CONFIRM_BEFORE_PERSIST
+#error "RF_CONFIRM_BEFORE_PERSIST must be defined by the target header"
+#endif
+
 #include "usb_device.h"
 #include "hal_timing.h"        /* RF deadline-scheduler seam */
 #include "hal_timing_ch592.h"  /* CH592 task-dispatch shim (CONNECTED_POLL slot) */
@@ -579,21 +587,26 @@ static uint8_t rf_dongle_mac_overridden;
  * does not survive to the next boot (bench-observed CH570). */
 static volatile uint8_t rf_bond_tombstone;
 
-#if RF_TASK_EXECUTOR_TMOS
-/* CODEREVIEW N11 (CH59x TMOS only): defer the durable fresh-pair bond write until a
- * connected RX confirms the peer accepted the session. rf_confirm_state runs
- * NONE -> WAIT_RX (fresh promote, awaiting confirm, deadline armed) -> WAIT_REARM
- * (confirm RX seen, awaiting a SUCCESSFUL RX re-arm before the flash write). rf_pair_is_fresh
- * is captured at the pair-broadcast accept: a promote is tentative unless it is a KNOWN
- * DURABLE reconnect (bond valid AND already persisted AND on the bond session AA AND same
- * peer MAC). All TMOS-only, so CH570 (which has its own unconfirmed-pair fallback) is
- * byte-identical. */
+#if RF_CONFIRM_BEFORE_PERSIST
+/* CODEREVIEW N11 (Issue #23: shared by both executors): defer the durable
+ * fresh-pair bond write until a connected RX confirms the peer accepted the
+ * session. rf_confirm_state runs NONE -> WAIT_RX (fresh promote, awaiting
+ * confirm, deadline armed) -> WAIT_REARM (confirm RX seen, awaiting a SUCCESSFUL
+ * RX re-arm before the flash write). rf_pair_is_fresh is captured at the
+ * pair-broadcast accept: a promote is tentative unless it is a KNOWN DURABLE
+ * reconnect (bond valid AND already persisted AND on the bond session AA AND
+ * same peer MAC). Ported to CH570 (Issue #23) so a fresh pair that promoted on
+ * our own pair-ACK TX-finish alone never persists a dead bond. */
 #define RF_CONFIRM_STATE_NONE       0u
 #define RF_CONFIRM_STATE_WAIT_RX    1u
 #define RF_CONFIRM_STATE_WAIT_REARM 2u
-#define RF_CONFIRM_TIMEOUT_TMOS 1200u   /* 1200 x 625 us = 0.75 s */
+/* 1200 x 625 us = 0.75 s. "TMOS" here names the 625 us tick unit
+ * (HAL_TMOS_UNIT_TICKS, defined on both chips), not the executor. */
+#define RF_CONFIRM_TIMEOUT_TMOS 1200u
 static volatile uint8_t rf_confirm_state;
 static uint8_t rf_pair_is_fresh;
+#endif /* RF_CONFIRM_BEFORE_PERSIST */
+#if RF_TASK_EXECUTOR_TMOS
 /* Codex full-batch review (merge blocker): set by a burst-active async TX_FAIL in
  * the radio callback (IRQ) to defer the dual-AA fresh-pair fallback to task
  * context — rf_return_to_fresh_pair does RF_Shut+reconfigure, illegal from the
@@ -815,7 +828,7 @@ static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
 static void rf_request_bond_persist(void);
 static void rf_persist_bond_task(void);
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
 static void rf_commit_bond_ram(void);
 static void rf_arm_bond_persist(void);
 #endif
@@ -1101,12 +1114,16 @@ static void rf_return_to_fresh_pair(void)
     hal_event_cancel(RF_EVT_POLL);
     hal_event_cancel(RF_EVT_POST_POLL_RX);
     rf_abort_pair_burst();
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
     /* N11: clear the per-attempt confirm state (NOT rf_bond_persisted/rf_bond_valid
-     * — the tentative peer is kept so the relisten retries the SAME keyboard). */
+     * — the tentative peer is kept so the relisten retries the SAME keyboard; the
+     * rf_bond_persisted clear for a genuinely tentative WAIT_RX pair stays at the
+     * confirm-timeout site, since this helper is also the good-bond relisten path). */
     rf_confirm_state = RF_CONFIRM_STATE_NONE;
-    rf_burst_txfail_fallback = 0u;   /* consumed with this attempt */
     hal_event_cancel(RF_EVT_CONFIRM_TIMEOUT);
+#endif
+#if RF_TASK_EXECUTOR_TMOS
+    rf_burst_txfail_fallback = 0u;   /* consumed with this attempt */
 #endif
 
     rf_supervision_ev10_active = 0;
@@ -1284,7 +1301,7 @@ static void rf_stock_reacquire_giveup(void)
     hal_event_cancel(RF_EVT_POLL);
     hal_event_cancel(RF_EVT_POST_POLL_RX);
     rf_abort_pair_burst();
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
     /* Codex fix re-review: a WAIT_REARM here means the peer HAD confirmed the
      * session (a valid connected RX was seen) but the post-confirm rearm never
      * succeeded and reacquire has now exhausted. The pair is genuine, so make it
@@ -1305,7 +1322,9 @@ static void rf_stock_reacquire_giveup(void)
          * sink can't forward a key-DOWN or advance the confirm state after here. */
         rf_state = RF_STATE_PAIRING;
     }
+#if RF_TASK_EXECUTOR_TMOS
     rf_burst_txfail_fallback = 0u;
+#endif
     (void)__risc_v_enable_irq(gv_irq);
     if (gv_confirm == RF_CONFIRM_STATE_WAIT_REARM) {
         rf_arm_bond_persist();
@@ -1466,7 +1485,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * helper. Must run BEFORE the memcpy overwrites rf_peer_mac. */
                 rf_relatch_bond_on_peer_change(&rxBuf[2]);
 #endif
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
                 /* CODEREVIEW N11: classify this accept as a KNOWN-DURABLE reconnect
                  * vs a fresh/tentative pair, BEFORE rf_peer_mac is overwritten. A
                  * reconnect is durable ONLY if the bond is valid AND already
@@ -1580,7 +1599,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 if (hid_tag && rf_hid_callback) {
                     rf_hid_callback(hid_tag, &rxBuf[4], len - 2);
                 }
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
                 /* CODEREVIEW N11: a valid connected RX from the peer confirms it
                  * accepted the tentative fresh-pair session. A LEN-1 poll ack OR a
                  * validated HID tag (0xA1, peer-matched — hid_tag != 0) both
@@ -1706,7 +1725,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                      * CONNECTED or persist a bond that would vanish at reset. Resume
                      * a clean listen where the accept gates reject new pairs until
                      * reset. (Transparent when not tombstoned.) */
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
                     rf_confirm_state = RF_CONFIRM_STATE_NONE;
                     hal_event_cancel(RF_EVT_CONFIRM_TIMEOUT);
 #endif
@@ -1751,13 +1770,13 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * The keyboard stored what we sent — TMR0 cadence has
                  * to match or polls drift out of its listen window. */
                 rf_conn_interval         = rf_protocol_pair_ack_interval(rf_pair_ack15);
-                /* Pair completed — snapshot the learned bond. On CH570 (and a
-                 * TMOS known-durable reconnect) also request the deferred
-                 * DataFlash write. CODEREVIEW N11: a TMOS FRESH pair RAM-commits
-                 * now (so a same-boot reconnect has a target) but DEFERS the
-                 * durable write until a connected RX confirms the peer accepted
-                 * the session — armed at the supervision site below. */
-#if RF_TASK_EXECUTOR_TMOS
+                /* Pair completed — snapshot the learned bond. CODEREVIEW N11
+                 * (Issue #23: both executors): a FRESH pair RAM-commits now (so a
+                 * same-boot reconnect has a target) but DEFERS the durable DataFlash
+                 * write until a connected RX confirms the peer accepted the session
+                 * — armed at the supervision site below. A KNOWN-DURABLE reconnect
+                 * requests the persist directly (a no-op when already persisted). */
+#if RF_CONFIRM_BEFORE_PERSIST
                 if (rf_pair_is_fresh) {
                     rf_commit_bond_ram();
                 } else {
@@ -1848,7 +1867,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * queue survives the supervision/EV10 rebind, and TMR0 is NOT
                  * restarted so the poll grid/phase-lock above is preserved. */
                 rf_queue_led_relay(rf_led_state);
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
                 if (rf_pair_is_fresh) {
                     /* CODEREVIEW N11: fresh pair is tentative until the peer
                      * confirms. Arm a dedicated one-shot confirmation deadline
@@ -1899,7 +1918,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
                 hal_event_cancel(RF_EVT_PAIR_PREP);
                 hal_event_cancel(RF_EVT_SEND_PAIR_ACK);
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
                 /* N11 confirm state: a fresh session's RF_EVT_CONFIRM_TIMEOUT can
                  * otherwise survive this abort and, once, re-arm EV10_REKEY or a
                  * bounded boot-window step (never re-persists / never restarts
@@ -2106,10 +2125,12 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_START) {
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
         rf_confirm_state = RF_CONFIRM_STATE_NONE;   /* N11: clean per-attempt state */
-        rf_burst_txfail_fallback = 0u;
         hal_event_cancel(RF_EVT_CONFIRM_TIMEOUT);
+#endif
+#if RF_TASK_EXECUTOR_TMOS
+        rf_burst_txfail_fallback = 0u;
 #endif
         
         rf_configure(rf_access_addr);
@@ -2184,7 +2205,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_BOOT_WINDOW;
     }
 
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
     if (events & RF_EVT_CONFIRM_TIMEOUT) {
         /* CODEREVIEW N11 deadline. Claim the per-attempt state under a brief IRQ
          * mask (the RF sink advances WAIT_RX -> WAIT_REARM and can preempt this
@@ -2273,7 +2294,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * dead; the post-TX paths that genuinely need a full reconfigure call
          * rf_start_rx() directly -- connected poll via RF_EVT_POST_POLL_RX, EV10
          * and burst via explicit rf_start_rx. Removed.) */
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
         /* CODEREVIEW N11 (Codex impl-review): snapshot the confirm state at handler
          * ENTRY, BEFORE rf_rearm_rx. Persist only if we were ALREADY WAIT_REARM
          * here — that proves the rf_rearm_rx() below happens AFTER the confirm was
@@ -2289,7 +2310,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * funnels through. If the re-arm fails, the radio timeout that would
          * re-drive us never fires, so reschedule ourselves off the guard. */
         rf_arm_retry_if_failed();
-#if RF_TASK_EXECUTOR_TMOS
+#if RF_CONFIRM_BEFORE_PERSIST
         /* Only NOW (after a SUCCESSFUL post-confirm arm) commit the durable bond,
          * so the flash erase/write never runs while RX is deaf (RF_EVT_PERSIST_BOND
          * outranks this event in the dispatch chain). If the re-arm FAILED, stay in
@@ -2315,11 +2336,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * buffer is the same gp-0x604-equivalent control byte storage
          * used for empty-poll TX, sized here for the stock length-10
          * RX arm. */
-#if RF_TASK_EXECUTOR_TMOS
-        /* CODEREVIEW N11 (Codex impl-review): stale-event guard. A POST_POLL_RX
-         * co-dispatched with a confirm timeout that fell back to PAIRING (via
-         * rf_return_to_fresh_pair, which camps a fresh RX) must NOT re-prime the
-         * connected post-poll RX over that camp. Only arm while still CONNECTED. */
+#if RF_CONFIRM_BEFORE_PERSIST
+        /* CODEREVIEW N11 (Codex impl-review; widened to CH570 per review): stale-
+         * event guard. A POST_POLL_RX co-dispatched with a confirm timeout that
+         * fell back to PAIRING (via rf_return_to_fresh_pair, which camps a fresh
+         * RX) must NOT re-prime the connected post-poll RX over that camp. Now
+         * that CH570 runs the confirm-timeout fallback too, it needs this guard.
+         * Only arm while still CONNECTED. */
         if (rf_state != RF_STATE_CONNECTED) {
             return events ^ RF_EVT_POST_POLL_RX;
         }
@@ -3001,6 +3024,24 @@ static void rf_commit_bond_ram(void)
         return;   /* CODEREVIEW N06: host cleared the bond -> block a burst already
                    * in flight from RAM-committing a new bond that would look paired
                    * but vanish at the next reset. No new pair persists until reset. */
+    }
+    /* Issue #23 hardening: the durable record is keyed on the scalar rf_bond_aa,
+     * but TX/promotion advertise the session AA read from the rf_pair_ack15
+     * template. In normal flow they are kept in sync (fresh mint and reload both
+     * write both), but nothing else enforces agreement here. If they ever diverge
+     * the keyboard bonded to the advertised AA, so committing a record on a
+     * different AA would mint a deaf reconnect -- skip the commit so nothing
+     * durable is written. Graceful skip, NOT an assert: on CH570 this runs in the
+     * radio-IRQ __HIGH_CODE sink, where a halting assert would strand the link. */
+    if (rf_bond_aa != rf_protocol_pair_ack_session_aa(rf_pair_ack15)) {
+        /* Review (CodeRabbit/Copilot): a bare early return would leave a STALE
+         * rf_bond_pending_rec that a later confirm -> rf_arm_bond_persist could
+         * still write. Zero the pending snapshot and drop rf_bond_valid so a
+         * divergence commits and persists NOTHING (rf_persist_bond_task's
+         * semantic readback also rejects the resulting zero-AA record). */
+        tmos_memset(&rf_bond_pending_rec, 0, sizeof(rf_bond_pending_rec));
+        rf_bond_valid = 0;
+        return;
     }
     tmos_memset(&rf_bond_pending_rec, 0, sizeof(rf_bond_pending_rec));
     rf_bond_pending_rec.session_aa    = rf_bond_aa;
