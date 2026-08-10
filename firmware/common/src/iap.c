@@ -33,6 +33,8 @@
 #define CMD_VERSION     0x90
 #define CMD_STATUS      0x91
 #define CMD_FAULT       0x93
+#define CMD_CRYPT_DIAG  0x94    /* read-only link-encryption counters */
+#define ACK_CRYPT_DIAG  0x94
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -310,6 +312,31 @@ static void handle_bond_read(void)
     USB_SendEP6(resp, sizeof(resp));
 }
 
+#if DONGLE_RF_CRYPT
+/* Read-only: verified-frame count then the per-reason drop tally, in
+ * rf_crypt_status_t order (OK, SHAPE, INACTIVE, MAC, REPLAY, ENGINE). A single
+ * drop total cannot tell a failed tag from a replayed counter from a malformed
+ * frame, and those point at completely different bugs on the transmitting end.
+ * Exposed unarmed because it reveals nothing secret -- counts only, no key or
+ * session material. */
+extern uint32_t rf_crypt_drop_reason[6];
+extern uint32_t rf_crypt_ok_count;
+
+static void handle_crypt_diag(void)
+{
+    uint8_t resp[2u + 4u + 24u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
 static void handle_version(void)
 {
     uint8_t resp[64] = {0};
@@ -414,6 +441,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_VERSION:     handle_version(); break;
     case CMD_STATUS:      handle_status(); break;
     case CMD_FAULT:       handle_fault(); break;
+#if DONGLE_RF_CRYPT
+    case CMD_CRYPT_DIAG:  handle_crypt_diag(); break;
+#endif
     default:              break;
     }
 }

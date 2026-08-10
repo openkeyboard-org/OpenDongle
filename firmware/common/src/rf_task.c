@@ -1419,6 +1419,12 @@ static volatile uint16_t rf_crypt_frames_since_ok;
  * fresh (otherwise the timeout handler would just re-arm and never release). */
 static volatile uint8_t  rf_crypt_force_release;
 static uint32_t rf_crypt_drops;   /* diagnostic (approximate): frames dropped */
+/* Why frames were dropped, indexed by rf_crypt_status_t. A single total says a
+ * peer is being rejected but not whether its tag failed, its counter looked
+ * replayed, or its shape was wrong -- which are entirely different bugs on the
+ * transmitting end. Read over IAP (CMD_CRYPT_DIAG). */
+uint32_t rf_crypt_drop_reason[6];
+uint32_t rf_crypt_ok_count;
 
 static uint32_t rf_crypt_gen_session_id(void);   /* defined near rf_aa_rng16 */
 
@@ -2591,6 +2597,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
 
             if (st == RF_CRYPT_OK) {
+                rf_crypt_ok_count++;
                 rf_crypt_frames_since_ok = 0u;   /* authenticated liveness */
                 rf_crypt_announce_count = 0u;    /* keyboard has the session nonce */
                 if (rf_hid_callback) {
@@ -2598,6 +2605,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 }
             } else {
                 rf_crypt_drops++;
+                if ((unsigned)st < 6u) {
+                    rf_crypt_drop_reason[(unsigned)st]++;
+                }
                 if (st == RF_CRYPT_FAULT_ENGINE) {
                     /* hal_aes.h: an engine wedge is a fatal fault of the radio
                      * path. NEVER revert to the plaintext dispatch (that would let
