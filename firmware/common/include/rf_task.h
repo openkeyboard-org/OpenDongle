@@ -32,6 +32,8 @@
 #define RF_EVT_BOOT_WINDOW       0x0400  /* boot reconnect/pair listen-window timer */
 #define RF_EVT_PERSIST_BOND      0x0800  /* deferred DataFlash bond write (task ctx, out of the radio ISR) */
 #define RF_EVT_QUIESCE           0x1000  /* pre-reboot: shut the radio in executor context, stop re-arming */
+#define RF_EVT_CRYPT_RX          0x2000  /* task: verify+decrypt queued encrypted RX frames (rf_crypt) */
+#define RF_EVT_CRYPT_SESSION     0x4000  /* task: mint a fresh session nonce + arm the announce on connect */
 
 /* Connection states */
 #define RF_STATE_IDLE        0

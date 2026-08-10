@@ -184,6 +184,7 @@ APP_SRC += src/hal_timing_ch592.c src/hal_rf_ch592.c src/platform_ch592.c
 APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this
 # is the whole backend -- no software cipher is linked here, unlike CH570.

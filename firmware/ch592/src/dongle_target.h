@@ -57,6 +57,10 @@
  * CH570 build can share it. rf_task.c #errors if this is undefined. */
 #define RF_CONFIRM_BEFORE_PERSIST 1
 
+/* Optional AES-128-CCM link decryption (rf_crypt). Negotiated per bond and inert
+ * until a key is provisioned, so it does not change plaintext behaviour. */
+#define DONGLE_RF_CRYPT 1
+
 /* CODEREVIEW P4 (RF-liveness parity, ported from CH570): reschedule delay for a
  * failed RF_Rx/RF_Tx arm at a terminal camp (rf_arm_retry_if_failed). Same
  * 80 x 625 us = 50 ms as CH570. A 0 would hot-spin the delayed RF_EVT_RX_RESTART

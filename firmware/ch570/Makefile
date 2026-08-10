@@ -120,12 +120,16 @@ CFLAGS += -DOPENBOOT_CHIP_CH57X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 # Select the CH570 AES backend: DONGLE_AES_CH570_IMPL_{ASM_A,ASM_F,C}.
-# Default (ASM_A) is set in src/hal_aes_ch570_impl.h; override here, e.g.
-#   make AES_IMPL=DONGLE_AES_CH570_IMPL_ASM_F
-# ASM_F additionally REQUIRES CORECFGR bit 3 -- see that header.
-ifdef AES_IMPL
+# The SEAM default (src/hal_aes_ch570_impl.h) is ASM_A, but the PRODUCTION CH570
+# build ships ASM_F (flash-resident kernel): with optional link encryption
+# (DONGLE_RF_CRYPT) enabled, ASM_A's SRAM-resident S-box + round-key schedule
+# pushes the image past the 2 KB stack floor (link fails), whereas the dongle
+# only DECRYPTS, in task context, where ASM_F's higher per-block cost is off the
+# phase-critical poll path. ASM_F REQUIRES CORECFGR bit 3 (0x2D) -- set in
+# production, see src/ch570_corecfgr.h. Override with e.g.
+#   make AES_IMPL=DONGLE_AES_CH570_IMPL_ASM_A
+AES_IMPL ?= DONGLE_AES_CH570_IMPL_ASM_F
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
-endif
 # Pair-acceptance RSSI floor in dBm, for bench profiles that need a different
 # one without editing source. The negative value needs no quoting - it is an
 # ordinary command-line variable assignment:
@@ -156,6 +160,7 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/rf_task.c src/hal_dispatch_ch570.c
 APP_SRC += src/hal_rf_ch570.c src/hal_timing_ch570.c
 APP_SRC += $(COMMON)/src/iap.c $(COMMON)/src/usb_descriptors.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch570.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. hal_aes_ch570.c supplies

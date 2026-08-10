@@ -76,6 +76,10 @@ _Static_assert((CH570_SYSCLK_HZ % 1000000u) == 0u,
  * the durable-arm site and the CX4 write differ per executor. */
 #define RF_CONFIRM_BEFORE_PERSIST 1
 
+/* Optional AES-128-CCM link decryption (rf_crypt). Negotiated per bond and inert
+ * until a key is provisioned, so it does not change plaintext behaviour. */
+#define DONGLE_RF_CRYPT 1
+
 #define DONGLE_HAS_RF 1
 
 /* The bond sits at 0x3A000, immediately above the OBP-clamped app region

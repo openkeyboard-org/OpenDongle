@@ -31,9 +31,20 @@
 #define BOND_EEPROM_OFF   0x5000u
 
 #define BOND_MAGIC        0x444E4F42u   /* 'B','O','N','D' little-endian */
-#define BOND_VERSION      1u
+#define BOND_VERSION      2u
 
-/* 32-byte record. checksum is the final field and covers bytes 0..27. */
+/* Optional link-encryption state carried on the `flags` byte. Encryption is
+ * NEGOTIATED, never required: it goes ACTIVE only when the peer advertised it at
+ * pairing (CAPABLE) and a key has been provisioned (KEY). A record with neither
+ * bit -- every v1 record, every stock-keyboard pair -- is plaintext, unchanged. */
+#define BOND_FLAG_ENC_CAPABLE 0x01u  /* peer advertised link encryption at pairing */
+#define BOND_FLAG_ENC_KEY     0x02u  /* link_key holds a provisioned AES-128 key    */
+
+/* 48-byte record. checksum is the final field and covers bytes 0..43.
+ *
+ * v2 appended link_key[16] before the checksum for optional link encryption.
+ * Every field below offset 28 keeps the v1 offset it had in the 32-byte record,
+ * which is what lets bond_load() validate and migrate a v1 image in place. */
 typedef struct {
     uint32_t magic;
     uint8_t  version;
@@ -44,8 +55,64 @@ typedef struct {
     uint16_t reserved0;
     uint8_t  dongle_mac[6];
     uint8_t  peer_mac[6];
+    uint8_t  link_key[16];   /* AES-128 RX key; valid iff flags & BOND_FLAG_ENC_KEY */
     uint32_t checksum;
 } bond_record_t;
+
+/* The dongle_nv_is_erased() scratch buffers on BOTH platforms are sized to hold
+ * a whole record; this cap ties them to the struct so growing the record past it
+ * fails the build here rather than silently breaking bond_clear()/bond_save()
+ * verification (which pass sizeof(bond_record_t) and return "not erased" for any
+ * length over the buffer). Widen this AND both buffers together. Must stay a
+ * multiple of 4 -- CH570 flash reads/writes/verifies in 4-byte units. */
+#define BOND_RECORD_MAX_NV 48u
+_Static_assert(sizeof(bond_record_t) <= BOND_RECORD_MAX_NV,
+               "bond_record_t outgrew BOND_RECORD_MAX_NV; widen the cap and the "
+               "dongle_nv_is_erased buffers on both platforms");
+_Static_assert(BOND_RECORD_MAX_NV % 4u == 0u,
+               "BOND_RECORD_MAX_NV must be 4-byte aligned for CH570 flash");
+
+/* Encryption is ACTIVE only with both the negotiated capability and a key. */
+static inline int bond_enc_active(const bond_record_t *rec)
+{
+    return (rec->flags & (BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY))
+           == (BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+}
+
+static inline int bond_key_is_zero(const uint8_t key[16])
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (key[i] != 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static inline int bond_key_is_all_ff(const uint8_t key[16])
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        if (key[i] != 0xFFu) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Canonical-form check for the key/flag pair, shared by boot load (bond.c) and
+ * IAP BondWrite (iap.c, reject status 0xB3): a provisioned key must be real (not
+ * a blank/erased page), and with no key the field must be all-zero so a stale
+ * key can never linger set-but-unflagged. */
+static inline int bond_key_flags_valid(const bond_record_t *rec)
+{
+    if (rec->flags & BOND_FLAG_ENC_KEY) {
+        return !bond_key_is_zero(rec->link_key)
+               && !bond_key_is_all_ff(rec->link_key);
+    }
+    return bond_key_is_zero(rec->link_key);
+}
 
 /* The reconnect-critical persistence tuple, INCLUDING the advertised dongle
  * identity (CODEREVIEW N09: auto-persist used to compare/copy only
@@ -61,6 +128,18 @@ static inline int bond_tuple_equal(const bond_record_t *a,
         || a->conn_interval != b->conn_interval
         || a->conn_timeout != b->conn_timeout) {
         return 0;
+    }
+    /* V2: the link key and the negotiated encryption flags are reconnect-critical
+     * too -- a same-AA/MAC persist that dropped them would silently down-grade an
+     * encrypted bond to plaintext or wipe its key. */
+    if ((a->flags & (BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY))
+        != (b->flags & (BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY))) {
+        return 0;
+    }
+    for (i = 0; i < 16; i++) {
+        if (a->link_key[i] != b->link_key[i]) {
+            return 0;
+        }
     }
     for (i = 0; i < 6; i++) {
         if (a->peer_mac[i] != b->peer_mac[i]
