@@ -321,18 +321,35 @@ static void handle_bond_read(void)
  * session material. */
 extern uint32_t rf_crypt_drop_reason[6];
 extern uint32_t rf_crypt_ok_count;
+extern uint32_t rf_crypt_conn_rx;
+extern uint32_t rf_crypt_enc_shape;
+extern uint32_t rf_crypt_fifo_full;
+extern uint32_t rf_crypt_flush_drop;
+extern uint32_t rf_crypt_plain_drop;
+extern uint8_t  rf_crypt_len_max;
+extern uint8_t  rf_crypt_len_max_tag;
 
 static void handle_crypt_diag(void)
 {
-    uint8_t resp[2u + 4u + 24u] = {0};
+    /* v2 payload: ok(4) + reason[6](24) + pre-verify sink counters(20) +
+     * len_max(1) + len_max_tag(1) = 50 B, inside the 64 B EP6 report. Purely
+     * additive -- a v1 reader that stops after the reason array still parses. */
+    uint8_t resp[2u + 4u + 24u + 20u + 2u] = {0};
     uint8_t i;
 
     resp[0] = ACK_CRYPT_DIAG;
-    resp[1] = 4u + 24u;
+    resp[1] = 4u + 24u + 20u + 2u;
     put_le32(&resp[2], rf_crypt_ok_count);
     for (i = 0; i < 6u; i++) {
         put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
     }
+    put_le32(&resp[30], rf_crypt_conn_rx);
+    put_le32(&resp[34], rf_crypt_enc_shape);
+    put_le32(&resp[38], rf_crypt_fifo_full);
+    put_le32(&resp[42], rf_crypt_flush_drop);
+    put_le32(&resp[46], rf_crypt_plain_drop);
+    resp[50] = rf_crypt_len_max;
+    resp[51] = rf_crypt_len_max_tag;
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif
