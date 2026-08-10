@@ -6,6 +6,11 @@
  * tests/ccm_ref.py, which is graded against RFC 3610.
  */
 
+/* Before rf_crypt.h: the per-chip target header is what turns the bench
+ * prev-session diagnostic on, and rf_crypt.h only supplies its default. Without
+ * this the counters compile out here while iap.c still references them. */
+#include "dongle_target.h"
+
 #include "rf_crypt.h"
 
 #include "hal_aes.h"
@@ -16,6 +21,15 @@ static uint8_t  rf_crypt_key_ready;
 static uint8_t  rf_crypt_session_ready;
 static uint32_t rf_crypt_session_id;
 static uint32_t rf_crypt_last_ctr;
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* See rf_crypt.h: bench-only, diagnostic, never gates a forwarding decision. */
+static uint32_t rf_crypt_prev_session_id;
+static uint8_t  rf_crypt_prev_session_valid;
+uint32_t rf_crypt_session_mint_count;
+uint32_t rf_crypt_mac_prev_ok;
+uint32_t rf_crypt_last_mac_ctr;
+#endif
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -163,6 +177,16 @@ void rf_crypt_install_key(const uint8_t key[RF_CRYPT_KEY_BYTES])
 
 void rf_crypt_new_session(uint32_t session_id)
 {
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Remember what this mint displaces, but only if a session was actually
+     * live -- otherwise the first mint would record the uninitialised 0 as a
+     * "previous session" and every later retry would test against garbage. */
+    if (rf_crypt_session_ready) {
+        rf_crypt_prev_session_id = rf_crypt_session_id;
+        rf_crypt_prev_session_valid = 1u;
+    }
+    rf_crypt_session_mint_count++;
+#endif
     rf_crypt_session_id = session_id;
     rf_crypt_last_ctr = 0u;
     rf_crypt_session_ready = 1u;
@@ -259,6 +283,36 @@ rf_crypt_status_t rf_crypt_rx(const uint8_t *frame, uint8_t len,
         diff |= (uint8_t)(expect[i] ^ tag8[i]);
     }
     if (diff != 0u) {
+#if RF_CRYPT_DIAG_PREV_SESSION
+        rf_crypt_last_mac_ctr = counter;
+        if (rf_crypt_prev_session_valid) {
+            /* Re-run the WHOLE CCM under the displaced session id. Recomputing
+             * only the tag over the plaintext recovered above would be wrong:
+             * the session id is part of the nonce, so it changes the CTR
+             * keystream too, and the plaintext under the old session is a
+             * different string entirely. */
+            uint8_t prev_body[RF_CRYPT_MAX_BODY];
+            build_nonce(nonce, rf_crypt_prev_session_id,
+                        RF_CRYPT_DIR_KB_TO_DONGLE, counter);
+            if (ctr_block(nonce, 1u, keystream) == HAL_AES_OK) {
+                for (i = 0; i < n; i++) {
+                    prev_body[i] = (uint8_t)(ct[i] ^ keystream[i]);
+                }
+                if (ccm_tag(nonce, aad, 2u, prev_body, n, expect) == HAL_AES_OK) {
+                    diff = 0u;
+                    for (i = 0; i < RF_CRYPT_TAG_BYTES; i++) {
+                        diff |= (uint8_t)(expect[i] ^ tag8[i]);
+                    }
+                    if (diff == 0u) {
+                        rf_crypt_mac_prev_ok++;
+                    }
+                }
+            }
+        }
+        /* Deliberately fall through to the same drop. The retry observes; it
+         * must never rescue a frame, advance rf_crypt_last_ctr, or leave the
+         * recovered plaintext where the caller might forward it. */
+#endif
         return RF_CRYPT_DROP_MAC;   /* out_body holds unverified bytes; caller drops */
     }
 

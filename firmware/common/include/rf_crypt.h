@@ -106,4 +106,35 @@ rf_crypt_status_t rf_crypt_rx(const uint8_t *frame, uint8_t len,
  * RF_CRYPT_DROP_INACTIVE if no key/session, else RF_CRYPT_OK. */
 rf_crypt_status_t rf_crypt_build_session_frame(uint8_t ctrl, uint8_t *out);
 
+/* Bench-only: on a MAC failure, retry the whole CCM under the session id the
+ * most recent mint displaced, and count the frames that would have verified
+ * under it. That is the direct test of "the keyboard is sealing under a stale
+ * session", which is otherwise indistinguishable from a genuine tag failure --
+ * both land in DROP_MAC and nothing else moves.
+ *
+ * OFF by default and enabled only for the CH592 bench target. It costs one
+ * RF_CRYPT_MAX_BODY scratch buffer plus a second full decrypt inside
+ * rf_crypt_rx(), and the CH570 build sits against its stack-floor assert with
+ * only ~20 bytes of margin, so it must not be enabled there without redoing
+ * that budget.
+ *
+ * The retry is diagnostic ONLY: it never advances the replay high-water mark,
+ * never touches the current session, and never changes what rf_crypt_rx()
+ * returns or what the caller forwards. A frame that fails under the live
+ * session is still dropped, fail-closed, exactly as before. */
+#ifndef RF_CRYPT_DIAG_PREV_SESSION
+#define RF_CRYPT_DIAG_PREV_SESSION 0
+#endif
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* Mints seen. Should be 1 for a single healthy connected epoch; a value that
+ * climbs during one run means repeated reconnect/re-promote cycles, which would
+ * feed session-boundary MAC failures back into the disconnect that caused them. */
+extern uint32_t rf_crypt_session_mint_count;
+/* MAC failures that WOULD have verified under the displaced session id. */
+extern uint32_t rf_crypt_mac_prev_ok;
+/* Clear counter of the most recent MAC failure, for spotting ordering. */
+extern uint32_t rf_crypt_last_mac_ctr;
+#endif
+
 #endif /* RF_CRYPT_H */

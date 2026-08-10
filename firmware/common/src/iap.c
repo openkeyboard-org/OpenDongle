@@ -16,6 +16,9 @@
 #include "usb_device.h"
 #if DONGLE_HAS_RF
 #include "rf_task.h"            /* RF_TombstoneBond (N06), RF_Quiesce* (0x85) */
+#if DONGLE_RF_CRYPT
+#include "rf_crypt.h"           /* RF_CRYPT_DIAG_PREV_SESSION + its counters */
+#endif
 #endif
 
 #include <string.h>
@@ -331,14 +334,16 @@ extern uint8_t  rf_crypt_len_max_tag;
 
 static void handle_crypt_diag(void)
 {
-    /* v2 payload: ok(4) + reason[6](24) + pre-verify sink counters(20) +
-     * len_max(1) + len_max_tag(1) = 50 B, inside the 64 B EP6 report. Purely
-     * additive -- a v1 reader that stops after the reason array still parses. */
-    uint8_t resp[2u + 4u + 24u + 20u + 2u] = {0};
+    /* v3 payload: ok(4) + reason[6](24) + pre-verify sink counters(20) +
+     * len_max(1) + len_max_tag(1) + prev-session diagnostic(12) = 62 B, which
+     * with the 2 B header is exactly the 64 B EP6 report -- no room left, so
+     * anything further needs a selector rather than another append. Purely
+     * additive: a v1/v2 reader that stops early still parses. */
+    uint8_t resp[2u + 4u + 24u + 20u + 2u + 12u] = {0};
     uint8_t i;
 
     resp[0] = ACK_CRYPT_DIAG;
-    resp[1] = 4u + 24u + 20u + 2u;
+    resp[1] = 4u + 24u + 20u + 2u + 12u;
     put_le32(&resp[2], rf_crypt_ok_count);
     for (i = 0; i < 6u; i++) {
         put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
@@ -350,6 +355,11 @@ static void handle_crypt_diag(void)
     put_le32(&resp[46], rf_crypt_plain_drop);
     resp[50] = rf_crypt_len_max;
     resp[51] = rf_crypt_len_max_tag;
+#if RF_CRYPT_DIAG_PREV_SESSION
+    put_le32(&resp[52], rf_crypt_session_mint_count);
+    put_le32(&resp[56], rf_crypt_mac_prev_ok);
+    put_le32(&resp[60], rf_crypt_last_mac_ctr);
+#endif
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif

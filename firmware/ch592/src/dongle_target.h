@@ -61,6 +61,12 @@
  * until a key is provisioned, so it does not change plaintext behaviour. */
 #define DONGLE_RF_CRYPT 1
 
+/* Bench diagnostic: on a MAC failure, retry the CCM under the session id the
+ * last mint displaced (see rf_crypt.h). CH592 only -- it adds a scratch buffer
+ * and a second decrypt to rf_crypt_rx(), and the CH570 build has ~20 bytes of
+ * stack-floor margin. Diagnostic only; it cannot rescue a frame. */
+#define RF_CRYPT_DIAG_PREV_SESSION 1
+
 /* CODEREVIEW P4 (RF-liveness parity, ported from CH570): reschedule delay for a
  * failed RF_Rx/RF_Tx arm at a terminal camp (rf_arm_retry_if_failed). Same
  * 80 x 625 us = 50 ms as CH570. A 0 would hot-spin the delayed RF_EVT_RX_RESTART
