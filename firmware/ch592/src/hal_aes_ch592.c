@@ -53,20 +53,6 @@
  * hung dongle. A real operation completes in tens of cycles. */
 #define AES_SPIN_LIMIT 100000u
 
-/* Per-block interrupt mask (see the note in hal_aes_encrypt_block). Host
- * builds (the mocked-register tests) have no mstatus; the mask is a no-op
- * there, which is also correct -- nothing preempts the host harness. */
-#if defined(__riscv)
-#define AES_IRQ_SAVE(mie) \
-    __asm__ volatile("csrrci %0, mstatus, 0x8" : "=r"(mie) :: "memory")
-#define AES_IRQ_RESTORE(mie) \
-    do { if ((mie) & 0x8u) \
-        __asm__ volatile("csrsi mstatus, 0x8" ::: "memory"); } while (0)
-#else
-#define AES_IRQ_SAVE(mie)    ((mie) = 0u)
-#define AES_IRQ_RESTORE(mie) ((void)(mie))
-#endif
-
 static uint32_t aes_key_words[4];
 
 static uint32_t load_le32(const uint8_t *p)
@@ -110,27 +96,6 @@ void hal_aes_set_key(const uint8_t key[HAL_AES_KEY_BYTES])
 hal_aes_status_t hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
                                        uint8_t out[HAL_AES_BLOCK_BYTES])
 {
-    uint32_t mie;
-
-    /* Mask interrupts across this ONE block (~15 us), output read included.
-     * Root cause (OpenController docs/TODO.md section 0, bench 2026-08-15/16):
-     * a BLEB preempt mid-operation silently aborts the engine -- CFG bit 0
-     * reads back clear as if complete, but the computation never ran and the
-     * DATA read path still holds the PREVIOUS block's output (separate in/out
-     * latches; the mocked-register test sees the input instead, which is why
-     * this failure mode stayed invisible to it). The linked BB_IRQLibHandler
-     * reads/clears AES_STA, the register this sequence arms.
-     *
-     * mstatus.MIE gates WCH's fast-vectored (VTF/HPE) interrupts on QingKe
-     * V4C -- WCH's own RTOS ports use csrrci mstatus,8 as their global
-     * primitive. Mask per block, never across a whole CCM: ~15 us is 1.7% of
-     * the 875 us poll grid, and pending IRQs are serviced between blocks.
-     * Restore only if MIE was set on entry. Do NOT gate on AES_STA bit 1 as
-     * completion evidence -- the engine never sets it outside the vendor IRQ
-     * flow, and a bit-1 gate rejects every healthy block (fail-closed link
-     * collapse, measured on the keyboard side). */
-    AES_IRQ_SAVE(mie);
-
     AES_CFG = 0x100u; /* reset/prepare pulse, as the vendor driver does */
     __asm__ volatile("nop; nop; nop; nop");
     AES_CFG = 0u;     /* bit1 clear = encrypt */
@@ -166,7 +131,6 @@ hal_aes_status_t hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
      * is the lesser evil and not a safe one.
      */
     if ((AES_CFG & 1u) != 0u) {
-        AES_IRQ_RESTORE(mie);
         for (uint32_t i = 0; i < HAL_AES_BLOCK_BYTES; i++)
             out[i] = 0u;
         return HAL_AES_ENGINE_TIMEOUT;
@@ -174,8 +138,6 @@ hal_aes_status_t hal_aes_encrypt_block(const uint8_t in[HAL_AES_BLOCK_BYTES],
 
     for (uint32_t i = 0; i < 4u; i++)
         store_le32(&out[4u * i], AES_DATA(i));
-
-    AES_IRQ_RESTORE(mie);
 
     return HAL_AES_OK;
 }
