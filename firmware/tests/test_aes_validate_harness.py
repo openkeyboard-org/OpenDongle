@@ -40,6 +40,9 @@ import read_aes_log as R  # noqa: E402
 
 VALIDATION = ROOT / "validation"
 INC = ROOT / "common" / "include"
+# rf_crypt.c includes dongle_target.h; host-compile against the CH592 target
+# (the bench configuration). See the matching note in test_rf_crypt.py.
+TARGET_INC = ROOT / "ch592" / "src"
 AES_SW = ROOT / "common" / "src" / "aes_sw.c"
 RF_CRYPT = ROOT / "common" / "src" / "rf_crypt.c"
 
@@ -126,7 +129,8 @@ class HarnessRunsOnTheHost(unittest.TestCase):
         )
 
         common = [cc, "-O1", "-std=gnu99", "-Wall", "-Wextra",
-                  "-Wno-unused-parameter", f"-I{INC}", f"-I{VALIDATION}"]
+                  "-Wno-unused-parameter", f"-I{INC}", f"-I{VALIDATION}",
+                  f"-I{TARGET_INC}"]
 
         def compile_one(src, extra=()):
             obj = d / (Path(src).stem + ".o")
