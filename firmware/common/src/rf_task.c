@@ -2639,9 +2639,18 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         while (rf_crypt_fifo_head != rf_crypt_fifo_tail) {
             uint8_t h = rf_crypt_fifo_head;
             uint8_t otag = 0u, obody[RF_CRYPT_MAX_BODY], on = 0u;
-            rf_crypt_status_t st = rf_crypt_rx(rf_crypt_fifo_buf[h],
-                                               rf_crypt_fifo_len[h],
-                                               &otag, obody, &on);
+            rf_crypt_status_t st;
+#if RF_CRYPT_DIAG_PREV_SESSION
+            /* Bench: mark the CCM window so the RF status callback can count
+             * BB/LLE interrupts that land mid-verify (they touch AES_STA). */
+            rf_crypt_in_aes = 1u;
+#endif
+            st = rf_crypt_rx(rf_crypt_fifo_buf[h],
+                             rf_crypt_fifo_len[h],
+                             &otag, obody, &on);
+#if RF_CRYPT_DIAG_PREV_SESSION
+            rf_crypt_in_aes = 0u;
+#endif
             rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
 
             if (st == RF_CRYPT_OK) {
@@ -3387,6 +3396,19 @@ static void rf_load_persistent_bond(void)
         rf_crypt_clear();
         rf_crypt_bond_enc = 0u;
     }
+#if DONGLE_CRYPT_BENCH_FORCE_KEY
+    /* BENCH ONLY (this bench has no dongle USB, so provision_link_key.py
+     * cannot reach the bond record): force link decryption ACTIVE for any
+     * valid loaded bond, with the compiled-in throwaway key. RAM state only;
+     * the DataFlash record is untouched. A fresh pair activates on the next
+     * boot, when this load path runs again. The keyboard gets the same key
+     * over its 0xAE bench command. Must never ship enabled. */
+    if (!rf_crypt_bond_enc) {
+        static const uint8_t bench_key[16] = DONGLE_CRYPT_BENCH_KEY_BYTES;
+        rf_crypt_install_key(bench_key);
+        rf_crypt_bond_enc = 1u;
+    }
+#endif
 #endif
 }
 

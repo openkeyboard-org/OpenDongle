@@ -42,6 +42,7 @@
 #include "dongle_platform.h"
 #include "usb_device.h"
 #include "iap.h"
+#include "uart_diag.h"
 
 /*
  * Production board has ONLY the 32 MHz HSE crystal -- no external 32.768 kHz.
@@ -130,6 +131,11 @@ void Main_Circulation(void)
         /* Forward host HID LED changes from foreground, outside the highcode loop
          * body so USB LED plumbing does not consume timing-critical SRAM. */
         poll_usb_led_state();
+#if DONGLE_UART_DIAG
+        /* Bench telemetry on UART1 PA9: non-blocking, at most one TX-FIFO
+         * fill per pass, one 127-byte frame per second. */
+        UartDiag_Service();
+#endif
     }
 }
 
@@ -173,6 +179,10 @@ int main(void)
     /* 2.4G RF receiver. */
     RF_TaskInit();
     RF_SetHIDCallback(usb_hid_callback);    /* forward keyboard reports to USB */
+
+#if DONGLE_UART_DIAG
+    UartDiag_Init();
+#endif
 
     Main_Circulation();
 }

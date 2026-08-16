@@ -193,6 +193,10 @@ APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # neither before, meaning the file was dead code that no build compiled.
 APP_SRC += src/hal_aes_ch592.c
 
+# BENCH ONLY: UART1-PA9 telemetry mirror of CMD_CRYPT_DIAG, for the USB-less
+# bench (see dongle_target.h DONGLE_UART_DIAG).
+APP_SRC += src/uart_diag.c
+
 HAL_SRC := $(SDK)/BLE/HAL/MCU.c $(SDK)/BLE/HAL/RTC.c
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_sys.c

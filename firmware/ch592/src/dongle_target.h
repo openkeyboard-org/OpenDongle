@@ -64,8 +64,26 @@
 /* Bench diagnostic: on a MAC failure, retry the CCM under the session id the
  * last mint displaced (see rf_crypt.h). CH592 only -- it adds a scratch buffer
  * and a second decrypt to rf_crypt_rx(), and the CH570 build has ~20 bytes of
- * stack-floor margin. Diagnostic only; it cannot rescue a frame. */
+ * stack-floor margin. Diagnostic only; it cannot rescue a frame.
+ * Also gates (rf_crypt.h): the same-session re-verify (mac_same_ok /
+ * same_differs), the first-failure frame latch, the one-shot engine KAT, and
+ * the BB-interrupt-during-CCM correlator. */
 #define RF_CRYPT_DIAG_PREV_SESSION 1
+
+/* BENCH ONLY -- both must be stripped before anything ships.
+ * This bench has no dongle USB (UART + SWD only), so:
+ *  - DONGLE_UART_DIAG: periodic telemetry frame on UART1 PA9 (uart_diag.c),
+ *    replacing the unreachable CMD_CRYPT_DIAG path;
+ *  - DONGLE_CRYPT_BENCH_FORCE_KEY: force link decryption ACTIVE for any valid
+ *    loaded bond with the compiled-in throwaway key below, replacing the
+ *    unreachable provision_link_key.py. The keyboard is keyed with the SAME
+ *    bytes over its 0xAE bench command:
+ *      4f70656e4b626421a55ac33c69960ff0 */
+#define DONGLE_UART_DIAG 1
+#define DONGLE_CRYPT_BENCH_FORCE_KEY 1
+#define DONGLE_CRYPT_BENCH_KEY_BYTES \
+    { 0x4F,0x70,0x65,0x6E,0x4B,0x62,0x64,0x21, \
+      0xA5,0x5A,0xC3,0x3C,0x69,0x96,0x0F,0xF0 }
 
 /* CODEREVIEW P4 (RF-liveness parity, ported from CH570): reschedule delay for a
  * failed RF_Rx/RF_Tx arm at a terminal camp (rf_arm_retry_if_failed). Same
