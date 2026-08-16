@@ -31,13 +31,18 @@ Produces `build/ch592-product-slotA/opendongle-ch592-product-factory.bin`
 `hal_aes_ch592.o` in the link line are the confirmation that encryption is
 compiled in.
 
-Flash it over SWD with `flash-factory`, naming the CH592's probe explicitly —
-the bench has more than one, and the target is the receiver, not the keyboard:
+Flash it over SWD from the top-level `firmware/` Makefile, naming the CH592's
+probe explicitly — the bench has more than one, and the target is the
+receiver, not the keyboard:
 
 ```bash
-make ... MRS_TOOLCHAIN=... OPENBOOT_TOOLCHAIN=... \
-     flash-factory DONGLE_PROBE=C2228F064754
+cd firmware
+make ch592-factory-flash MRS_TOOLCHAIN=... OPENBOOT_TOOLCHAIN=... \
+     MINICHLINK=... WCHLINK_SERIAL=CF148F065446 ALLOW_BONDED_FLASH=1
 ```
+
+*(Earlier revisions of this file said `flash-factory DONGLE_PROBE=...` — no
+Makefile reads that variable, and probe `C2228F064754` has left the bench.)*
 
 **This erases the dongle's bond**, so pair again afterwards.
 
@@ -104,3 +109,30 @@ Confirm with `opendongle --hidraw /dev/hidrawN --info` — the bond should read
 - **Reset the keyboard physically**, never through the debug probe —
   probe-mediated resets produce a spurious recovery failure (see
   OpenController's `firmware/README.md`).
+
+## 4. The UART-only bench (2026-08: no dongle USB attached)
+
+When the receiver's own USB is not connected, everything above that runs over
+hidraw (provisioning, `CMD_CRYPT_DIAG`, OBP updates) is unreachable. Two
+bench-only gates in `ch592/src/dongle_target.h` replace it — **both must be
+stripped before anything ships**:
+
+- `DONGLE_UART_DIAG` — broadcasts the full crypto telemetry once per second on
+  UART1's default PA9 pin (127-byte `0x5E` frame: every `CMD_CRYPT_DIAG`
+  field plus `mac_same_ok`, `same_differs`, `bb_during_aes`, the KAT result,
+  and the first-DROP_MAC frame latch). Non-blocking: at most one TX-FIFO fill
+  per main-loop pass. Reader: OpenController `firmware/bench/rx_uart_diag.py`.
+- `DONGLE_CRYPT_BENCH_FORCE_KEY` — at bond load, force link decryption ACTIVE
+  for any valid bond using the compiled throwaway key
+  `4f70656e4b626421a55ac33c69960ff0` (RAM only; the record is untouched). The
+  keyboard is keyed with the same bytes over its `0xAE` bench command. This
+  also sidesteps the capability advert that never lands.
+
+Flashing goes over SWD (`ch592-factory-flash` above; the bond it erases is
+re-created by pairing). The receiver has no UART RX path — it only transmits —
+so it is restarted for the pairing/mint dance by power-cycling its probe rails
+(`minichlink -kt` / `-k3`). The full sequence is automated in OpenController
+`firmware/bench/bench_run.py --fresh`.
+
+IAP `0x95` (`CMD_CRYPT_LAST_FAIL`) exposes the same failure latch over USB for
+when a receiver with USB returns.
