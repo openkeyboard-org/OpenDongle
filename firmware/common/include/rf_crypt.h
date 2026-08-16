@@ -126,6 +126,13 @@ rf_crypt_status_t rf_crypt_build_session_frame(uint8_t ctrl, uint8_t *out);
 #define RF_CRYPT_DIAG_PREV_SESSION 0
 #endif
 
+/* Bench-only (see dongle_target.h): force-activate link decryption for any
+ * valid loaded bond using a compiled-in throwaway key, because this bench has
+ * no path to the USB provisioning tool. Must never ship enabled. */
+#ifndef DONGLE_CRYPT_BENCH_FORCE_KEY
+#define DONGLE_CRYPT_BENCH_FORCE_KEY 0
+#endif
+
 #if RF_CRYPT_DIAG_PREV_SESSION
 /* Mints seen. Should be 1 for a single healthy connected epoch; a value that
  * climbs during one run means repeated reconnect/re-promote cycles, which would
@@ -135,6 +142,45 @@ extern uint32_t rf_crypt_session_mint_count;
 extern uint32_t rf_crypt_mac_prev_ok;
 /* Clear counter of the most recent MAC failure, for spotting ordering. */
 extern uint32_t rf_crypt_last_mac_ctr;
+
+/* ---- same-session re-verify (TODO.md section 4) --------------------------
+ * On each DROP_MAC, immediately re-run the FULL CCM (fresh keystream into a
+ * private scratch, then the tag) under the SAME session/counter/AAD/frame
+ * bytes. Side-effect free: it can never rescue the frame or advance state.
+ *
+ *   mac_same_ok    > 0  => the identical bytes verified on a second attempt:
+ *                          receiver-side transient compute failure.
+ *   mac_same_ok   == 0  across dozens of failures => the receiver rejects
+ *                          deterministically: the fault is upstream (keyboard).
+ *   same_differs   > 0  => the retry's computed tag differed from pass 1's
+ *                          over identical inputs: direct, per-event proof of
+ *                          receiver nondeterminism (independent of the wire). */
+extern uint32_t rf_crypt_mac_same_ok;
+extern uint32_t rf_crypt_same_differs;
+
+/* BB/LLE interrupts that landed while rf_crypt_rx() was inside its CCM
+ * computation (flag set by the executor around the call, counted by the RF
+ * status callback). Correlate with DROP_MAC: the vendor ISR touches AES_STA. */
+extern volatile uint8_t rf_crypt_in_aes;
+extern uint32_t rf_crypt_bb_during_aes;
+
+/* One-shot known-answer test of the cached key/AES engine, run at the first
+ * DROP_MAC after boot: kat_run=1 once attempted; kat_fail: 0 ok, 1 wrong
+ * ciphertext, 2 engine error. A failure means the receiver engine/key cache
+ * is bad, full stop. */
+extern uint8_t rf_crypt_kat_run;
+extern uint8_t rf_crypt_kat_fail;
+
+/* First-DROP_MAC-per-boot frame latch, for the offline ccm_ref.py oracle:
+ * the exact on-air bytes (from ctrl), the live session id, and both computed
+ * tags. Latched once, never cleared at runtime -- one fingerprint per boot. */
+extern volatile uint8_t rf_crypt_fail_latched;
+extern uint8_t  rf_crypt_fail_len;                       /* bytes valid in fail_frame */
+extern uint32_t rf_crypt_fail_session;
+extern uint32_t rf_crypt_fail_counter;
+extern uint8_t  rf_crypt_fail_frame[RF_CRYPT_LEN_BOOT_KBD];
+extern uint8_t  rf_crypt_fail_expect1[RF_CRYPT_TAG_BYTES];
+extern uint8_t  rf_crypt_fail_expect2[RF_CRYPT_TAG_BYTES];
 #endif
 
 #endif /* RF_CRYPT_H */

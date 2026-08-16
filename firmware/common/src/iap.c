@@ -38,6 +38,7 @@
 #define CMD_FAULT       0x93
 #define CMD_CRYPT_DIAG  0x94    /* read-only link-encryption counters */
 #define ACK_CRYPT_DIAG  0x94
+#define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -357,11 +358,49 @@ static void handle_crypt_diag(void)
     resp[51] = rf_crypt_len_max_tag;
 #if RF_CRYPT_DIAG_PREV_SESSION
     put_le32(&resp[52], rf_crypt_session_mint_count);
-    put_le32(&resp[56], rf_crypt_mac_prev_ok);
+    /* v4: offset 56 now carries the same-session re-verify count (TODO.md
+     * section 4). mac_prev_ok answered its question (0/34) and still counts
+     * internally; reporting it here would let a prev-session rescue masquerade
+     * as a same-session one, inverting the experiment's conclusion. */
+    put_le32(&resp[56], rf_crypt_mac_same_ok);
     put_le32(&resp[60], rf_crypt_last_mac_ctr);
 #endif
     USB_SendEP6(resp, sizeof(resp));
 }
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* CMD 0x95: the latched first-failure fingerprint plus the secondary
+ * diagnostic counters that no longer fit in the full 0x94 report. Read-only,
+ * served unarmed (counts and already-public frame bytes; the tag proves
+ * nothing without the key, which never leaves the device). */
+static void handle_crypt_last_fail(void)
+{
+    /* [ack][len] latched(1) fail_len(1) session(4) counter(4) expect1(8)
+     * expect2(8) frame(22) same_differs(4) bb_during_aes(4) kat_run(1)
+     * kat_fail(1) = 57-byte payload. */
+    uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u] = {0};
+    uint8_t i;
+
+    resp[0] = 0x95u;
+    resp[1] = (uint8_t)(sizeof(resp) - 2u);
+    resp[2] = rf_crypt_fail_latched;
+    resp[3] = rf_crypt_fail_len;
+    put_le32(&resp[4], rf_crypt_fail_session);
+    put_le32(&resp[8], rf_crypt_fail_counter);
+    for (i = 0; i < 8u; i++) {
+        resp[12 + i] = rf_crypt_fail_expect1[i];
+        resp[20 + i] = rf_crypt_fail_expect2[i];
+    }
+    for (i = 0; i < 22u; i++) {
+        resp[28 + i] = rf_crypt_fail_frame[i];
+    }
+    put_le32(&resp[50], rf_crypt_same_differs);
+    put_le32(&resp[54], rf_crypt_bb_during_aes);
+    resp[58] = rf_crypt_kat_run;
+    resp[59] = rf_crypt_kat_fail;
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
 #endif
 
 static void handle_version(void)
@@ -470,6 +509,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_FAULT:       handle_fault(); break;
 #if DONGLE_RF_CRYPT
     case CMD_CRYPT_DIAG:  handle_crypt_diag(); break;
+#if RF_CRYPT_DIAG_PREV_SESSION
+    case CMD_CRYPT_LAST_FAIL: handle_crypt_last_fail(); break;
+#endif
 #endif
     default:              break;
     }

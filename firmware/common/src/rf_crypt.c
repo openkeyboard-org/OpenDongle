@@ -29,6 +29,24 @@ static uint8_t  rf_crypt_prev_session_valid;
 uint32_t rf_crypt_session_mint_count;
 uint32_t rf_crypt_mac_prev_ok;
 uint32_t rf_crypt_last_mac_ctr;
+
+uint32_t rf_crypt_mac_same_ok;
+uint32_t rf_crypt_same_differs;
+volatile uint8_t rf_crypt_in_aes;
+uint32_t rf_crypt_bb_during_aes;
+uint8_t  rf_crypt_kat_run;
+uint8_t  rf_crypt_kat_fail;
+volatile uint8_t rf_crypt_fail_latched;
+uint8_t  rf_crypt_fail_len;
+uint32_t rf_crypt_fail_session;
+uint32_t rf_crypt_fail_counter;
+uint8_t  rf_crypt_fail_frame[RF_CRYPT_LEN_BOOT_KBD];
+uint8_t  rf_crypt_fail_expect1[RF_CRYPT_TAG_BYTES];
+uint8_t  rf_crypt_fail_expect2[RF_CRYPT_TAG_BYTES];
+
+/* The KAT must restore the link key afterwards, and hal_aes never lets its
+ * cached key back out -- so keep a bench-only copy from install_key. */
+static uint8_t rf_crypt_key_copy[RF_CRYPT_KEY_BYTES];
 #endif
 
 /* ---------------------------------------------------------------- helpers */
@@ -170,6 +188,14 @@ void rf_crypt_init(void)
 void rf_crypt_install_key(const uint8_t key[RF_CRYPT_KEY_BYTES])
 {
     hal_aes_set_key(key);
+#if RF_CRYPT_DIAG_PREV_SESSION
+    {
+        uint8_t i;
+        for (i = 0; i < RF_CRYPT_KEY_BYTES; i++) {
+            rf_crypt_key_copy[i] = key[i];
+        }
+    }
+#endif
     rf_crypt_key_ready = 1u;
     rf_crypt_session_ready = 0u;
     rf_crypt_last_ctr = 0u;
@@ -198,6 +224,14 @@ void rf_crypt_clear(void)
     /* Overwrite the backend's cached key/schedule so the real key does not
      * linger in RAM after a bond is torn down. */
     hal_aes_set_key(zero_key);
+#if RF_CRYPT_DIAG_PREV_SESSION
+    {
+        uint8_t i;
+        for (i = 0; i < RF_CRYPT_KEY_BYTES; i++) {
+            rf_crypt_key_copy[i] = 0u;
+        }
+    }
+#endif
     rf_crypt_key_ready = 0u;
     rf_crypt_session_ready = 0u;
     rf_crypt_session_id = 0u;
@@ -285,6 +319,86 @@ rf_crypt_status_t rf_crypt_rx(const uint8_t *frame, uint8_t len,
     if (diff != 0u) {
 #if RF_CRYPT_DIAG_PREV_SESSION
         rf_crypt_last_mac_ctr = counter;
+
+        /* Same-session re-verify (TODO.md section 4). Run the FULL pipeline
+         * again -- fresh keystream into a private scratch, XOR with the still-
+         * valid FIFO bytes, then the tag -- under the UNTOUCHED current-session
+         * nonce. Recomputing only the tag over out_body would be blind to a
+         * corrupted pass-1 keystream block. Must run BEFORE the prev-session
+         * retry below, which overwrites nonce/keystream/expect. Side-effect
+         * free: no state advances, the frame is still dropped. */
+        {
+            uint8_t same_body[RF_CRYPT_MAX_BODY];
+            uint8_t same_ks[16];
+            uint8_t expect2[RF_CRYPT_TAG_BYTES];
+
+            if (ctr_block(nonce, 1u, same_ks) == HAL_AES_OK) {
+                for (i = 0; i < n; i++) {
+                    same_body[i] = (uint8_t)(ct[i] ^ same_ks[i]);
+                }
+                if (ccm_tag(nonce, aad, 2u, same_body, n, expect2) == HAL_AES_OK) {
+                    uint8_t diff2 = 0u;
+                    uint8_t ddiff = 0u;
+                    for (i = 0; i < RF_CRYPT_TAG_BYTES; i++) {
+                        diff2 |= (uint8_t)(expect2[i] ^ tag8[i]);
+                        ddiff |= (uint8_t)(expect2[i] ^ expect[i]);
+                    }
+                    if (diff2 == 0u) {
+                        rf_crypt_mac_same_ok++;      /* receiver transient */
+                    }
+                    if (ddiff != 0u) {
+                        rf_crypt_same_differs++;     /* nondeterministic compute */
+                    }
+                    /* First failure per boot: latch the exact bytes + both
+                     * computed tags for the offline ccm_ref.py oracle. */
+                    if (!rf_crypt_fail_latched) {
+                        uint8_t flen = (uint8_t)(6u + n + RF_CRYPT_TAG_BYTES);
+                        rf_crypt_fail_len = flen;
+                        rf_crypt_fail_session = rf_crypt_session_id;
+                        rf_crypt_fail_counter = counter;
+                        for (i = 0; i < flen; i++) {
+                            rf_crypt_fail_frame[i] = frame[i];
+                        }
+                        for (i = 0; i < RF_CRYPT_TAG_BYTES; i++) {
+                            rf_crypt_fail_expect1[i] = expect[i];
+                            rf_crypt_fail_expect2[i] = expect2[i];
+                        }
+                        rf_crypt_fail_latched = 1u;
+                    }
+                }
+            }
+
+            /* One-shot KAT at the first DROP_MAC: FIPS-197 C.1 through the
+             * live engine + key-cache path, link key restored afterwards.
+             * A wrong answer here is a receiver engine/key fault, full stop. */
+            if (!rf_crypt_kat_run) {
+                static const uint8_t kat_key[16] = {
+                    0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,
+                    0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f };
+                static const uint8_t kat_pt[16] = {
+                    0x00,0x11,0x22,0x33,0x44,0x55,0x66,0x77,
+                    0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff };
+                static const uint8_t kat_ct[16] = {
+                    0x69,0xc4,0xe0,0xd8,0x6a,0x7b,0x04,0x30,
+                    0xd8,0xcd,0xb7,0x80,0x70,0xb4,0xc5,0x5a };
+                uint8_t kat_out[16];
+
+                rf_crypt_kat_run = 1u;
+                hal_aes_set_key(kat_key);
+                if (hal_aes_encrypt_block(kat_pt, kat_out) == HAL_AES_OK) {
+                    for (i = 0; i < 16u; i++) {
+                        if (kat_out[i] != kat_ct[i]) {
+                            rf_crypt_kat_fail = 1u;
+                            break;
+                        }
+                    }
+                } else {
+                    rf_crypt_kat_fail = 2u;
+                }
+                hal_aes_set_key(rf_crypt_key_copy);
+            }
+        }
+
         if (rf_crypt_prev_session_valid) {
             /* Re-run the WHOLE CCM under the displaced session id. Recomputing
              * only the tag over the plaintext recovered above would be wrong:
