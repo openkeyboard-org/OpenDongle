@@ -3646,6 +3646,25 @@ static void rf_persist_bond_task(void)
         return;
     }
 
+    /* N08 defense-in-depth: never durably persist a tuple the next boot's
+     * validator would reject (the accept-site guards are the primary fix; this
+     * catches anything that slips a future path). Producer invariant worth
+     * knowing: interval/timeout here always come from OUR pair-ACK template
+     * (rf_pair_ack15, compiled 28/600) — the air-decoded broadcast values are
+     * logged but never enter the durable tuple, so this check can only fire
+     * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
+     * session usable this boot; the record simply never becomes durable.
+     *
+     * ABOVE the CH570 radio teardown below, deliberately (TODO.md; 2026-08-16
+     * review): this early return used to sit after it, so the latent
+     * cannot-fire-today failure would have left the radio shut and every
+     * timer slot cancelled with nothing to restore them -- deaf until replug,
+     * directly contradicting the "keeps the session usable" promise above.
+     * An invalid record must return before ANY radio state changes. */
+    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
+        return;
+    }
+
 #if !RF_TASK_EXECUTOR_TMOS
     /* CX4 (codex, hardware-forced CH570 delta), root-cause-revised 2026-07-07.
      * This runs ONCE per session — the first promote of a fresh pair, before
@@ -3664,18 +3683,6 @@ static void rf_persist_bond_task(void)
         hal_rf_shut();
     }
 #endif
-    /* N08 defense-in-depth: never durably persist a tuple the next boot's
-     * validator would reject (the accept-site guards are the primary fix; this
-     * catches anything that slips a future path). Producer invariant worth
-     * knowing: interval/timeout here always come from OUR pair-ACK template
-     * (rf_pair_ack15, compiled 28/600) — the air-decoded broadcast values are
-     * logged but never enter the durable tuple, so this check can only fire
-     * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
-     * session usable this boot; the record simply never becomes durable. */
-    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
-        
-        return;
-    }
     int save_rc = bond_save(&want);
 #if !RF_TASK_EXECUTOR_TMOS
     if (was_connected) {

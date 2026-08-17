@@ -83,65 +83,128 @@ static uint8_t rf_started;
  * EP1 arms measured 16/16). Direct-from-IRQ arming was the legacy v0.83
  * shape but has not been re-validated on the unified body, and USB_Send*
  * from the ~875 µs radio IRQ would also stretch the RF deadline — so the
- * deferral is both the validated and the conservative choice. Single-slot
- * newest-wins is correct for HID: last-state-wins is the USB interrupt-IN
- * model anyway (the old direct arm overwrote the EP buffer just the same),
- * and the main loop passes every few µs — far faster than the RF poll
- * cadence that spaces reports. */
-static volatile uint8_t hid_fwd_pending;
-static uint8_t hid_fwd_tag;
-static uint8_t hid_fwd_len;
-static uint8_t hid_fwd_body[8];
+ * deferral is both the validated and the conservative choice.
+ *
+ * PER-TYPE slots, not one shared slot (TODO-batch fix; 2026-08-16 review,
+ * finding 6). The old single newest-wins slot let ANY second report clobber
+ * an unpumped first one across types — and the pump can genuinely stall for
+ * multiple RF polls behind it in the main loop (IAP_Service/USB_PollEP6
+ * flash erase/program mask every IRQ for ms, and remote-wake resume holds a
+ * multi-ms window), so "the main loop passes every few µs" is the common
+ * case, not the guarantee. A mouse delta could then eat a keyboard RELEASE:
+ * a stuck key. With one slot per report type:
+ *   keyboard  newest-wins IS correct — each report is the full key state;
+ *   consumer  newest-wins likewise (full usage state);
+ *   mouse     newest-wins is WRONG for the relative fields, so an overwrite
+ *             while pending SUMS dx/dy/wheel/pan (saturating ±127) and takes
+ *             the NEWEST button byte — buttons are absolute state, and ORing
+ *             them would turn a press+release inside one stall into a stuck
+ *             button. A full click inside one stall is still lost, exactly
+ *             as the USB interrupt-IN model already loses it.
+ * CH592 needs none of this: its TMOS-deferred callback sends directly. */
+#define HID_FWD_KBD      0u
+#define HID_FWD_CONSUMER 1u
+#define HID_FWD_MOUSE    2u
+static volatile uint8_t hid_fwd_pending[3];
+static uint8_t hid_fwd_kbd_len;
+static uint8_t hid_fwd_kbd[8];
+static uint8_t hid_fwd_consumer[2];
+static uint8_t hid_fwd_mouse[5];
+
+/* IRQ-side helper for the mouse accumulate: sum two relative deltas with
+ * symmetric saturation (int8 arithmetic; -128 is avoided so a negation can
+ * never overflow downstream). */
+static int8_t hid_fwd_sat8(int16_t v)
+{
+    if (v > 127)  return 127;
+    if (v < -127) return -127;
+    return (int8_t)v;
+}
 
 static void usb_hid_callback(uint8_t tag, const uint8_t *data, uint8_t len)
 {
-    uint8_t n = (len < 8u) ? len : 8u;
-
-    for (uint8_t i = 0u; i < n; i++) {
-        hid_fwd_body[i] = data[i];
+    if (tag == RF_PROTO_HID_TAG) {
+        uint8_t n = (len < 8u) ? len : 8u;
+        for (uint8_t i = 0u; i < n; i++) {
+            hid_fwd_kbd[i] = data[i];
+        }
+        hid_fwd_kbd_len = n;
+        hid_fwd_pending[HID_FWD_KBD] = 1u;   /* written last; the pump
+                                              * snapshots under mask */
+    } else if (tag == RF_PROTO_HID_TAG_CONSUMER && len >= 2u) {
+        hid_fwd_consumer[0] = data[0];
+        hid_fwd_consumer[1] = data[1];
+        hid_fwd_pending[HID_FWD_CONSUMER] = 1u;
+    } else if (tag == RF_PROTO_HID_TAG_MOUSE && len >= 5u) {
+        if (hid_fwd_pending[HID_FWD_MOUSE]) {
+            /* Coalesce: deltas add, button state is the newest report's. */
+            for (uint8_t i = 1u; i < 5u; i++) {
+                hid_fwd_mouse[i] = (uint8_t)hid_fwd_sat8(
+                    (int16_t)(int8_t)hid_fwd_mouse[i] + (int16_t)(int8_t)data[i]);
+            }
+            hid_fwd_mouse[0] = data[0];
+        } else {
+            for (uint8_t i = 0u; i < 5u; i++) {
+                hid_fwd_mouse[i] = data[i];
+            }
+        }
+        hid_fwd_pending[HID_FWD_MOUSE] = 1u;
     }
-    hid_fwd_tag = tag;
-    hid_fwd_len = n;
-    hid_fwd_pending = 1u;   /* written last; the pump snapshots under mask */
 }
 
-/* Main-loop half: route the latched report to USB by on-air tag (parity with
+/* Main-loop half: route the latched reports to USB by on-air tag (parity with
  * CH592): 0xA1 boot keyboard -> EP1 (8-byte, zero-padded/clamped),
  * 0xA3 consumer/media -> EP3 composite (report id 1 + usage LE16),
- * 0xA8 mouse -> EP2 (5-byte verbatim). The USB_Send* helpers own endpoint
- * readiness (configured/suspended/remote-wake stash). */
+ * 0xA8 mouse -> EP2 (5-byte). Drains EVERY pending slot each pass — keyboard
+ * first (a release must never queue behind pointer traffic). The USB_Send*
+ * helpers own endpoint readiness (configured/suspended/remote-wake stash). */
 static void usb_hid_forward_pump(void)
 {
-    uint8_t tag, len;
-    uint8_t body[8];
-
-    if (!hid_fwd_pending) {
+    if (!(hid_fwd_pending[HID_FWD_KBD] | hid_fwd_pending[HID_FWD_CONSUMER]
+          | hid_fwd_pending[HID_FWD_MOUSE])) {
         return;
-    }
-    {
-        uint32_t irq = __risc_v_disable_irq();
-        tag = hid_fwd_tag;
-        len = hid_fwd_len;
-        for (uint8_t i = 0u; i < 8u; i++) {
-            body[i] = hid_fwd_body[i];
-        }
-        hid_fwd_pending = 0u;
-        (void)__risc_v_enable_irq(irq);
     }
     if (!USB_IsConfigured()) {
+        /* Drop-and-clear, matching the old shape: reports latched before
+         * configuration have nowhere to go, and holding them pending would
+         * replay stale input at SET_CONFIGURATION time. */
+        uint32_t irq = __risc_v_disable_irq();
+        hid_fwd_pending[HID_FWD_KBD] = 0u;
+        hid_fwd_pending[HID_FWD_CONSUMER] = 0u;
+        hid_fwd_pending[HID_FWD_MOUSE] = 0u;
+        (void)__risc_v_enable_irq(irq);
         return;
     }
-    if (tag == RF_PROTO_HID_TAG) {
+    if (hid_fwd_pending[HID_FWD_KBD]) {
         uint8_t report[8] = {0};
-        for (uint8_t i = 0u; i < len; i++) {
-            report[i] = body[i];
+        uint8_t n;
+        uint32_t irq = __risc_v_disable_irq();
+        n = hid_fwd_kbd_len;
+        for (uint8_t i = 0u; i < n && i < 8u; i++) {
+            report[i] = hid_fwd_kbd[i];
         }
+        hid_fwd_pending[HID_FWD_KBD] = 0u;
+        (void)__risc_v_enable_irq(irq);
         USB_SendKeyboard(report);
-    } else if (tag == RF_PROTO_HID_TAG_CONSUMER && len >= 2u) {
-        uint8_t r[3] = { RF_PROTO_USB_REPORT_ID_CONSUMER, body[0], body[1] };
+    }
+    if (hid_fwd_pending[HID_FWD_CONSUMER]) {
+        uint8_t r[3] = { RF_PROTO_USB_REPORT_ID_CONSUMER, 0u, 0u };
+        uint32_t irq = __risc_v_disable_irq();
+        r[1] = hid_fwd_consumer[0];
+        r[2] = hid_fwd_consumer[1];
+        hid_fwd_pending[HID_FWD_CONSUMER] = 0u;
+        (void)__risc_v_enable_irq(irq);
         USB_SendComposite(r, sizeof(r));
-    } else if (tag == RF_PROTO_HID_TAG_MOUSE && len >= 5u) {
-        USB_SendMouse(body);
+    }
+    if (hid_fwd_pending[HID_FWD_MOUSE]) {
+        uint8_t m[5];
+        uint32_t irq = __risc_v_disable_irq();
+        for (uint8_t i = 0u; i < 5u; i++) {
+            m[i] = hid_fwd_mouse[i];
+        }
+        hid_fwd_pending[HID_FWD_MOUSE] = 0u;
+        (void)__risc_v_enable_irq(irq);
+        USB_SendMouse(m);
     }
 }
 
@@ -320,6 +383,17 @@ static void st_rearm(void)
     d = (int32_t)(best_dl - now);
     if (d < (int32_t)ST_MIN_DELTA) {
         d = (int32_t)ST_MIN_DELTA;  /* due/past -> fire ASAP, never CNT_END=0 */
+    }
+    if ((uint32_t)d > ST_MAX_DELTA) {
+        /* R32_TMR_CNT_END keeps only 26 bits; a wider write is silently
+         * truncated (sched.h). Arm the register's maximum instead: the slot's
+         * ABSOLUTE deadline is untouched, so this expiry advances the epoch
+         * by exactly what was programmed (st_advance), st_dispatch finds the
+         * deadline still in the future and fires nothing, and the ISR's
+         * closing st_rearm arms the remainder -- repeating until the deadline
+         * is genuinely due. st_armed_delta == the programmed value is the
+         * invariant st_now()'s pending-expiry read depends on. */
+        d = (int32_t)ST_MAX_DELTA;
     }
     st_epoch = now;                 /* re-base; ALL_CLEAR below resets count */
     st_armed_delta = (uint32_t)d;
