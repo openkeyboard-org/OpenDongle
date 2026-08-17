@@ -142,6 +142,12 @@ ifdef PAIR_MIN_RSSI
 CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
 
+# One-off experiment/measurement hook (e.g. the stack-watermark build:
+# EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1). Consumed before the build-id
+# computation, so an instrumented image gets its own identity and can never
+# pass for the standard bytes. Same pattern as validation/Makefile.
+CFLAGS += $(EXTRA_CFLAGS)
+
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
@@ -407,19 +413,21 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(CONFIG_STAMP): Makefile | $(BUILD)
+$(CONFIG_STAMP): FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(CONFIG_TEXT)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
 	 trap - 0 1 2 15
 
-# Makefile is a prerequisite because CFLAGS and LDFLAGS are hashed into the
-# build id but are DEFINED here. Without it, a flags-only edit moved the id
-# while this stamp stayed up to date, so nothing recompiled: the objects, the
-# ELF, the ODG2 record and the factory image all kept the old flags and the
-# old id baked in, while the build system advertised the new one. The content
-# guard below still blocks propagation when the id has not actually moved.
-$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile | $(BUILD)
+# FORCE, not Makefile-mtime: CFLAGS and LDFLAGS are hashed into the build id
+# but a command-line override (EXTRA_CFLAGS / EXTRA_LDFLAGS, e.g. the
+# stack-watermark build) changes them without touching any file, so an
+# mtime-based stamp stayed up to date while the id moved -- nothing
+# recompiled, and the image kept the old flags and old id baked in while the
+# build system advertised the new one. The recipe now RUNS every invocation
+# and the content guard blocks propagation when the id has not actually
+# moved. (Same mechanism, same reason, as validation/Makefile.)
+$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(BUILD_ID)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \

@@ -10,6 +10,7 @@
 #include "dongle_chip.h"        /* __risc_v_disable_irq (same intrinsic as usb_device.c) */
 #include "dongle_platform.h"
 #include "dongle_target.h"      /* HAL_TICKS_PER_US (IAP_Service deadlines) */
+#include "stack_watermark.h"    /* measurement builds only (0x96) */
 #include "hal_timing.h"         /* hal_now (IAP_Service deadlines) */
 #include "dongle_image_id.h"
 #include "openboot_app.h"       /* openboot_request_update (noreturn) */
@@ -39,6 +40,8 @@
 #define CMD_CRYPT_DIAG  0x94    /* read-only link-encryption counters */
 #define ACK_CRYPT_DIAG  0x94
 #define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
+#define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
+                                  * (DONGLE_STACK_WATERMARK) */
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -548,6 +551,24 @@ static void handle_fault(void)
     USB_SendEP6(resp, sizeof(resp));
 }
 
+#if DONGLE_STACK_WATERMARK
+/* CMD 0x96: the stack low-water mark since boot (stack_watermark.h). Payload:
+ * low_water(4) end(4) eusrstack(4), LE -- the host computes depth
+ * (eusrstack - low_water) and slack (low_water - end). Read-only, unarmed
+ * (addresses only, and never in a product build). */
+static void handle_stack_watermark(void)
+{
+    uint8_t resp[2u + 12u] = {0};
+
+    resp[0] = CMD_STACK_WATERMARK;
+    resp[1] = 12u;
+    put_le32(&resp[2], stack_watermark_low());
+    put_le32(&resp[6], (uint32_t)(uintptr_t)&_end);
+    put_le32(&resp[10], (uint32_t)(uintptr_t)&_eusrstack);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
 void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
 {
     /* Once a reboot is latched, every further command is dropped without a
@@ -596,6 +617,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
 #if RF_CRYPT_DIAG_PREV_SESSION
     case CMD_CRYPT_LAST_FAIL: handle_crypt_last_fail(); break;
 #endif
+#endif
+#if DONGLE_STACK_WATERMARK
+    case CMD_STACK_WATERMARK: handle_stack_watermark(); break;
 #endif
     default:              break;
     }

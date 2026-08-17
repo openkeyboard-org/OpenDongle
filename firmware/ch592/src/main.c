@@ -42,6 +42,7 @@
 #include "dongle_platform.h"
 #include "usb_device.h"
 #include "iap.h"
+#include "stack_watermark.h"
 #include "uart_diag.h"
 
 /*
@@ -143,6 +144,13 @@ int main(void)
 {
     /* Capture reset status before clock/BLE bring-up can perturb it. */
     uint8_t reset_status = R8_RESET_STATUS;
+
+#if DONGLE_STACK_WATERMARK
+    /* Measurement builds: paint the free RAM before the BLE arena and stack
+     * see real work (no entropy-capture constraint on this chip -- review
+     * finding 18 wants the CH592 depth datum too). */
+    stack_watermark_paint();
+#endif
 
     dongle_fault_boot(reset_status);
     SetSysClock(CLK_SOURCE_PLL_60MHz);
