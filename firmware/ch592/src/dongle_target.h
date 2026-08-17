@@ -61,6 +61,15 @@
  * until a key is provisioned, so it does not change plaintext behaviour. */
 #define DONGLE_RF_CRYPT 1
 
+/* PRODUCT-path stale-output-abort hardening (rf_crypt.h has the full story):
+ * the CH592 AES engine shares the BLE baseband's register cluster and
+ * silently returns the previous block's output when a BLEB interrupt aborts
+ * a block -- the mechanism behind the 2026-08 12.3% CCM MAC-failure
+ * campaign. Both profiles carry it: the RX verify and the announce seal run
+ * in TMOS task context, squarely preemptible by the radio. */
+#define RF_CRYPT_AES_DOUBLE 1
+#define RF_CRYPT_BOOT_KAT   1
+
 /* Build profile, injected by the Makefile: PROFILE=bench passes
  * -DDONGLE_BENCH_PROFILE=1; the product profile leaves it unset. Everything
  * bench-only in this target lives under the #if below, so a product build

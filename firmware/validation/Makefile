@@ -161,6 +161,13 @@ CFLAGS += -DDONGLE_VALIDATE_SYSTICK_64=$(SYSTICK_64)
 ifdef AES_IMPL
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
 endif
+ifdef USE_HW_AES
+# Hardware-engine arms run rf_crypt with the stale-output-abort hardening ON,
+# because that is the shape the CH592 product ships (rf_crypt.h,
+# RF_CRYPT_AES_DOUBLE). Output-identical to the raw path -- only the block
+# count doubles -- so cross-arm CCM comparison is unaffected.
+CFLAGS += -DRF_CRYPT_AES_DOUBLE=1
+endif
 CFLAGS += $(INCLUDES)
 # One-off experiment hook, e.g. make ARM=... EXTRA_CFLAGS=-DFOO. Above the
 # build-id computation on purpose, so an experiment gets its own identity and

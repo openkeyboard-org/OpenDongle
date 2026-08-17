@@ -356,6 +356,14 @@ static void handle_bond_read(void)
  * session material. */
 extern uint32_t rf_crypt_drop_reason[6];
 extern uint32_t rf_crypt_ok_count;
+#if RF_CRYPT_AES_DOUBLE
+extern uint32_t rf_crypt_aes_redo;        /* rf_crypt.c: double-compute catches */
+extern uint32_t rf_crypt_announce_retry;  /* rf_task.c: announce-seal rebuilds  */
+#endif
+#if RF_CRYPT_BOOT_KAT
+extern uint8_t  rf_crypt_boot_kat_run;
+extern uint8_t  rf_crypt_boot_kat_fail;
+#endif
 #if RF_CRYPT_DIAG_PREV_SESSION
 extern uint32_t rf_crypt_conn_rx;
 extern uint32_t rf_crypt_enc_shape;
@@ -400,19 +408,30 @@ static void handle_crypt_diag(void)
     put_le32(&resp[60], rf_crypt_last_mac_ctr);
     USB_SendEP6(resp, sizeof(resp));
 #else
-    /* Product layout: the health signal only -- verified frames and the
-     * per-reason drops. The pre-verify sink forensics are bench-profile
-     * scaffolding (rf_task.c); the two layouts are told apart by their
-     * length and by the status profile byte. Additive appends only. */
-    uint8_t resp[2u + 4u + 24u] = {0};
+    /* Product layout: the health signal -- verified frames, the per-reason
+     * drops, and the stale-abort hardening's own telemetry: ok(4) reason[6](24)
+     * aes_redo(4) announce_retry(4) boot_kat_run(1) boot_kat_fail(1) = 38 B
+     * payload. The hardening fields read zero on a chip without the hardware
+     * engine (CH570); the pre-verify sink forensics are bench-profile
+     * scaffolding (rf_task.c). The two layouts are told apart by their length
+     * and by the status profile byte. Additive appends only. */
+    uint8_t resp[2u + 4u + 24u + 4u + 4u + 1u + 1u] = {0};
     uint8_t i;
 
     resp[0] = ACK_CRYPT_DIAG;
-    resp[1] = 4u + 24u;
+    resp[1] = 4u + 24u + 4u + 4u + 1u + 1u;
     put_le32(&resp[2], rf_crypt_ok_count);
     for (i = 0; i < 6u; i++) {
         put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
     }
+#if RF_CRYPT_AES_DOUBLE
+    put_le32(&resp[30], rf_crypt_aes_redo);
+    put_le32(&resp[34], rf_crypt_announce_retry);
+#endif
+#if RF_CRYPT_BOOT_KAT
+    resp[38] = rf_crypt_boot_kat_run;
+    resp[39] = rf_crypt_boot_kat_fail;
+#endif
     USB_SendEP6(resp, sizeof(resp));
 #endif
 }

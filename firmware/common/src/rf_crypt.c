@@ -59,6 +59,56 @@ static void xor16(uint8_t *acc, const uint8_t *v)
     }
 }
 
+#if RF_CRYPT_AES_DOUBLE
+/* Double-compute mismatches caught -- each is one stale-abort collision the
+ * hardening turned from a wrong result into a retry. Product telemetry
+ * (CMD_CRYPT_DIAG); the keyboard-side twin (seal_redo) is what proved the
+ * mechanism, catching 742/2273 live collisions during the 2026-08 campaign. */
+uint32_t rf_crypt_aes_redo;
+#endif
+
+/* Every rf_crypt block goes through here. With RF_CRYPT_AES_DOUBLE (CH592):
+ * compute twice from a snapshot of the input and compare -- an aborted block
+ * returns the PREVIOUS block's output latch, which an honest recompute
+ * cannot reproduce, so a mismatch means at least one pass was aborted and
+ * the pair is retried. Exhaustion (three straight collisions, or a real
+ * engine timeout) reports as an engine fault; the callers' fail-closed
+ * handling does the rest. Blind spot: both passes aborting on the SAME
+ * block reads as agreement -- probability ~p^2 per block, and the CCM tag
+ * still fails closed, so the residue costs a dropped frame, never
+ * integrity. The snapshot is load-bearing: two call sites below run
+ * in-place (in == out), where a naive second pass would encrypt the first
+ * pass's output. Without the macro this is a plain forward the compiler
+ * inlines away -- the CH570 software backends pay nothing. */
+static hal_aes_status_t rf_crypt_aes_block(const uint8_t *in, uint8_t *out)
+{
+#if RF_CRYPT_AES_DOUBLE
+    uint8_t inb[16], chk[16];
+    uint8_t attempt, i, diff;
+
+    for (i = 0; i < 16u; i++) {
+        inb[i] = in[i];
+    }
+    for (attempt = 0u; attempt < 3u; attempt++) {
+        if (hal_aes_encrypt_block(inb, out) != HAL_AES_OK
+            || hal_aes_encrypt_block(inb, chk) != HAL_AES_OK) {
+            return HAL_AES_ENGINE_TIMEOUT;
+        }
+        diff = 0u;
+        for (i = 0; i < 16u; i++) {
+            diff |= (uint8_t)(out[i] ^ chk[i]);
+        }
+        if (diff == 0u) {
+            return HAL_AES_OK;
+        }
+        rf_crypt_aes_redo++;
+    }
+    return HAL_AES_ENGINE_TIMEOUT;
+#else
+    return hal_aes_encrypt_block(in, out);
+#endif
+}
+
 /* CCM flags byte for the CBC-MAC B0 block: Adata | ((M-2)/2)<<3 | (L-1).
  * M=8, L=2 -> 0x59 with AAD present. */
 static uint8_t ccm_b0_flags(uint8_t have_aad)
@@ -94,7 +144,7 @@ static hal_aes_status_t ctr_block(const uint8_t nonce[13], uint16_t i, uint8_t o
     }
     a[14] = (uint8_t)(i >> 8);
     a[15] = (uint8_t)i;
-    return hal_aes_encrypt_block(a, out);
+    return rf_crypt_aes_block(a, out);
 }
 
 /* CBC-MAC over B0 || format(AAD) || pad(msg). AAD is <= 14 bytes (one block)
@@ -116,7 +166,7 @@ static hal_aes_status_t ccm_cbc_mac(const uint8_t nonce[13],
     }
     blk[14] = (uint8_t)(msg_len >> 8);
     blk[15] = (uint8_t)msg_len;
-    if (hal_aes_encrypt_block(blk, x) != HAL_AES_OK) {
+    if (rf_crypt_aes_block(blk, x) != HAL_AES_OK) {
         return HAL_AES_ENGINE_TIMEOUT;
     }
 
@@ -131,7 +181,7 @@ static hal_aes_status_t ccm_cbc_mac(const uint8_t nonce[13],
             blk[2 + i] = aad[i];
         }
         xor16(x, blk);
-        if (hal_aes_encrypt_block(x, x) != HAL_AES_OK) {
+        if (rf_crypt_aes_block(x, x) != HAL_AES_OK) {
             return HAL_AES_ENGINE_TIMEOUT;
         }
     }
@@ -145,7 +195,7 @@ static hal_aes_status_t ccm_cbc_mac(const uint8_t nonce[13],
             blk[i] = msg[i];
         }
         xor16(x, blk);
-        if (hal_aes_encrypt_block(x, x) != HAL_AES_OK) {
+        if (rf_crypt_aes_block(x, x) != HAL_AES_OK) {
             return HAL_AES_ENGINE_TIMEOUT;
         }
     }
@@ -180,9 +230,58 @@ static hal_aes_status_t ccm_tag(const uint8_t nonce[13],
 
 /* ------------------------------------------------------------------- API */
 
+#if RF_CRYPT_BOOT_KAT
+/* Product telemetry (CMD_CRYPT_DIAG): the boot self-test ran / it failed.
+ * Distinct from the bench profile's on-failure KAT (rf_crypt_kat_*), which
+ * fires only after a DROP_MAC and deliberately drives the engine raw. */
+uint8_t rf_crypt_boot_kat_run;
+uint8_t rf_crypt_boot_kat_fail;
+#endif
+
 void rf_crypt_init(void)
 {
     hal_aes_init();
+#if RF_CRYPT_BOOT_KAT
+    /* FIPS-197 C.1 through the LIVE engine (and through the double-compute
+     * wrapper, so the shipped path is what gets tested), before any bond is
+     * loaded or key trusted. RF_TaskInit orders rf_crypt_init() ahead of
+     * rf_load_persistent_bond(), and every later path installs its own key
+     * or clears -- so no key needs saving or restoring here; ending on a
+     * zero-key set is hygiene, not correctness. Telemetry only on failure:
+     * an encryption-active bond already fails closed on a dead engine, and
+     * a plaintext bond must not be broken by a self-test. */
+    {
+        static const uint8_t kat_key[16] = {
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F
+        };
+        static const uint8_t kat_pt[16] = {
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF
+        };
+        static const uint8_t kat_ct[16] = {
+            0x69, 0xC4, 0xE0, 0xD8, 0x6A, 0x7B, 0x04, 0x30,
+            0xD8, 0xCD, 0xB7, 0x80, 0x70, 0xB4, 0xC5, 0x5A
+        };
+        static const uint8_t kat_zero[16] = { 0 };
+        uint8_t out[16];
+        uint8_t i, diff = 0u;
+
+        hal_aes_set_key(kat_key);
+        rf_crypt_boot_kat_run = 1u;
+        if (rf_crypt_aes_block(kat_pt, out) != HAL_AES_OK) {
+            rf_crypt_boot_kat_fail = 1u;
+        } else {
+            for (i = 0; i < 16u; i++) {
+                diff |= (uint8_t)(out[i] ^ kat_ct[i]);
+            }
+            if (diff != 0u) {
+                rf_crypt_boot_kat_fail = 1u;
+            }
+        }
+        hal_aes_set_key(kat_zero);
+    }
+#endif
 }
 
 void rf_crypt_install_key(const uint8_t key[RF_CRYPT_KEY_BYTES])

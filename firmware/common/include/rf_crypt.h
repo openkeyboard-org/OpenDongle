@@ -161,6 +161,37 @@ rf_crypt_status_t rf_crypt_build_session_frame(uint8_t ctrl, uint8_t *out);
 #define DONGLE_CRYPT_BENCH_FORCE_KEY 0
 #endif
 
+/* Stale-output-abort hardening for a shared hardware AES engine, PRODUCT
+ * path (CH592 sets both; the CH570 software backends cannot abort and pay
+ * nothing). The CH592 engine lives on the BLE baseband's register cluster:
+ * when a BLEB interrupt preempts a block operation the engine silently
+ * ABORTS -- the busy bit reads back complete while the output latch still
+ * holds the PREVIOUS block's result. On the keyboard's seal path that was
+ * the 12.3% MAC-failure campaign (2026-08); the fix that closed it to
+ * 0/20k+ there is the same one gated here: compute every block twice and
+ * compare, because a stale abort cannot survive an honest recompute. Do NOT
+ * reach for mstatus.MIE masking instead -- tried on both ends, hung both
+ * (reverted in e89cd44).
+ *
+ *   RF_CRYPT_AES_DOUBLE  every rf_crypt block runs twice + compare, one
+ *                        bounded retry loop, engine-fault on exhaustion;
+ *                        rf_crypt_aes_redo counts collisions caught. Also
+ *                        arms the announce-seal rebuild retry in rf_task.c
+ *                        (a wrongly-tagged announce is otherwise a silent
+ *                        dead epoch: it is sent only 8 times and never
+ *                        verified locally).
+ *   RF_CRYPT_BOOT_KAT    one FIPS-197 C.1 vector through the live engine in
+ *                        rf_crypt_init(), before any key is trusted;
+ *                        telemetry only (rf_crypt_boot_kat_run/_fail over
+ *                        CMD_CRYPT_DIAG) -- an encryption-active bond
+ *                        already fails closed on a dead engine. */
+#ifndef RF_CRYPT_AES_DOUBLE
+#define RF_CRYPT_AES_DOUBLE 0
+#endif
+#ifndef RF_CRYPT_BOOT_KAT
+#define RF_CRYPT_BOOT_KAT 0
+#endif
+
 #if RF_CRYPT_DIAG_PREV_SESSION
 /* Mints seen. Should be 1 for a single healthy connected epoch; a value that
  * climbs during one run means repeated reconnect/re-promote cycles, which would

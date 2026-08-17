@@ -1447,6 +1447,18 @@ static volatile uint8_t rf_crypt_fifo_tail;   /* IRQ producer */
 static uint8_t          rf_crypt_session_tx[RF_CRYPT_LEN_SESSION];
 static volatile uint8_t rf_crypt_announce_count;
 
+#if RF_CRYPT_AES_DOUBLE
+/* Announce-seal engine-fault retries. A wrongly-built or unbuildable session
+ * announce is a SILENT dead epoch: the announce is fire-and-forget (8 polls,
+ * never verified locally), so the keyboard keeps sealing under a session the
+ * dongle cannot verify until the next mint. The seal is 3 AES blocks in task
+ * context -- the stale-abort window -- so on a build fault the mint is
+ * re-posted (cheap: no state has been announced) up to this budget. */
+#define RF_CRYPT_ANNOUNCE_RETRIES 3u
+uint32_t rf_crypt_announce_retry;   /* product telemetry (CMD_CRYPT_DIAG) */
+static uint8_t rf_crypt_announce_retry_budget = RF_CRYPT_ANNOUNCE_RETRIES;
+#endif
+
 /* Authenticated-HID silence guard. The sink counts EVERY connected RX on an
  * active encrypted bond (garbage, plaintext-downgrade, polls, all of it); the
  * task resets it whenever a frame verifies. rf_send_poll, once the count crosses
@@ -2699,6 +2711,20 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             if (rf_crypt_build_session_frame(rf_poll_buf[0], rf_crypt_session_tx)
                     == RF_CRYPT_OK) {
                 rf_crypt_announce_count = RF_CRYPT_ANNOUNCE_POLLS;
+#if RF_CRYPT_AES_DOUBLE
+                rf_crypt_announce_retry_budget = RF_CRYPT_ANNOUNCE_RETRIES;
+            } else if (rf_crypt_announce_retry_budget != 0u) {
+                /* Engine fault inside the 3-block seal (stale-abort exhaustion
+                 * or a wedge). Nothing was announced, so re-minting is free --
+                 * and going quiet instead means a guaranteed dead epoch: the
+                 * announce is sent 8 times and never again until the next
+                 * connect/EV10. Bounded so a genuinely dead engine converges
+                 * to the old silent behavior, which the RX path's fail-closed
+                 * handling and the boot KAT telemetry already cover. */
+                rf_crypt_announce_retry_budget--;
+                rf_crypt_announce_retry++;
+                hal_event_post(RF_EVT_CRYPT_SESSION);
+#endif
             }
         }
         return events ^ RF_EVT_CRYPT_SESSION;
