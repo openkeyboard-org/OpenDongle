@@ -56,8 +56,11 @@ Makefile reads that variable, and probe `C2228F064754` has left the bench.)*
 ## 2. Pair, then key both ends
 
 Pair normally first: a key has nothing to attach to until a bond exists, and
-the keyboard advertises its capability during pairing (one broadcast slot in
-four), which is what sets `ENC_CAPABLE` on the receiver's record.
+the keyboard advertises its capability during pairing (broadcast slots 0-1,
+then every 8th slot), which is what sets `ENC_CAPABLE` on the receiver's
+record. The tool refuses a bond without that flag rather than forcing it —
+a forced flag on a keyboard that never advertised is a dead link by
+construction.
 
 Then give both ends the *same* key.
 
@@ -93,6 +96,12 @@ forge keystrokes.
 Confirm with `opendongle --hidraw /dev/hidrawN --info` — the bond should read
 `capable + key`, and `provision_link_key.py --show` should print
 `encryption ACTIVE`.
+
+A successful write takes effect immediately (`0x00`: saved, read-back
+verified, and installed into the running RF task — a fresh session is minted
+if the link is up). No dongle restart is involved. The one deferred case is
+`0xB5`: removing the key while the encrypted link is live keeps that link
+fail-closed-dead until it drops, then the bond is plaintext again.
 
 ## 3. What to watch for
 

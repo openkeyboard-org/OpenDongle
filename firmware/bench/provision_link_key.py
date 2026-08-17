@@ -63,11 +63,15 @@ OFF_LINK_KEY, OFF_CHECKSUM = 28, 44
 
 # Status bytes the firmware answers BondWrite with.
 WRITE_STATUS = {
-    0x00: "accepted",
+    0x00: "saved, verified, applied live -- active NOW, no reset needed",
+    0x01: "NV erase failed",
+    0x02: "NV write failed",
     0xB0: "wrong record length",
     0xB1: "structurally invalid (magic/version/checksum/session AA)",
     0xB2: "semantically rejected (bounds, MAC hygiene, peer == dongle)",
     0xB3: "key/flag combination refused (zero or 0xFF key, or flag mismatch)",
+    0xB4: "written but read-back verify FAILED -- running state unchanged",
+    0xB5: "saved+verified; applies when the live encrypted link drops",
 }
 
 
@@ -267,13 +271,26 @@ def main() -> int:
             rec[OFF_FLAGS] &= ~FLAG_ENC_KEY & 0xFF
             rec[OFF_LINK_KEY:OFF_LINK_KEY + KEY_BYTES] = bytes(KEY_BYTES)
         else:
-            rec[OFF_FLAGS] |= FLAG_ENC_KEY | FLAG_ENC_CAPABLE
+            # ENC_CAPABLE is the keyboard's claim, negotiated on air at
+            # pairing and persisted by the dongle. Forcing it here used to
+            # paper over the accept-path bug that erased the negotiation
+            # (2026-08-16 review, finding 3) -- and a forced flag on a bond
+            # whose keyboard never advertised produces exactly the failure
+            # this tool exists to avoid: encryption required, peer unable.
+            if not rec[OFF_FLAGS] & FLAG_ENC_CAPABLE:
+                raise SystemExit(
+                    "\nthis bond is not marked encryption-capable, so the "
+                    "keyboard never advertised\nencryption at pairing. "
+                    "Re-pair with an encryption-capable keyboard firmware\n"
+                    "and run this again -- forcing the flag would only "
+                    "produce a dead link.")
+            rec[OFF_FLAGS] |= FLAG_ENC_KEY
             rec[OFF_LINK_KEY:OFF_LINK_KEY + KEY_BYTES] = key
         struct.pack_into("<I", rec, OFF_CHECKSUM, checksum(rec))
 
         st = dev.bond_write(rec)
         print(f"\nBondWrite -> 0x{st:02X} ({WRITE_STATUS.get(st, 'unknown status')})")
-        if st != 0x00:
+        if st not in (0x00, 0xB5):
             return 1
 
         rec2, status2 = dev.bond_read()

@@ -1105,6 +1105,13 @@ static void rf_abort_pair_burst(void)
  * stack-floor assert. Consequence: after any CONFIRMED link this boot, a
  * later failed re-pair takes the old reacquire path — acceptable, since a
  * new-keyboard pair needs a replug boot window anyway.) */
+#if DONGLE_RF_CRYPT
+/* Tentative re-declarations (C11 6.9.2): the crypt state block further down
+ * owns the commented definitions; these make the two latches visible to the
+ * fresh-pair teardown, which consumes the deferred key-removal downgrade. */
+static volatile uint8_t rf_crypt_bond_enc;
+static uint8_t rf_crypt_pending_plain;
+#endif
 static void rf_return_to_fresh_pair(void)
 {
     hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL);
@@ -1130,6 +1137,17 @@ static void rf_return_to_fresh_pair(void)
     rf_supervision_ev10_active = 0;
     rf_stock_first_supervision_armed = 0;
     rf_last_conn_rx_tsys = 0;
+
+#if DONGLE_RF_CRYPT
+    /* Deferred key-removal (RF_ApplyBondRecord while the encrypted link was
+     * live): the link is down now, so the downgrade the host provisioned
+     * takes effect -- the record in flash is already keyless, and the key
+     * schedule was zeroized at apply time. */
+    if (rf_crypt_pending_plain) {
+        rf_crypt_pending_plain = 0u;
+        rf_crypt_bond_enc = 0u;
+    }
+#endif
 
     rf_boot_window_active = 1u;
     rf_pair_window_open   = 0u;
@@ -1370,6 +1388,14 @@ static void rf_stock_reacquire_giveup(void)
 /* Set in task context at bond load once a keyed+capable bond is installed (the
  * key lives in rf_crypt); read by the IRQ sink. Single writer, plain byte. */
 static volatile uint8_t rf_crypt_bond_enc;
+
+/* RF_ApplyBondRecord accepted a key REMOVAL while the encrypted link was
+ * live. The tombstone rule applies (see RF_TombstoneBond): rf_crypt_bond_enc
+ * must NOT drop mid-link or the still-live connection reverts to the
+ * plaintext dispatch and accepts forged HID. The key is zeroized
+ * immediately -- the link goes dead, not open -- and this latch downgrades
+ * the bond to plaintext at the next return to the fresh-pair camp. */
+static uint8_t rf_crypt_pending_plain;
 
 /* Latched when a peer advertises encryption at pairing; rf_commit_bond_ram
  * persists it as BOND_FLAG_ENC_CAPABLE (read exactly once, at burst-promote).
@@ -3770,6 +3796,139 @@ void RF_TombstoneBond(void)
     rf_crypt_force_release = 0u;
     rf_crypt_clear();
 #endif
+}
+
+/* Install a host-written, flash-verified bond record into the RUNNING task --
+ * the review's finding-2 P0: BondWrite used to persist and report success
+ * while the live crypto state kept running the OLD key/latches until a reset,
+ * so the freshly provisioned peer required encryption the dongle would not
+ * speak. This is the reboot's bond-load semantics applied in place.
+ *
+ * Contract: iap.c calls this AFTER bond_save + a bond_load/bond_tuple_equal
+ * readback, from the foreground main loop -- the same execution context as
+ * the RF executor (they cannot interleave; only the radio IRQ preempts, and
+ * it touches exactly the state the masked section below writes; same
+ * discipline as RF_TombstoneBond above).
+ *
+ * The tombstone is LIFTED here, deliberately: it exists so the stale in-RAM
+ * bond cannot resurrect a record the host erased. A verified host WRITE is
+ * the same authority explicitly provisioning anew, so blocking it would turn
+ * every clear-then-provision cycle into a clear-provision-reboot one.
+ *
+ * Radio: not connected -> RF_EVT_START re-runs the boot camp against the new
+ * record (identical to a power cycle's radio phase; a pairing attempt in
+ * flight is abandoned, as it would be by the reboot this replaces).
+ * CONNECTED -> the live link keeps its tuple; the new identity is the
+ * reconnect target after the link drops (again: exactly what reboot-now
+ * would do, minus dropping the link).
+ *
+ * Returns 0 = applied live; 1 = applied-deferred: a key REMOVAL landed while
+ * the encrypted link is live, and the tombstone fail-closed rule holds --
+ * rf_crypt_bond_enc must not drop mid-link (the plaintext dispatch would
+ * accept forged HID). The key is zeroized NOW, so the link goes dead, not
+ * open; rf_return_to_fresh_pair applies the plaintext downgrade when the
+ * link ends. */
+uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
+{
+    uint8_t deferred = 0u;
+    uint8_t connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+    uint8_t enc_now = bond_enc_active(rec) ? 1u : 0u;
+
+    /* Identity half, masked against the radio IRQ (it reads rf_bond_valid,
+     * the MACs and the LEN-15 template; multi-byte writes must be atomic
+     * against it). Mirrors rf_load_persistent_bond. */
+    {
+        uint32_t irq = __risc_v_disable_irq();
+        rf_bond_tombstone = 0;
+        rf_bond_aa = rec->session_aa;
+        rf_bond_valid = 1;
+        rf_bond_persisted = 1;        /* the record IS the verified flash content */
+        rf_bond_persist_pending = 0;
+        rf_bond_default_aa = rec->session_aa;
+        if (rec->conn_interval) rf_conn_interval = rec->conn_interval;
+        if (rec->conn_timeout)  rf_conn_timeout  = rec->conn_timeout;
+        {
+            int have_dmac = 0, i;
+            for (i = 0; i < 6; i++) {
+                if (rec->dongle_mac[i]) have_dmac = 1;
+            }
+            if (have_dmac) {
+                tmos_memcpy(rf_bond_dongle_mac, rec->dongle_mac, 6);
+                rf_dongle_mac_overridden = 1;
+            } else {
+                /* A zero MAC in the record means chip identity: a record that
+                 * REPLACES an override must restore it (boot would). */
+                tmos_memcpy(rf_bond_dongle_mac, rf_factory_mac, 6);
+                rf_dongle_mac_overridden = 0;
+            }
+            tmos_memcpy(&rf_pair_ack15[9], rf_bond_dongle_mac, 6);
+        }
+        {
+            int have_peer = 0, i;
+            for (i = 0; i < 6; i++) {
+                if (rec->peer_mac[i]) have_peer = 1;
+            }
+            if (have_peer) tmos_memcpy(rf_peer_mac, rec->peer_mac, 6);
+        }
+        rf_pair_ack15[0] = (uint8_t)((rec->session_aa >> 24) & 0xFF);
+        rf_pair_ack15[1] = (uint8_t)((rec->session_aa >> 16) & 0xFF);
+        rf_pair_ack15[2] = (uint8_t)((rec->session_aa >>  8) & 0xFF);
+        rf_pair_ack15[3] = (uint8_t)( rec->session_aa        & 0xFF);
+        if (rec->conn_interval) {
+            rf_pair_ack15[5] = (uint8_t)( rec->conn_interval       & 0xFF);
+            rf_pair_ack15[6] = (uint8_t)((rec->conn_interval >> 8) & 0xFF);
+        }
+        if (rec->conn_timeout) {
+            rf_pair_ack15[7] = (uint8_t)( rec->conn_timeout       & 0xFF);
+            rf_pair_ack15[8] = (uint8_t)((rec->conn_timeout >> 8) & 0xFF);
+        }
+        (void)__risc_v_enable_irq(irq);
+    }
+    hal_event_cancel(RF_EVT_PERSIST_BOND);
+
+#if DONGLE_RF_CRYPT
+    rf_crypt_peer_capable = (rec->flags & BOND_FLAG_ENC_CAPABLE) ? 1u : 0u;
+    if (enc_now) {
+        /* The expensive CH570 key schedule runs here, foreground, off the
+         * poll grid -- same placement argument as the boot install. Only
+         * after the key is whole does the routing byte flip. */
+        rf_crypt_install_key(rec->link_key);
+        {
+            uint32_t irq = __risc_v_disable_irq();
+            rf_crypt_bond_enc = 1u;
+            rf_crypt_pending_plain = 0u;
+            rf_crypt_fifo_head = rf_crypt_fifo_tail;
+            rf_crypt_frames_since_ok = 0u;
+            rf_crypt_announce_count = 0u;
+            rf_crypt_force_release = 0u;
+            (void)__risc_v_enable_irq(irq);
+        }
+        if (connected) {
+            /* Fresh session under the new key: flush + mint + announce, the
+             * existing RF_EVT_CRYPT_SESSION machinery. Without this the peer
+             * would keep sealing under a session the new key cannot verify. */
+            hal_event_post(RF_EVT_CRYPT_SESSION);
+        }
+    } else if (rf_crypt_bond_enc && connected) {
+        /* Key removal on a live encrypted link: fail closed (see contract). */
+        rf_crypt_clear();
+        rf_crypt_pending_plain = 1u;
+        deferred = 1u;
+    } else {
+        rf_crypt_clear();
+        rf_crypt_bond_enc = 0u;
+        rf_crypt_pending_plain = 0u;
+    }
+#endif
+
+    if (!connected) {
+        /* Re-camp per the new record -- the boot path's radio phase. Runs in
+         * the RF executor's own context, where the radio library demands to
+         * be driven from. */
+        rf_access_addr = rf_bond_default_aa;
+        hal_event_post(RF_EVT_START);
+    }
+    return deferred;
 }
 
 void RF_SetLEDState(uint8_t led)

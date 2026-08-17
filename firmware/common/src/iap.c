@@ -245,8 +245,39 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
     uint8_t status = (uint8_t)bond_save(&rec);
     if (status) {
         iap_err_count++;
+        send_status4(status);   /* 0x01 erase / 0x02 write NV failure */
+        return;
     }
-    send_status4(status);
+
+    /* Read-back verification -- the same discipline the RF task applies to
+     * its own persists (rf_persist_bond_task) and BondClear applies to the
+     * erase. bond_save returning 0 only says the flash driver reported
+     * success; the record the NEXT BOOT will load is what must match. 0xB4 =
+     * written-but-verify-failed: nothing is applied to the running task, so
+     * RAM keeps the previous coherent state. */
+    {
+        bond_record_t back __attribute__((aligned(4)));
+        if (!bond_load(&back) || !bond_tuple_equal(&back, &rec)) {
+            iap_err_count++;
+            send_status4(0xB4);
+            return;
+        }
+    }
+
+#if DONGLE_HAS_RF
+    /* Install into the RUNNING task (finding-2 P0: BondWrite used to persist
+     * and report success while the live crypto state ran the old key until a
+     * reset -- the freshly provisioned peer then required encryption the
+     * dongle would not speak, and "reboot the dongle" was an undocumented
+     * required step). 0xB5 = saved+verified but apply DEFERRED: a key
+     * removal landed while the encrypted link is live; it takes effect when
+     * the link drops (fail-closed until then). */
+    if (RF_ApplyBondRecord(&rec)) {
+        send_status4(0xB5);
+        return;
+    }
+#endif
+    send_status4(0x00);
 }
 
 static void handle_bond_clear(void)

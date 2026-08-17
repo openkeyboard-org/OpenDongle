@@ -58,6 +58,19 @@ void RF_SetHIDCallback(rf_hid_cb_t cb);
  * persist, and blocks further persists until the next reset. */
 void RF_TombstoneBond(void);
 
+/* The IAP BondWrite handler calls this AFTER bond_save plus a
+ * bond_load/bond_tuple_equal readback: install the just-verified record into
+ * the running task -- bond identity, key, and encryption latch -- with the
+ * reboot's bond-load semantics, so provisioning takes effect without a reset
+ * (it used to require one, undocumented). Also lifts a BondClear tombstone:
+ * a verified host write is the tombstoning authority provisioning anew.
+ * Foreground main-loop context only (the same loop that pumps the RF
+ * executor). Returns 0 = applied live; 1 = applied-deferred (a key REMOVAL
+ * while the encrypted link is live keeps the link fail-closed-dead and
+ * downgrades to plaintext when it drops -- same rule as the tombstone). */
+#include "bond.h"
+uint8_t RF_ApplyBondRecord(const bond_record_t *rec);
+
 /* CODEREVIEW N08: the chip's factory MAC (pre-override), for the IAP
  * BondWrite semantic validator's own-identity leg. */
 const uint8_t *RF_FactoryMac(void);
