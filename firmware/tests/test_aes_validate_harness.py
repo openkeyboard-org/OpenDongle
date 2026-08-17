@@ -40,9 +40,10 @@ import read_aes_log as R  # noqa: E402
 
 VALIDATION = ROOT / "validation"
 INC = ROOT / "common" / "include"
-# rf_crypt.c includes dongle_target.h; host-compile against the CH592 target
-# (the bench configuration). See the matching note in test_rf_crypt.py.
-TARGET_INC = ROOT / "ch592" / "src"
+# rf_crypt.c includes dongle_target.h; -I{VALIDATION} supplies the neutral
+# validation shim, so this harness compiles rf_crypt in exactly the shape the
+# on-silicon validation arms build -- the shipping configuration, no bench
+# diagnostics. (test_rf_crypt.py covers the bench shape.)
 AES_SW = ROOT / "common" / "src" / "aes_sw.c"
 RF_CRYPT = ROOT / "common" / "src" / "rf_crypt.c"
 
@@ -129,8 +130,7 @@ class HarnessRunsOnTheHost(unittest.TestCase):
         )
 
         common = [cc, "-O1", "-std=gnu99", "-Wall", "-Wextra",
-                  "-Wno-unused-parameter", f"-I{INC}", f"-I{VALIDATION}",
-                  f"-I{TARGET_INC}"]
+                  "-Wno-unused-parameter", f"-I{INC}", f"-I{VALIDATION}"]
 
         def compile_one(src, extra=()):
             obj = d / (Path(src).stem + ".o")

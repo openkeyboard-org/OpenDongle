@@ -21,13 +21,20 @@ build enforces that split, so pass both:
 
 ```bash
 cd firmware/ch592
-make MRS_TOOLCHAIN="$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC15/bin" \
+make PROFILE=bench ALLOW_BENCH_FACTORY=1 \
+     MRS_TOOLCHAIN="$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC15/bin" \
      OPENBOOT_TOOLCHAIN="$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin" \
      factory
 ```
 
-Produces `build/ch592-product-slotA/opendongle-ch592-product-factory.bin`
-(~229 KB, blessed slot A, ~48.6 KB application). `rf_crypt.o` and
+`PROFILE=bench` selects the bench scaffolding this document describes (UART
+telemetry, the force key, the prev-session diagnostics); packaging a bench
+image requires the explicit `ALLOW_BENCH_FACTORY=1` acknowledgment. The
+default (product) profile compiles none of it and `--info` reports which one
+is running via the profile byte.
+
+Produces `build/ch592-bench-slotA/opendongle-ch592-bench-factory.bin`
+(~229 KB, blessed slot A, ~49.9 KB application). `rf_crypt.o` and
 `hal_aes_ch592.o` in the link line are the confirmation that encryption is
 compiled in.
 
@@ -114,8 +121,10 @@ Confirm with `opendongle --hidraw /dev/hidrawN --info` — the bond should read
 
 When the receiver's own USB is not connected, everything above that runs over
 hidraw (provisioning, `CMD_CRYPT_DIAG`, OBP updates) is unreachable. Two
-bench-only gates in `ch592/src/dongle_target.h` replace it — **both must be
-stripped before anything ships**:
+bench-only gates in `ch592/src/dongle_target.h` replace it. Both live under
+the `PROFILE=bench` build profile — a product build cannot compile them
+(rf_task.c `#error`s on the force key outside the profile, and the release
+target byte-scans every packaged artifact for the key bytes):
 
 - `DONGLE_UART_DIAG` — broadcasts the full crypto telemetry once per second on
   UART1's default PA9 pin (127-byte `0x5E` frame: every `CMD_CRYPT_DIAG`

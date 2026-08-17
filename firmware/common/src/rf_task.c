@@ -3396,6 +3396,15 @@ static void rf_load_persistent_bond(void)
         rf_crypt_clear();
         rf_crypt_bond_enc = 0u;
     }
+#if DONGLE_CRYPT_BENCH_FORCE_KEY && !DONGLE_BENCH_PROFILE
+    /* The tripwire behind the profile split: the force key is a shared,
+     * in-the-source throwaway -- an image carrying it accepts forged
+     * keystrokes from anyone who has read the repo. Only the bench profile
+     * (PROFILE=bench, which defines DONGLE_BENCH_PROFILE=1) may compile it;
+     * any other route to this block is a build-system regression, and the
+     * release target's byte-scan backstops even that. */
+#error "DONGLE_CRYPT_BENCH_FORCE_KEY outside the bench profile -- this must never ship (build with PROFILE=bench)"
+#endif
 #if DONGLE_CRYPT_BENCH_FORCE_KEY
     /* BENCH ONLY (this bench has no dongle USB, so provision_link_key.py
      * cannot reach the bond record): force link decryption ACTIVE for any

@@ -24,11 +24,14 @@ RF_CRYPT_C = ROOT / "common" / "src" / "rf_crypt.c"
 AES_SW_C = ROOT / "common" / "src" / "aes_sw.c"
 INC = ROOT / "common" / "include"
 # rf_crypt.c includes dongle_target.h before rf_crypt.h (the per-chip header is
-# what turns the bench diagnostics on). Host-compile against the CH592 target,
-# the bench configuration -- which also puts the same-session re-verify, the
-# failure latch, and the KAT under host test instead of leaving them
-# target-only.
+# what turns the bench diagnostics on). Host-compile against the CH592 target
+# in its BENCH profile -- the -D below is what the Makefile's PROFILE=bench
+# passes -- which puts the same-session re-verify, the failure latch, and the
+# KAT under host test instead of leaving them target-only.
+# (test_aes_validate_harness.py covers the product shape via the validation
+# shim.)
 TARGET_INC = ROOT / "ch592" / "src"
+BENCH_PROFILE_DEFINE = "-DDONGLE_BENCH_PROFILE=1"
 
 TAG_CONSUMER, TAG_MOUSE, TAG_BOOT = 0xA3, 0xA8, 0xA1
 
@@ -138,7 +141,8 @@ class CcmRxPath(unittest.TestCase):
         cls.binary = d / "rfcrypt"
         subprocess.run(
             [cc, "-O2", "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-             f"-I{INC}", f"-I{TARGET_INC}", "-o", str(cls.binary),
+             f"-I{INC}", f"-I{TARGET_INC}", BENCH_PROFILE_DEFINE,
+             "-o", str(cls.binary),
              str(d / "harness.c"), str(RF_CRYPT_C), str(AES_SW_C)],
             check=True, capture_output=True,
         )
