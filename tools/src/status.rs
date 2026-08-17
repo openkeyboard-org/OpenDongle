@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn rssi_is_not_reported_without_the_rf_capability() {
         let mut r = response();
-        r[2 + 4] = 0x0E;          // capabilities with CAP_RF cleared
+        r[2 + 4] = 0x0E; // capabilities with CAP_RF cleared
         r[2 + 7] = (-81i8) as u8; // stale/meaningless on an RF-less build
         let s = DeviceStatus::decode(&r).unwrap();
         assert!(s.last_rssi().contains("no RF"), "got {}", s.last_rssi());

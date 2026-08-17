@@ -160,7 +160,11 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
             println!("  flags           0x{:02X}", record.flags);
             println!("  encryption      {encryption}");
             if has_key {
-                let key = if record.redacted { "present (redacted)" } else { "present" };
+                let key = if record.redacted {
+                    "present (redacted)"
+                } else {
+                    "present"
+                };
                 println!("  link key        {key}");
             }
             println!("  session AA      0x{:08X}", record.session_aa);
@@ -228,8 +232,7 @@ mod tests {
     fn decodes_redacted_encrypted_response() {
         // ENC_CAPABLE | ENC_KEY, key zeroed by the firmware, redacted bit set.
         let raw = record_with_flags(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
-        let mut response =
-            vec![ACK_BOND_READ, BOND_RECORD_LEN as u8, BOND_READ_REDACTED];
+        let mut response = vec![ACK_BOND_READ, BOND_RECORD_LEN as u8, BOND_READ_REDACTED];
         response.extend_from_slice(&raw);
 
         let BondRead::Valid(record) = decode_response(&response).unwrap() else {

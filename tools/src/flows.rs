@@ -102,12 +102,7 @@ pub fn enter_bootloader(dev: &IapDevice) -> Result<()> {
         .ok_or_else(|| anyhow!("EnterBootloader: no response (timeout)"))?;
     // Reply is the status4 shape [ACK_OK, 0x01, status, 0x00] — validate all
     // four bytes, not just the ack and status.
-    if rr.len() < 4
-        || rr[0] != ACK_OK
-        || rr[1] != 0x01
-        || rr[2] != 0
-        || rr[3] != 0
-    {
+    if rr.len() < 4 || rr[0] != ACK_OK || rr[1] != 0x01 || rr[2] != 0 || rr[3] != 0 {
         bail!(
             "EnterBootloader: refused; ack=0x{:02X} status=0x{:02X} raw={}",
             rr.first().copied().unwrap_or(0xFF),
