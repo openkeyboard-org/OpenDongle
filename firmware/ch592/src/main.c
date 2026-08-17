@@ -175,6 +175,7 @@ int main(void)
     /* Route EP6 OUT (interface 4) into the IAP dispatcher so the dongle stays
      * in-field reflashable via flash_dongle.py / the stock Windows tool. */
     USB_SetEP6OutCallback(IAP_PacketHandler);
+    USB_SetBusResetCallback(IAP_Reset);   /* reset cancels the IAP session */
 
     /* 2.4G RF receiver. */
     RF_TaskInit();

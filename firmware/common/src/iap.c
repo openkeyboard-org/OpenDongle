@@ -55,6 +55,22 @@ static uint8_t iap_err_count;
  * in the packet handler, so the status reply can still go out). */
 static uint8_t iap_reboot_pending;
 
+/* Bus-reset cancellation (USB_SetBusResetCallback; 2026-08-16 review,
+ * finding 13): a reset tears down the host session, so an armed mutation
+ * window, the error tally, and a NOT-yet-started EnterBootloader must not
+ * survive into the next one -- with live BondWrite activation, a stale
+ * deferred command now rewires running crypto state, not just flash. A
+ * reboot IAP_Service has already begun stays begun, deliberately: its RF
+ * quiesce is one-way, so completing the reboot is the only sane exit (the
+ * service state machine latched past the flag it consumed). ISR context:
+ * byte writes only. */
+void IAP_Reset(void)
+{
+    iap_armed = 0;
+    iap_err_count = 0;
+    iap_reboot_pending = 0;
+}
+
 static void send_reject(void)
 {
     /* Match the stock dispatcher: malformed or disallowed packets time out. */

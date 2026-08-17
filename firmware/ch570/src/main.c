@@ -67,6 +67,7 @@ static void usb_start(void)
 {
     USB_DevInit();
     USB_SetEP6OutCallback(IAP_PacketHandler);
+    USB_SetBusResetCallback(IAP_Reset);   /* reset cancels the IAP session */
 }
 
 static uint8_t rf_started;
