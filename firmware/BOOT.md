@@ -89,13 +89,15 @@ with only the recipe's final step differing:
 ## Update flow
 
 ```sh
-opendongle --enter-bootloader --image <slot-a>.bin              # family-guarded reboot
+opendongle --enter-bootloader --image <slot-a>.bin --bundle <chip>-product.obb
 openboot --vid 0x0C45 --pid 0xFEFE flash <chip>-product.obb --force
 ```
 
 Flash the **bundle**, not a bare `.bin` — see "Updating: use the bundle" below
 for why. `--image` still takes a plain `.bin`: it is read host-side for the
-family guard and never flashed.
+family guard and never flashed (an `.obb` passed to `--image` is refused).
+`--bundle` is optional and never read: it just names the artifact in the
+printed `openboot flash` next-step so the line can be copied and run as-is.
 
 `--enter-bootloader` checks the image's ODG2 family against the device before
 rebooting. The firmware side (IAP command 0x85, armed session +
