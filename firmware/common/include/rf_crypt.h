@@ -64,6 +64,34 @@
 #define RF_CRYPT_LEN_CAP        3u
 #define RF_CRYPT_CAP_VERSION    1u
 
+/* Beacon-accept policy for the two pairing-time crypto latches, factored out
+ * so the ordering contract is host-testable (tests/test_rf_negotiation.py):
+ *
+ *   - bond_enc (encryption REQUIRED): drops for a fresh dongle or a peer
+ *     change, so a new keyless bond cannot inherit the previous bond's key
+ *     requirement. A same-peer accept keeps it -- a reconnect can never
+ *     downgrade an encrypted bond to plaintext.
+ *   - peer_capable: NEVER cleared at accept. The capability advert is
+ *     anonymous and precedes the first beacon (broadcast slots 0-1 vs 2), so
+ *     an accept-time clear deterministically erases what the advert just
+ *     latched and the capability is never persisted -- the 2026-08-16
+ *     review's finding 3. Its resets live at boot and tombstone; see the
+ *     latch declaration in rf_task.c for the full scoping argument.
+ *
+ * The unused parameter is the contract: whoever edits this signature is
+ * looking at the one place an accept-time clear of the capability latch
+ * would have to go, and the comment above is what stops them. */
+static inline void rf_crypt_beacon_accept_latches(uint8_t bond_valid,
+                                                  uint8_t same_peer,
+                                                  volatile uint8_t *bond_enc,
+                                                  const uint8_t *peer_capable)
+{
+    (void)peer_capable;
+    if (!bond_valid || !same_peer) {
+        *bond_enc = 0u;
+    }
+}
+
 typedef enum {
     RF_CRYPT_OK = 0,
     RF_CRYPT_DROP_SHAPE,      /* not a well-formed encrypted frame */

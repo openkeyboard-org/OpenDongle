@@ -1372,7 +1372,25 @@ static void rf_stock_reacquire_giveup(void)
 static volatile uint8_t rf_crypt_bond_enc;
 
 /* Latched when a peer advertises encryption at pairing; rf_commit_bond_ram
- * persists it as BOND_FLAG_ENC_CAPABLE. */
+ * persists it as BOND_FLAG_ENC_CAPABLE (read exactly once, at burst-promote).
+ *
+ * Scope: boot (bond load derives it from the record's flag, or zeroes it
+ * unbonded) and tombstone are the reset points -- NOT the beacon accept, and
+ * NOT the fresh-pair relisten. Both of those look like tidy scope boundaries
+ * and both lose the negotiation:
+ *   - the advert is anonymous and arrives BEFORE the first beacon (the
+ *     keyboard sends it in pair-broadcast slots 0-1, the beacon in slot 2),
+ *     so clearing at accept deterministically erased the latch the advert
+ *     had just set -- the capability was never persisted and encryption
+ *     could never activate (2026-08-16 review, finding 3);
+ *   - the relisten path retries the SAME still-broadcasting keyboard, whose
+ *     adverts now come only one slot in eight, so a reset there loses the
+ *     race again on every unconfirmed-promote retry.
+ * The cost of the wide scope is a mislatch when a capable keyboard advertises
+ * and a DIFFERENT keyboard's pair completes in the same camp session. That is
+ * inert -- capability alone never enables encryption; a key must be
+ * host-provisioned -- and the establishment handshake that binds and
+ * authenticates the advert is where it gets closed properly. */
 static uint8_t rf_crypt_peer_capable;
 
 /* SPSC frame FIFO: the IRQ sink produces, the RF_EVT_CRYPT_RX task consumes.
@@ -1688,16 +1706,24 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * memcpy, so rf_peer_mac is still the OLD peer; tmos_memcmp is
                  * true-when-equal). A DIFFERENT keyboard, or an unbonded dongle,
                  * starts a keyless bond -> drop the encryption-required latch so it
-                 * cannot inherit the previous bond's key requirement, and scope the
-                 * capability latch to this pairing. A SAME-peer reconnect must NOT
-                 * take this path: it keeps the loaded encryption state (its key is
-                 * still installed), so a reconnect can never downgrade an encrypted
-                 * bond to plaintext. (Byte writes, IRQ-safe; the stale hal_aes key
-                 * is unused while enc is off, zeroized at next bond load/tombstone.) */
-                if (!rf_bond_valid || !tmos_memcmp(rf_peer_mac, &rxBuf[2], 6)) {
-                    rf_crypt_bond_enc = 0u;
-                    rf_crypt_peer_capable = 0u;
-                }
+                 * cannot inherit the previous bond's key requirement. A SAME-peer
+                 * reconnect must NOT take this path: it keeps the loaded encryption
+                 * state (its key is still installed), so a reconnect can never
+                 * downgrade an encrypted bond to plaintext. (Byte writes, IRQ-safe;
+                 * the stale hal_aes key is unused while enc is off, zeroized at
+                 * next bond load/tombstone.)
+                 *
+                 * rf_crypt_peer_capable is deliberately NOT cleared here: the
+                 * capability advert precedes this first acceptable beacon (slots
+                 * 0-1 vs 2), so a clear at accept erased what the advert just
+                 * latched, 100% of the time -- see the latch's declaration for
+                 * the full scoping argument. The policy itself lives in
+                 * rf_crypt.h so the host suite pins it. */
+                rf_crypt_beacon_accept_latches(
+                    rf_bond_valid,
+                    (uint8_t)(tmos_memcmp(rf_peer_mac, &rxBuf[2], 6) != 0),
+                    &rf_crypt_bond_enc,
+                    &rf_crypt_peer_capable);
 #endif
                 tmos_memcpy(rf_peer_mac, &rxBuf[2], 6);
                 /* A new pair is now in progress (this only runs for a fresh
