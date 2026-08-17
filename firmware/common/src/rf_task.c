@@ -1418,14 +1418,17 @@ static volatile uint16_t rf_crypt_frames_since_ok;
  * reacquire even though unauthenticated traffic keeps supervision's RX stamp
  * fresh (otherwise the timeout handler would just re-arm and never release). */
 static volatile uint8_t  rf_crypt_force_release;
-static uint32_t rf_crypt_drops;   /* diagnostic (approximate): frames dropped */
 /* Why frames were dropped, indexed by rf_crypt_status_t. A single total says a
  * peer is being rejected but not whether its tag failed, its counter looked
  * replayed, or its shape was wrong -- which are entirely different bugs on the
- * transmitting end. Read over IAP (CMD_CRYPT_DIAG). */
+ * transmitting end. Product telemetry: with ok_count these are the "is the
+ * encrypted link healthy" signal, read over IAP (CMD_CRYPT_DIAG). */
 uint32_t rf_crypt_drop_reason[6];
 uint32_t rf_crypt_ok_count;
 
+#if RF_CRYPT_DIAG_PREV_SESSION
+static uint32_t rf_crypt_drops;   /* diagnostic (approximate): frames dropped;
+                                   * redundant with drop_reason + fifo_full */
 /* Pre-verify sink telemetry. rf_crypt_drop_reason only counts frames that
  * actually reached rf_crypt_rx(); a frame lost BEFORE that -- never received,
  * not recognised as an encrypted shape, refused by a full FIFO, or discarded by
@@ -1445,7 +1448,12 @@ uint32_t rf_crypt_ok_count;
  *   plain_drop  plaintext HID refused as a downgrade on an encrypted bond
  *
  * Diagnostic only: approximate under preemption, and nothing here gates a
- * forwarding decision. Read over IAP (CMD_CRYPT_DIAG). */
+ * forwarding decision. Read over IAP (CMD_CRYPT_DIAG, bench layout).
+ *
+ * Bench-gated since the sink-forensics campaign answered its question: these
+ * ten-odd bytes of .bss were part of what pushed CH570 through its stack
+ * floor (the 2026-08-16 review, finding 4), and a lost pre-verify frame in
+ * the field still shows up as the drop_reason[] pattern above. */
 uint32_t rf_crypt_conn_rx;
 uint32_t rf_crypt_enc_shape;
 uint32_t rf_crypt_fifo_full;
@@ -1453,6 +1461,7 @@ uint32_t rf_crypt_flush_drop;
 uint32_t rf_crypt_plain_drop;
 uint8_t  rf_crypt_len_max;
 uint8_t  rf_crypt_len_max_tag;
+#endif /* RF_CRYPT_DIAG_PREV_SESSION */
 
 static uint32_t rf_crypt_gen_session_id(void);   /* defined near rf_aa_rng16 */
 
@@ -1467,8 +1476,10 @@ static uint8_t rf_crypt_fifo_push(const uint8_t *frame, uint8_t len)
     uint8_t i;
 
     if (len > RF_CRYPT_LEN_BOOT_KBD || next == rf_crypt_fifo_head) {
+#if RF_CRYPT_DIAG_PREV_SESSION
         rf_crypt_drops++;
         rf_crypt_fifo_full++;   /* the only trace this frame ever existed */
+#endif
         return 0u;   /* oversize or full: drop newest */
     }
     for (i = 0; i < len; i++) {
@@ -1768,6 +1779,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             if (rf_crypt_bond_enc && rf_crypt_frames_since_ok < 0xFFFFu) {
                 rf_crypt_frames_since_ok++;
             }
+#if RF_CRYPT_DIAG_PREV_SESSION
             if (rf_crypt_bond_enc) {
                 /* Record the shape BEFORE any classification, so a frame the
                  * classifier rejects still leaves evidence of what arrived. */
@@ -1777,6 +1789,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rf_crypt_len_max_tag = (len >= 2u) ? rxBuf[3] : 0u;
                 }
             }
+#endif
 #endif
 
             /* A LEN-10 from the known peer showing up in CONNECTED means our
@@ -1803,7 +1816,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                         /* Encrypted HID frame: copy out and defer verify+decrypt
                          * to the executor (RF_EVT_CRYPT_RX). Nothing is forwarded
                          * until the CCM tag verifies. */
+#if RF_CRYPT_DIAG_PREV_SESSION
                         rf_crypt_enc_shape++;
+#endif
                         if (rf_crypt_fifo_push(&rxBuf[2], len)) {
                             hal_event_post(RF_EVT_CRYPT_RX);
                         }
@@ -1814,7 +1829,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                          * downgrade/forgery attempt. Drop it -- never forward,
                          * never confirm. (Polls and other frames fall through so
                          * poll-ack confirm + supervision are unchanged.) */
+#if RF_CRYPT_DIAG_PREV_SESSION
                         rf_crypt_plain_drop++;
+#endif
                         enc_handled = 1u;
                     }
                 }
@@ -2614,6 +2631,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * on the MAC check -- the reset is an optimization, the tag is the
              * guarantee. (No new-session frame exists yet: the keyboard only learns
              * session_id from the announce that follows.) */
+#if RF_CRYPT_DIAG_PREV_SESSION
             {
                 /* Count what the flush destroys. Frames queued but never
                  * verified are indistinguishable from frames never sent in
@@ -2622,6 +2640,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 rf_crypt_flush_drop +=
                     (uint32_t)((ft + RF_CRYPT_FIFO_N - fh) % RF_CRYPT_FIFO_N);
             }
+#endif
             rf_crypt_fifo_head = rf_crypt_fifo_tail;
             rf_crypt_frames_since_ok = 0u;
             rf_crypt_new_session(rf_crypt_gen_session_id());
@@ -2661,7 +2680,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                     rf_hid_callback(otag, obody, on);
                 }
             } else {
+#if RF_CRYPT_DIAG_PREV_SESSION
                 rf_crypt_drops++;
+#endif
                 if ((unsigned)st < 6u) {
                     rf_crypt_drop_reason[(unsigned)st]++;
                 }

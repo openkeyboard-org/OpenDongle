@@ -325,6 +325,7 @@ static void handle_bond_read(void)
  * session material. */
 extern uint32_t rf_crypt_drop_reason[6];
 extern uint32_t rf_crypt_ok_count;
+#if RF_CRYPT_DIAG_PREV_SESSION
 extern uint32_t rf_crypt_conn_rx;
 extern uint32_t rf_crypt_enc_shape;
 extern uint32_t rf_crypt_fifo_full;
@@ -332,10 +333,12 @@ extern uint32_t rf_crypt_flush_drop;
 extern uint32_t rf_crypt_plain_drop;
 extern uint8_t  rf_crypt_len_max;
 extern uint8_t  rf_crypt_len_max_tag;
+#endif
 
 static void handle_crypt_diag(void)
 {
-    /* v3 payload: ok(4) + reason[6](24) + pre-verify sink counters(20) +
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Bench layout, v4: ok(4) + reason[6](24) + pre-verify sink counters(20) +
      * len_max(1) + len_max_tag(1) + prev-session diagnostic(12) = 62 B, which
      * with the 2 B header is exactly the 64 B EP6 report -- no room left, so
      * anything further needs a selector rather than another append. Purely
@@ -356,16 +359,31 @@ static void handle_crypt_diag(void)
     put_le32(&resp[46], rf_crypt_plain_drop);
     resp[50] = rf_crypt_len_max;
     resp[51] = rf_crypt_len_max_tag;
-#if RF_CRYPT_DIAG_PREV_SESSION
     put_le32(&resp[52], rf_crypt_session_mint_count);
-    /* v4: offset 56 now carries the same-session re-verify count (TODO.md
-     * section 4). mac_prev_ok answered its question (0/34) and still counts
-     * internally; reporting it here would let a prev-session rescue masquerade
-     * as a same-session one, inverting the experiment's conclusion. */
+    /* v4: offset 56 now carries the same-session re-verify count. mac_prev_ok
+     * answered its question (0/34) and still counts internally; reporting it
+     * here would let a prev-session rescue masquerade as a same-session one,
+     * inverting the experiment's conclusion. (The re-verify experiment is
+     * written up in OpenController firmware/docs/TODO.md section 4.) */
     put_le32(&resp[56], rf_crypt_mac_same_ok);
     put_le32(&resp[60], rf_crypt_last_mac_ctr);
-#endif
     USB_SendEP6(resp, sizeof(resp));
+#else
+    /* Product layout: the health signal only -- verified frames and the
+     * per-reason drops. The pre-verify sink forensics are bench-profile
+     * scaffolding (rf_task.c); the two layouts are told apart by their
+     * length and by the status profile byte. Additive appends only. */
+    uint8_t resp[2u + 4u + 24u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+    USB_SendEP6(resp, sizeof(resp));
+#endif
 }
 
 #if RF_CRYPT_DIAG_PREV_SESSION
