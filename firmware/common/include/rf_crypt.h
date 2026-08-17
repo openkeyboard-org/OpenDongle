@@ -202,7 +202,9 @@ extern uint32_t rf_crypt_mac_prev_ok;
 /* Clear counter of the most recent MAC failure, for spotting ordering. */
 extern uint32_t rf_crypt_last_mac_ctr;
 
-/* ---- same-session re-verify (TODO.md section 4) --------------------------
+/* ---- same-session re-verify --------------------------------------------
+ * (experiment write-up: OpenController firmware/docs/TODO.md section 4 --
+ * NOT this repo's TODO.md, which has no numbered sections)
  * On each DROP_MAC, immediately re-run the FULL CCM (fresh keystream into a
  * private scratch, then the tag) under the SAME session/counter/AAD/frame
  * bytes. Side-effect free: it can never rescue the frame or advance state.

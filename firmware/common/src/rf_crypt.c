@@ -419,7 +419,8 @@ rf_crypt_status_t rf_crypt_rx(const uint8_t *frame, uint8_t len,
 #if RF_CRYPT_DIAG_PREV_SESSION
         rf_crypt_last_mac_ctr = counter;
 
-        /* Same-session re-verify (TODO.md section 4). Run the FULL pipeline
+        /* Same-session re-verify (write-up: OpenController
+         * firmware/docs/TODO.md section 4). Run the FULL pipeline
          * again -- fresh keystream into a private scratch, XOR with the still-
          * valid FIFO bytes, then the tag -- under the UNTOUCHED current-session
          * nonce. Recomputing only the tag over out_body would be blind to a
