@@ -190,8 +190,12 @@ LDFLAGS += -Wl,--undefined=aes_log
 COMPILER_ID := $(shell "$(CC)" -dumpversion 2>/dev/null)-$(shell "$(CC)" -dumpmachine 2>/dev/null)
 CONFIG_TEXT := schema=2||validation||arm=$(ARM)||chip=$(CHIP)||clock=$(CLOCK_HZ)||backend=$(BACKEND_ID)||corecfgr=$(HAS_CORECFGR)||sdk=$(SDK_REVISION)||cc=$(COMPILER_ID)
 BUILD_ID_TOOL := ../build_identity.py
-BUILD_ID_INPUTS := $(C_SRCS) $(S_SRCS) $(LINK) aes_log_format.h
-BUILD_ID_INPUTS += $(wildcard $(COMMON)/include/*.h) $(wildcard ../ch570/src/*.h)
+BUILD_ID_INPUTS := $(C_SRCS) $(S_SRCS) $(LINK) aes_log_format.h dongle_target.h
+BUILD_ID_INPUTS += $(wildcard $(COMMON)/include/*.h)
+# The local dongle_target.h shadows ch570/src's copy by include order (-I .
+# first), so the shadowed header is not an input to this build -- and the
+# identity tool refuses duplicate basenames anyway.
+BUILD_ID_INPUTS += $(filter-out ../ch570/src/dongle_target.h,$(wildcard ../ch570/src/*.h))
 BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
     --flags 'CFLAGS=$(CFLAGS)' --flags 'LDFLAGS=$(LDFLAGS)' \
     $(BUILD_ID_INPUTS))
