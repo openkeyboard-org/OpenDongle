@@ -563,7 +563,7 @@ static void handle_stack_watermark(void)
     resp[0] = CMD_STACK_WATERMARK;
     resp[1] = 12u;
     put_le32(&resp[2], stack_watermark_low());
-    put_le32(&resp[6], (uint32_t)(uintptr_t)&_end);
+    put_le32(&resp[6], stack_watermark_floor());   /* true stack floor per chip */
     put_le32(&resp[10], (uint32_t)(uintptr_t)&_eusrstack);
     USB_SendEP6(resp, sizeof(resp));
 }
