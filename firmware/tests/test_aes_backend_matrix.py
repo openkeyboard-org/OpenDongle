@@ -156,6 +156,31 @@ class BuildWiring(unittest.TestCase):
             "editing the AES driver would not move the build id",
         )
 
+    def test_rf_crypt_is_compiled_and_feeds_the_build_id(self):
+        """The CCM layer is a common source on BOTH chips, above BUILD_ID.
+
+        Same failure mode as the driver checks above: a common source left out
+        of APP_SRC compiles nothing (the encrypted RX path would silently not
+        exist), and one added below `BUILD_ID :=` compiles but does not move the
+        build id -- which the hardware runner's build-id gate relies on.
+        """
+        for makefile in (CH570_MAKEFILE, CH592_MAKEFILE):
+            with self.subTest(makefile=makefile.name):
+                lines = _lines(makefile)
+                added = _first_index(
+                    lines,
+                    lambda ln: re.match(
+                        r"^APP_SRC\s*\+?=.*rf_crypt\.c", ln),
+                    f"the APP_SRC line adding rf_crypt.c in {makefile.name}")
+                computed = _first_index(
+                    lines, lambda ln: ln.startswith("BUILD_ID :="),
+                    "the BUILD_ID := line")
+                self.assertLess(
+                    added, computed,
+                    f"rf_crypt.c is added to APP_SRC after BUILD_ID in "
+                    f"{makefile.name}",
+                )
+
 
 class BackendSelectionIsVisibleInTheBuildId(unittest.TestCase):
     """Choosing a different CH570 backend must produce a different build id.

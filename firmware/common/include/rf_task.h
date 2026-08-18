@@ -32,6 +32,8 @@
 #define RF_EVT_BOOT_WINDOW       0x0400  /* boot reconnect/pair listen-window timer */
 #define RF_EVT_PERSIST_BOND      0x0800  /* deferred DataFlash bond write (task ctx, out of the radio ISR) */
 #define RF_EVT_QUIESCE           0x1000  /* pre-reboot: shut the radio in executor context, stop re-arming */
+#define RF_EVT_CRYPT_RX          0x2000  /* task: verify+decrypt queued encrypted RX frames (rf_crypt) */
+#define RF_EVT_CRYPT_SESSION     0x4000  /* task: mint a fresh session nonce + arm the announce on connect */
 
 /* Connection states */
 #define RF_STATE_IDLE        0
@@ -55,6 +57,19 @@ void RF_SetHIDCallback(rf_hid_cb_t cb);
  * bond over the cleared record. Invalidates the in-RAM bond, cancels any pending
  * persist, and blocks further persists until the next reset. */
 void RF_TombstoneBond(void);
+
+/* The IAP BondWrite handler calls this AFTER bond_save plus a
+ * bond_load/bond_tuple_equal readback: install the just-verified record into
+ * the running task -- bond identity, key, and encryption latch -- with the
+ * reboot's bond-load semantics, so provisioning takes effect without a reset
+ * (it used to require one, undocumented). Also lifts a BondClear tombstone:
+ * a verified host write is the tombstoning authority provisioning anew.
+ * Foreground main-loop context only (the same loop that pumps the RF
+ * executor). Returns 0 = applied live; 1 = applied-deferred (a key REMOVAL
+ * while the encrypted link is live keeps the link fail-closed-dead and
+ * downgrades to plaintext when it drops -- same rule as the tombstone). */
+#include "bond.h"
+uint8_t RF_ApplyBondRecord(const bond_record_t *rec);
 
 /* CODEREVIEW N08: the chip's factory MAC (pre-override), for the IAP
  * BondWrite semantic validator's own-identity leg. */

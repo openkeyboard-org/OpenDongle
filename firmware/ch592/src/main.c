@@ -42,6 +42,8 @@
 #include "dongle_platform.h"
 #include "usb_device.h"
 #include "iap.h"
+#include "stack_watermark.h"
+#include "uart_diag.h"
 
 /*
  * Production board has ONLY the 32 MHz HSE crystal -- no external 32.768 kHz.
@@ -130,6 +132,11 @@ void Main_Circulation(void)
         /* Forward host HID LED changes from foreground, outside the highcode loop
          * body so USB LED plumbing does not consume timing-critical SRAM. */
         poll_usb_led_state();
+#if DONGLE_UART_DIAG
+        /* Bench telemetry on UART1 PA9: non-blocking, at most one TX-FIFO
+         * fill per pass, one 127-byte frame per second. */
+        UartDiag_Service();
+#endif
     }
 }
 
@@ -137,6 +144,13 @@ int main(void)
 {
     /* Capture reset status before clock/BLE bring-up can perturb it. */
     uint8_t reset_status = R8_RESET_STATUS;
+
+#if DONGLE_STACK_WATERMARK
+    /* Measurement builds: paint the free RAM before the BLE arena and stack
+     * see real work (no entropy-capture constraint on this chip -- review
+     * finding 18 wants the CH592 depth datum too). */
+    stack_watermark_paint();
+#endif
 
     dongle_fault_boot(reset_status);
     SetSysClock(CLK_SOURCE_PLL_60MHz);
@@ -169,10 +183,15 @@ int main(void)
     /* Route EP6 OUT (interface 4) into the IAP dispatcher so the dongle stays
      * in-field reflashable via flash_dongle.py / the stock Windows tool. */
     USB_SetEP6OutCallback(IAP_PacketHandler);
+    USB_SetBusResetCallback(IAP_Reset);   /* reset cancels the IAP session */
 
     /* 2.4G RF receiver. */
     RF_TaskInit();
     RF_SetHIDCallback(usb_hid_callback);    /* forward keyboard reports to USB */
+
+#if DONGLE_UART_DIAG
+    UartDiag_Init();
+#endif
 
     Main_Circulation();
 }

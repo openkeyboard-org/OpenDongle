@@ -56,6 +56,44 @@ VECTORS = [
     ),
 ]
 
+# ------------------------------------------------------------------- CCM (KAT)
+#
+# RFC 3610 packet vectors, AES-128-CCM with M=8 (8-byte tag) and L=2 (13-byte
+# nonce) — the parameters the OpenDongle encrypted-RF frame uses. These pin the
+# CCM *mode* (flags byte, CBC-MAC over B0/AAD/payload, CTR keystream, tag
+# encryption) independently of the AES core, which the ECB VECTORS above pin.
+# `ccm_ref.ccm_encrypt` must reproduce every `ct_tag`, and the firmware CCM layer
+# is graded against `ccm_ref`. All fields hex; `ct_tag` is ciphertext||tag.
+CCM_VECTORS = [
+    {
+        "name": "RFC 3610 packet vector #1",
+        "key": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+        "nonce": "00000003020100a0a1a2a3a4a5",
+        "aad": "0001020304050607",
+        "payload": "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e",
+        "ct_tag": "588c979a61c663d2f066d0c2c0f989806d5f6b61dac384"
+                  "17e8d12cfdf926e0",
+    },
+    {
+        "name": "RFC 3610 packet vector #2",
+        "key": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+        "nonce": "00000004030201a0a1a2a3a4a5",
+        "aad": "0001020304050607",
+        "payload": "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "ct_tag": "72c91a36e135f8cf291ca894085c87e3cc15c439c9e43a3b"
+                  "a091d56e10400916",
+    },
+    {
+        "name": "RFC 3610 packet vector #3",
+        "key": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+        "nonce": "00000005040302a0a1a2a3a4a5",
+        "aad": "0001020304050607",
+        "payload": "08090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        "ct_tag": "51b1e5f44a197d1da46b0f8e2d282ae871e838bb64da8596"
+                  "574adaa76fbd9fb0c5",
+    },
+]
+
 # ---------------------------------------------------------------- differential
 #
 # 512 blocks, each with an INDEPENDENT pseudorandom key and plaintext, folded

@@ -69,3 +69,6 @@ __pycache__/
 # Local agent/editor settings, per-developer. Only ignored globally on the
 # machine that created them, so name it here too.
 .claude/settings.local.json
+
+# JetBrains IDE metadata, per-developer.
+.idea/

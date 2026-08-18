@@ -10,12 +10,16 @@
 #include "dongle_chip.h"        /* __risc_v_disable_irq (same intrinsic as usb_device.c) */
 #include "dongle_platform.h"
 #include "dongle_target.h"      /* HAL_TICKS_PER_US (IAP_Service deadlines) */
+#include "stack_watermark.h"    /* measurement builds only (0x96) */
 #include "hal_timing.h"         /* hal_now (IAP_Service deadlines) */
 #include "dongle_image_id.h"
 #include "openboot_app.h"       /* openboot_request_update (noreturn) */
 #include "usb_device.h"
 #if DONGLE_HAS_RF
 #include "rf_task.h"            /* RF_TombstoneBond (N06), RF_Quiesce* (0x85) */
+#if DONGLE_RF_CRYPT
+#include "rf_crypt.h"           /* RF_CRYPT_DIAG_PREV_SESSION + its counters */
+#endif
 #endif
 
 #include <string.h>
@@ -33,6 +37,11 @@
 #define CMD_VERSION     0x90
 #define CMD_STATUS      0x91
 #define CMD_FAULT       0x93
+#define CMD_CRYPT_DIAG  0x94    /* read-only link-encryption counters */
+#define ACK_CRYPT_DIAG  0x94
+#define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
+#define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
+                                  * (DONGLE_STACK_WATERMARK) */
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -48,6 +57,22 @@ static uint8_t iap_err_count;
  * drives the actual reboot into OpenBoot from the main loop (never inline
  * in the packet handler, so the status reply can still go out). */
 static uint8_t iap_reboot_pending;
+
+/* Bus-reset cancellation (USB_SetBusResetCallback; 2026-08-16 review,
+ * finding 13): a reset tears down the host session, so an armed mutation
+ * window, the error tally, and a NOT-yet-started EnterBootloader must not
+ * survive into the next one -- with live BondWrite activation, a stale
+ * deferred command now rewires running crypto state, not just flash. A
+ * reboot IAP_Service has already begun stays begun, deliberately: its RF
+ * quiesce is one-way, so completing the reboot is the only sane exit (the
+ * service state machine latched past the flag it consumed). ISR context:
+ * byte writes only. */
+void IAP_Reset(void)
+{
+    iap_armed = 0;
+    iap_err_count = 0;
+    iap_reboot_pending = 0;
+}
 
 static void send_reject(void)
 {
@@ -227,11 +252,51 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
         return;
     }
 
+    /* V2: key/flag canonical form. 0xB3 = a provisioned key that is blank/erased,
+     * or a key left in the record without BOND_FLAG_ENC_KEY set. Also rejects a
+     * redacted BondRead view written straight back (ENC_KEY set, key zeroed). */
+    if (!bond_key_flags_valid(&rec)) {
+        iap_err_count++;
+        send_status4(0xB3);
+        return;
+    }
+
     uint8_t status = (uint8_t)bond_save(&rec);
     if (status) {
         iap_err_count++;
+        send_status4(status);   /* 0x01 erase / 0x02 write NV failure */
+        return;
     }
-    send_status4(status);
+
+    /* Read-back verification -- the same discipline the RF task applies to
+     * its own persists (rf_persist_bond_task) and BondClear applies to the
+     * erase. bond_save returning 0 only says the flash driver reported
+     * success; the record the NEXT BOOT will load is what must match. 0xB4 =
+     * written-but-verify-failed: nothing is applied to the running task, so
+     * RAM keeps the previous coherent state. */
+    {
+        bond_record_t back __attribute__((aligned(4)));
+        if (!bond_load(&back) || !bond_tuple_equal(&back, &rec)) {
+            iap_err_count++;
+            send_status4(0xB4);
+            return;
+        }
+    }
+
+#if DONGLE_HAS_RF
+    /* Install into the RUNNING task (finding-2 P0: BondWrite used to persist
+     * and report success while the live crypto state ran the old key until a
+     * reset -- the freshly provisioned peer then required encryption the
+     * dongle would not speak, and "reboot the dongle" was an undocumented
+     * required step). 0xB5 = saved+verified but apply DEFERRED: a key
+     * removal landed while the encrypted link is live; it takes effect when
+     * the link drops (fail-closed until then). */
+    if (RF_ApplyBondRecord(&rec)) {
+        send_status4(0xB5);
+        return;
+    }
+#endif
+    send_status4(0x00);
 }
 
 static void handle_bond_clear(void)
@@ -275,16 +340,155 @@ static void handle_bond_read(void)
      * -- without this, a failed read would leak uninitialized stack over USB. */
     bond_record_t rec = {0};
     int valid = bond_load(&rec);
+    uint8_t redacted = 0u;
+
+    /* Never expose the link key over USB: BondRead is reachable by any host
+     * process that can open the vendor HID, so a readable key would be a
+     * disclosure oracle. Zero it, recompute the checksum so the view stays
+     * self-consistent for display, and flag it in status bit 1. The resulting
+     * ENC_KEY-set / zero-key combination is also non-importable -- BondWrite
+     * rejects it with 0xB3 -- so a redacted view cannot be written back. */
+    if (valid && (rec.flags & BOND_FLAG_ENC_KEY)) {
+        for (uint8_t i = 0; i < sizeof(rec.link_key); i++) {
+            rec.link_key[i] = 0u;
+        }
+        rec.checksum = bond_checksum(&rec);
+        redacted = 0x02u;
+    }
 
     uint8_t resp[3 + sizeof(bond_record_t)];
     resp[0] = ACK_BOND_READ;
     resp[1] = (uint8_t)sizeof(bond_record_t);
-    resp[2] = valid ? 0x00 : 0x01;
+    resp[2] = (uint8_t)((valid ? 0x00u : 0x01u) | redacted);
     for (uint8_t i = 0; i < sizeof(rec); i++) {
         resp[3 + i] = ((const uint8_t *)&rec)[i];
     }
     USB_SendEP6(resp, sizeof(resp));
 }
+
+#if DONGLE_RF_CRYPT
+/* Read-only: verified-frame count then the per-reason drop tally, in
+ * rf_crypt_status_t order (OK, SHAPE, INACTIVE, MAC, REPLAY, ENGINE). A single
+ * drop total cannot tell a failed tag from a replayed counter from a malformed
+ * frame, and those point at completely different bugs on the transmitting end.
+ * Exposed unarmed because it reveals nothing secret -- counts only, no key or
+ * session material. */
+extern uint32_t rf_crypt_drop_reason[6];
+extern uint32_t rf_crypt_ok_count;
+#if RF_CRYPT_AES_DOUBLE
+extern uint32_t rf_crypt_aes_redo;        /* rf_crypt.c: double-compute catches */
+extern uint32_t rf_crypt_announce_retry;  /* rf_task.c: announce-seal rebuilds  */
+#endif
+#if RF_CRYPT_BOOT_KAT
+extern uint8_t  rf_crypt_boot_kat_run;
+extern uint8_t  rf_crypt_boot_kat_fail;
+#endif
+#if RF_CRYPT_DIAG_PREV_SESSION
+extern uint32_t rf_crypt_conn_rx;
+extern uint32_t rf_crypt_enc_shape;
+extern uint32_t rf_crypt_fifo_full;
+extern uint32_t rf_crypt_flush_drop;
+extern uint32_t rf_crypt_plain_drop;
+extern uint8_t  rf_crypt_len_max;
+extern uint8_t  rf_crypt_len_max_tag;
+#endif
+
+static void handle_crypt_diag(void)
+{
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Bench layout, v4: ok(4) + reason[6](24) + pre-verify sink counters(20) +
+     * len_max(1) + len_max_tag(1) + prev-session diagnostic(12) = 62 B, which
+     * with the 2 B header is exactly the 64 B EP6 report -- no room left, so
+     * anything further needs a selector rather than another append. Purely
+     * additive: a v1/v2 reader that stops early still parses. */
+    uint8_t resp[2u + 4u + 24u + 20u + 2u + 12u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u + 20u + 2u + 12u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+    put_le32(&resp[30], rf_crypt_conn_rx);
+    put_le32(&resp[34], rf_crypt_enc_shape);
+    put_le32(&resp[38], rf_crypt_fifo_full);
+    put_le32(&resp[42], rf_crypt_flush_drop);
+    put_le32(&resp[46], rf_crypt_plain_drop);
+    resp[50] = rf_crypt_len_max;
+    resp[51] = rf_crypt_len_max_tag;
+    put_le32(&resp[52], rf_crypt_session_mint_count);
+    /* v4: offset 56 now carries the same-session re-verify count. mac_prev_ok
+     * answered its question (0/34) and still counts internally; reporting it
+     * here would let a prev-session rescue masquerade as a same-session one,
+     * inverting the experiment's conclusion. (The re-verify experiment is
+     * written up in OpenController firmware/docs/TODO.md section 4.) */
+    put_le32(&resp[56], rf_crypt_mac_same_ok);
+    put_le32(&resp[60], rf_crypt_last_mac_ctr);
+    USB_SendEP6(resp, sizeof(resp));
+#else
+    /* Product layout: the health signal -- verified frames, the per-reason
+     * drops, and the stale-abort hardening's own telemetry: ok(4) reason[6](24)
+     * aes_redo(4) announce_retry(4) boot_kat_run(1) boot_kat_fail(1) = 38 B
+     * payload. The hardening fields read zero on a chip without the hardware
+     * engine (CH570); the pre-verify sink forensics are bench-profile
+     * scaffolding (rf_task.c). The two layouts are told apart by their length
+     * and by the status profile byte. Additive appends only. */
+    uint8_t resp[2u + 4u + 24u + 4u + 4u + 1u + 1u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u + 4u + 4u + 1u + 1u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+#if RF_CRYPT_AES_DOUBLE
+    put_le32(&resp[30], rf_crypt_aes_redo);
+    put_le32(&resp[34], rf_crypt_announce_retry);
+#endif
+#if RF_CRYPT_BOOT_KAT
+    resp[38] = rf_crypt_boot_kat_run;
+    resp[39] = rf_crypt_boot_kat_fail;
+#endif
+    USB_SendEP6(resp, sizeof(resp));
+#endif
+}
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* CMD 0x95: the latched first-failure fingerprint plus the secondary
+ * diagnostic counters that no longer fit in the full 0x94 report. Read-only,
+ * served unarmed (counts and already-public frame bytes; the tag proves
+ * nothing without the key, which never leaves the device). */
+static void handle_crypt_last_fail(void)
+{
+    /* [ack][len] latched(1) fail_len(1) session(4) counter(4) expect1(8)
+     * expect2(8) frame(22) same_differs(4) bb_during_aes(4) kat_run(1)
+     * kat_fail(1) = 57-byte payload. */
+    uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u] = {0};
+    uint8_t i;
+
+    resp[0] = 0x95u;
+    resp[1] = (uint8_t)(sizeof(resp) - 2u);
+    resp[2] = rf_crypt_fail_latched;
+    resp[3] = rf_crypt_fail_len;
+    put_le32(&resp[4], rf_crypt_fail_session);
+    put_le32(&resp[8], rf_crypt_fail_counter);
+    for (i = 0; i < 8u; i++) {
+        resp[12 + i] = rf_crypt_fail_expect1[i];
+        resp[20 + i] = rf_crypt_fail_expect2[i];
+    }
+    for (i = 0; i < 22u; i++) {
+        resp[28 + i] = rf_crypt_fail_frame[i];
+    }
+    put_le32(&resp[50], rf_crypt_same_differs);
+    put_le32(&resp[54], rf_crypt_bb_during_aes);
+    resp[58] = rf_crypt_kat_run;
+    resp[59] = rf_crypt_kat_fail;
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+#endif
 
 static void handle_version(void)
 {
@@ -347,6 +551,24 @@ static void handle_fault(void)
     USB_SendEP6(resp, sizeof(resp));
 }
 
+#if DONGLE_STACK_WATERMARK
+/* CMD 0x96: the stack low-water mark since boot (stack_watermark.h). Payload:
+ * low_water(4) end(4) eusrstack(4), LE -- the host computes depth
+ * (eusrstack - low_water) and slack (low_water - end). Read-only, unarmed
+ * (addresses only, and never in a product build). */
+static void handle_stack_watermark(void)
+{
+    uint8_t resp[2u + 12u] = {0};
+
+    resp[0] = CMD_STACK_WATERMARK;
+    resp[1] = 12u;
+    put_le32(&resp[2], stack_watermark_low());
+    put_le32(&resp[6], (uint32_t)(uintptr_t)&_end);
+    put_le32(&resp[10], (uint32_t)(uintptr_t)&_eusrstack);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
 void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
 {
     /* Once a reboot is latched, every further command is dropped without a
@@ -390,6 +612,15 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_VERSION:     handle_version(); break;
     case CMD_STATUS:      handle_status(); break;
     case CMD_FAULT:       handle_fault(); break;
+#if DONGLE_RF_CRYPT
+    case CMD_CRYPT_DIAG:  handle_crypt_diag(); break;
+#if RF_CRYPT_DIAG_PREV_SESSION
+    case CMD_CRYPT_LAST_FAIL: handle_crypt_last_fail(); break;
+#endif
+#endif
+#if DONGLE_STACK_WATERMARK
+    case CMD_STACK_WATERMARK: handle_stack_watermark(); break;
+#endif
     default:              break;
     }
 }

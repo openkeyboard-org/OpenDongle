@@ -125,7 +125,9 @@ else
   ASM_SRC := ../ch570/src/hal_aes_ch570_asm.S
 endif
 
-C_SRCS := aes_validate.c $(PLATFORM_SRC) $(AES_SRC) $(DRV_SRC)
+# rf_crypt is the CCM mode built on the seam; aes_validate runs it on every arm
+# so the encrypted-link cipher is proven identical across backends too.
+C_SRCS := aes_validate.c $(PLATFORM_SRC) $(AES_SRC) $(DRV_SRC) $(COMMON)/src/rf_crypt.c
 S_SRCS := $(STARTUP_SRC) $(ASM_SRC)
 
 # ----------------------------------------------------------------- toolchain
@@ -159,6 +161,13 @@ CFLAGS += -DDONGLE_VALIDATE_SYSTICK_64=$(SYSTICK_64)
 ifdef AES_IMPL
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
 endif
+ifdef USE_HW_AES
+# Hardware-engine arms run rf_crypt with the stale-output-abort hardening ON,
+# because that is the shape the CH592 product ships (rf_crypt.h,
+# RF_CRYPT_AES_DOUBLE). Output-identical to the raw path -- only the block
+# count doubles -- so cross-arm CCM comparison is unaffected.
+CFLAGS += -DRF_CRYPT_AES_DOUBLE=1
+endif
 CFLAGS += $(INCLUDES)
 # One-off experiment hook, e.g. make ARM=... EXTRA_CFLAGS=-DFOO. Above the
 # build-id computation on purpose, so an experiment gets its own identity and
@@ -188,8 +197,12 @@ LDFLAGS += -Wl,--undefined=aes_log
 COMPILER_ID := $(shell "$(CC)" -dumpversion 2>/dev/null)-$(shell "$(CC)" -dumpmachine 2>/dev/null)
 CONFIG_TEXT := schema=2||validation||arm=$(ARM)||chip=$(CHIP)||clock=$(CLOCK_HZ)||backend=$(BACKEND_ID)||corecfgr=$(HAS_CORECFGR)||sdk=$(SDK_REVISION)||cc=$(COMPILER_ID)
 BUILD_ID_TOOL := ../build_identity.py
-BUILD_ID_INPUTS := $(C_SRCS) $(S_SRCS) $(LINK) aes_log_format.h
-BUILD_ID_INPUTS += $(wildcard $(COMMON)/include/*.h) $(wildcard ../ch570/src/*.h)
+BUILD_ID_INPUTS := $(C_SRCS) $(S_SRCS) $(LINK) aes_log_format.h dongle_target.h
+BUILD_ID_INPUTS += $(wildcard $(COMMON)/include/*.h)
+# The local dongle_target.h shadows ch570/src's copy by include order (-I .
+# first), so the shadowed header is not an input to this build -- and the
+# identity tool refuses duplicate basenames anyway.
+BUILD_ID_INPUTS += $(filter-out ../ch570/src/dongle_target.h,$(wildcard ../ch570/src/*.h))
 BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
     --flags 'CFLAGS=$(CFLAGS)' --flags 'LDFLAGS=$(LDFLAGS)' \
     $(BUILD_ID_INPUTS))

@@ -109,6 +109,14 @@ impl DeviceStatus {
     fn profile(&self) -> String {
         match self.profile {
             1 => format!("{}-product", self.chip().to_ascii_lowercase()),
+            // PROFILE=bench (ch592/Makefile BUILD_PROFILE_NUM): the image
+            // carries the compiled-in bench key and UART telemetry. Naming it
+            // loudly here is the runtime half of the profile split -- a bench
+            // build on a desk must never read as a product one.
+            2 => format!(
+                "{}-bench (NOT FOR RELEASE)",
+                self.chip().to_ascii_lowercase()
+            ),
             _ => "unknown".to_string(),
         }
     }
@@ -200,6 +208,17 @@ mod tests {
         assert_eq!(format_hex(&status.dongle_mac, ":"), "BA:47:8B:72:AB:3C");
     }
 
+    // A bench image (profile byte 2, PROFILE=bench) must announce itself as
+    // unshippable in --info output. "unknown" here would be worse than wrong:
+    // it is the runtime detector the profile split relies on.
+    #[test]
+    fn bench_profile_is_named_and_flagged() {
+        let mut r = response();
+        r[2 + 6] = 2;
+        let s = DeviceStatus::decode(&r).unwrap();
+        assert_eq!(s.profile(), "ch570-bench (NOT FOR RELEASE)");
+    }
+
     #[test]
     fn falls_back_to_uid_for_legacy_status() {
         let mut response = response();
@@ -234,7 +253,7 @@ mod tests {
     #[test]
     fn rssi_is_not_reported_without_the_rf_capability() {
         let mut r = response();
-        r[2 + 4] = 0x0E;          // capabilities with CAP_RF cleared
+        r[2 + 4] = 0x0E; // capabilities with CAP_RF cleared
         r[2 + 7] = (-81i8) as u8; // stale/meaningless on an RF-less build
         let s = DeviceStatus::decode(&r).unwrap();
         assert!(s.last_rssi().contains("no RF"), "got {}", s.last_rssi());

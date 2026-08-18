@@ -6,6 +6,11 @@
 /* Callback for data received on EP6 OUT (IAP interface) */
 typedef void (*usb_ep6_out_cb_t)(const uint8_t *data, uint8_t len);
 
+/* Callback invoked from the USB ISR on a bus reset, after the deferred EP6
+ * packet latch is dropped and before EP6 OUT is re-enabled -- the IAP layer
+ * cancels its session state here (IAP_Reset). ISR context: byte writes only. */
+typedef void (*usb_bus_reset_cb_t)(void);
+
 /* Initialize USB device with all 5 HID interfaces */
 void USB_DevInit(void);
 
@@ -36,6 +41,9 @@ int USB_EP6InIdle(void);
 
 /* Register callback for EP6 OUT data */
 void USB_SetEP6OutCallback(usb_ep6_out_cb_t cb);
+
+/* Register the bus-reset cancellation hook (see usb_bus_reset_cb_t) */
+void USB_SetBusResetCallback(usb_bus_reset_cb_t cb);
 
 /* Drain a deferred IAP command (EP6 OUT) from the main loop. The USB ISR latches
  * the packet and NAKs EP6; this runs the registered callback outside ISR context

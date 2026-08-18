@@ -50,8 +50,26 @@ SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 # CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
 # composed into a factory image with every gate green.
 OPENBOOT_REVISION := 19fe429d3fbac8ef8b0bfc83b3660eb23b9f908d
-PROFILE_ID := ch592-product
-TARGET := opendongle-ch592-product
+
+# Build profile. `product` is the shipping configuration. `bench` compiles the
+# UART-only campaign scaffolding -- the compiled-in force key, UART1/PA9
+# telemetry, and the prev-session CCM diagnostics (dongle_target.h's
+# DONGLE_BENCH_PROFILE block). The two are separate object trees, separate
+# artifact names, separate build ids (PROFILE_ID is in CONFIG_TEXT and the
+# -D below is in the hashed CFLAGS), and a bench image self-identifies at
+# runtime through the IAP status profile byte. rf_task.c #errors if the force
+# key ever compiles outside this profile, and the top-level release target
+# byte-scans the packaged artifacts for it -- belt and braces.
+PROFILE ?= product
+ifeq ($(PROFILE),product)
+BUILD_PROFILE_NUM := 1u
+else ifeq ($(PROFILE),bench)
+BUILD_PROFILE_NUM := 2u
+else
+$(error PROFILE must be product or bench, got '$(PROFILE)')
+endif
+PROFILE_ID := ch592-$(PROFILE)
+TARGET := opendongle-ch592-$(PROFILE)
 
 # OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
 # copied here. openboot_app.c derives its boot-record address as
@@ -113,6 +131,9 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-common
 CFLAGS += --param=highcode-gen-section-name=1
 CFLAGS += -DCLK_OSC32K=1
 CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
+ifeq ($(PROFILE),bench)
+CFLAGS += -DDONGLE_BENCH_PROFILE=1
+endif
 # BLE SNV must stay OFF: its default address is BLE_SNV_ADDR =
 # 0x77000-FLASH_ROM_MAX_SIZE, i.e. DataFlash offset 0x7000 - the SAME block as
 # the stage-1 transaction state (CH592_IAP_STATE_EEPROM_OFF).
@@ -168,11 +189,18 @@ ifdef PAIR_MIN_RSSI
 CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
 
+# One-off experiment/measurement hook (e.g. the stack-watermark build:
+# EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1). Consumed before the build-id
+# computation, so an instrumented image gets its own identity and can never
+# pass for the standard bytes. Same pattern as validation/Makefile.
+CFLAGS += $(EXTRA_CFLAGS)
+
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
 LDFLAGS += -L $(BUILD)          # so link.ld's `INCLUDE memory.ld` resolves
+LDFLAGS += $(EXTRA_LDFLAGS)
 
 INCLUDES := -I src -I $(COMMON)/include -I $(BLE_LIB_DIR)
 INCLUDES += -I $(SDK)/BLE/HAL/include
@@ -184,6 +212,7 @@ APP_SRC += src/hal_timing_ch592.c src/hal_rf_ch592.c src/platform_ch592.c
 APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this
 # is the whole backend -- no software cipher is linked here, unlike CH570.
@@ -191,6 +220,13 @@ APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # $(APP_SRC) below), so editing the driver moves the build id. It was in
 # neither before, meaning the file was dead code that no build compiled.
 APP_SRC += src/hal_aes_ch592.c
+
+# BENCH ONLY: UART1-PA9 telemetry mirror of CMD_CRYPT_DIAG, for the USB-less
+# bench (see dongle_target.h DONGLE_UART_DIAG). Compiled -- and hashed into
+# the build id via BUILD_ID_INPUTS -- only in the bench profile.
+ifeq ($(PROFILE),bench)
+APP_SRC += src/uart_diag.c
+endif
 
 HAL_SRC := $(SDK)/BLE/HAL/MCU.c $(SDK)/BLE/HAL/RTC.c
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c
@@ -268,11 +304,22 @@ BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
 ifeq ($(BUILD_ID),)
 $(error failed to calculate firmware build identity)
 endif
-CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
+CFLAGS += -DDONGLE_BUILD_PROFILE=$(BUILD_PROFILE_NUM) -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
 .DEFAULT_GOAL := all
 .PHONY: all openboot-image factory flash-factory bundle check-deps FORCE \
-	check-openboot-toolchain size size-check clean
+	check-openboot-toolchain check-profile size size-check clean
+
+# Packaging refuses the bench profile. The bench campaign DOES flash bench
+# factory images (over SWD, on the USB-less bench), so that one path has an
+# explicit, greppable override; the .obb bundle is a release artifact with no
+# bench use, so it has none.
+check-profile:
+	@test "$(PROFILE)" = product || test -n "$(ALLOW_BENCH_FACTORY)" || { \
+	  echo "refusing to package the '$(PROFILE)' profile: it carries the" >&2; \
+	  echo "compiled-in bench key and UART telemetry (dongle_target.h)." >&2; \
+	  echo "For the bench rig only: make PROFILE=bench ALLOW_BENCH_FACTORY=1 factory" >&2; \
+	  exit 1; }
 
 all: check-factory-slot check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
     $(FACTORY_BIN) size size-check
@@ -291,7 +338,7 @@ $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
 	  cp "$(OPENBOOT_SRC_BIN)" "$@"; echo "openboot image updated: $@"; fi
 
-factory: check-factory-slot check-deps $(FACTORY_BIN) size-check
+factory: check-profile check-factory-slot check-deps $(FACTORY_BIN) size-check
 	@echo "factory image: $(abspath $(FACTORY_BIN))"
 
 flash-factory: factory
@@ -459,19 +506,21 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(CONFIG_STAMP): Makefile | $(BUILD)
+$(CONFIG_STAMP): FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(CONFIG_TEXT)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
 	 trap - 0 1 2 15
 
-# Makefile is a prerequisite because CFLAGS and LDFLAGS are hashed into the
-# build id but are DEFINED here. Without it, a flags-only edit moved the id
-# while this stamp stayed up to date, so nothing recompiled: the objects, the
-# ELF, the ODG2 record and the factory image all kept the old flags and the
-# old id baked in, while the build system advertised the new one. The content
-# guard below still blocks propagation when the id has not actually moved.
-$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile | $(BUILD)
+# FORCE, not Makefile-mtime: CFLAGS and LDFLAGS are hashed into the build id
+# but a command-line override (EXTRA_CFLAGS / EXTRA_LDFLAGS, e.g. the
+# stack-watermark build) changes them without touching any file, so an
+# mtime-based stamp stayed up to date while the id moved -- nothing
+# recompiled, and the image kept the old flags and old id baked in while the
+# build system advertised the new one. The recipe now RUNS every invocation
+# and the content guard blocks propagation when the id has not actually
+# moved. (Same mechanism, same reason, as validation/Makefile.)
+$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(BUILD_ID)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
@@ -551,7 +600,12 @@ size-check: $(BUILD)/$(TARGET).bin
 
 # Both slots plus the bundle. Recursive because SLOT selects the object tree,
 # the link base and the -D values, so the two builds cannot share a pass.
+# No bench override here: an .obb is an update artifact for fielded devices,
+# and there is no bench workflow that updates over USB.
 bundle:
+	@test "$(PROFILE)" = product || { \
+	  echo "refusing a '$(PROFILE)'-profile bundle: .obb is a release artifact" >&2; \
+	  exit 1; }
 	+$(MAKE) SLOT=A $(SLOT_A_BIN)
 	+$(MAKE) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \

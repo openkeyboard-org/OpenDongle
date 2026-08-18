@@ -1,0 +1,47 @@
+# Host-side gates only. This is deliberately NOT a release gate: the MounRiver
+# cross toolchain is not redistributable, so CI can never link either chip,
+# build a bundle, or run check-deps against the pinned compiler. A green run
+# here means the host suites pass - nothing more. "This tree can ship" is
+# `make -C firmware release` on a machine with both pinned toolchains, plus
+# the hardware matrix (see firmware/Makefile).
+name: host
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware-host:
+    name: firmware host suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Only OpenBoot: the host tests read its bench harness and geometry.
+      # The openwch SDK submodules are cross-build inputs CI cannot use, and
+      # OpenBoot's own nested submodules are the same SDKs again - skip both.
+      - name: init the OpenBoot submodule
+        run: git submodule update --init third_party/openboot
+      - name: host test suite
+        run: make -C firmware test
+
+  tools:
+    name: rust cli
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@v4
+      - name: hidapi native deps
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - name: format
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: tests
+        run: cargo test
