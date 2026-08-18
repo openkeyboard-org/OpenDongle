@@ -15,26 +15,49 @@ first). The keyboard bench key is RAM-only, so it is re-sent after each reset.
 """
 
 import os
+import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ch570_validate import (  # noqa: E402
-    Kbd, Iap, BENCH_KEY, KBD_PORT, KST_CONNECTED, KST_KEYED_OK, inject_f13, log)
+    Kbd, Iap, BENCH_KEY, KBD_PORT, inject_f13, log)
+
+MINICHLINK = os.path.expanduser(
+    "~/Development/Personal/WCH/ch32fun/minichlink/minichlink")
+KBD_PROBE = "CEBD8F0653EF"
+
+
+def kbd_power(state):
+    flag = "-kt" if state == "off" else "-k3"
+    subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
+                   capture_output=True, timeout=30)
 
 
 def reconnect_and_key(kbd, dg):
+    # Robust: don't wait for a keyboard 5B 32 (absent when it never dropped);
+    # send A6 30 (reconnect) + 0xAE (re-key, RAM-only) and confirm the dongle's
+    # ok_count resumes -- the encrypted link is up iff frames verify.
     kbd.status.clear()
-    kbd.send([0xA6, 0x30])                      # bonded reconnect
-    if not kbd.wait(KST_CONNECTED, 30.0):
-        log("  WARN: no reconnect (5B 32)")
-        return False
-    kbd.send(bytes([0xAE]) + BENCH_KEY)          # re-key (RAM-only)
-    if not kbd.wait(KST_KEYED_OK, 3.0):
-        log("  WARN: re-key not confirmed (5B 21)")
-        return False
-    log("  reconnected + re-keyed")
-    return True
+    kbd.ser.read(4096)
+    d0 = dg.crypt_diag()
+    ok0 = d0["ok"] if d0 else 0
+    end = time.time() + 60.0
+    last_nudge = 0.0
+    while time.time() < end:
+        kbd.pump()
+        if time.time() - last_nudge >= 5.0:
+            kbd.send([0xA6, 0x30])                  # nudge bonded reconnect
+            kbd.send(bytes([0xAE]) + BENCH_KEY)      # (re)key, RAM-only
+            last_nudge = time.time()
+        inject_f13(kbd)
+        d = dg.crypt_diag()
+        if d and d["ok"] >= ok0 + 15:
+            log(f"  encrypted link up (ok {ok0}->{d['ok']})")
+            return True
+        time.sleep(0.4)
+    log("  WARN: encrypted frames did not resume in 60 s")
+    return False
 
 
 def soak(kbd, dg, seconds, label):
@@ -75,8 +98,16 @@ def main():
         log("ABORT: dongle not provisioned -- run ch570_validate.py first")
         return 2
 
+    # Hard power-cycle the keyboard for a clean full reconnect: a fresh connect
+    # is what mints + announces a session the (reset, unkeyed) keyboard can
+    # adopt -- a bare A6 30 after a port-reset leaves it connected but without
+    # the current session (fire-and-forget announce window already closed).
+    log("power-cycling keyboard (clean connect -> fresh session mint)")
+    kbd_power("off")
+    time.sleep(2.0)
+    kbd_power("on")
     kbd = Kbd(KBD_PORT)
-    log("keyboard port open (DTR-reset); settling 11 s")
+    log("keyboard port open; settling 11 s")
     time.sleep(11.0)
     kbd.ser.read(4096)
 
