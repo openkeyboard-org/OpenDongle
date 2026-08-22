@@ -95,6 +95,7 @@ def grab_window(serial, off=4.0, tries=400, lead=0.005, verbose=True):
     usb.util.claim_interface(dev, 0)
 
     def cmd(payload, timeout=300):
+        """One LinkE request/response, as hex; "ERR" on any USB failure."""
         try:
             dev.write(0x01, payload, timeout=timeout)
             return bytes(dev.read(0x81, 64, timeout=timeout)).hex()
@@ -112,12 +113,22 @@ def grab_window(serial, off=4.0, tries=400, lead=0.005, verbose=True):
             cmd(bytes([0x81, 0x0D, 0x01, 0xFF]))
             cmd(bytes([0x81, 0x0C, 0x02, CH570_FAMILY, 0x02]))
             reply = cmd(bytes([0x81, 0x0D, 0x01, 0x02]))
-            if reply != "ERR" and not reply.startswith("8155"):
-                if verbose:
-                    print(f"debug window claimed on attempt {attempt + 1} "
-                          f"({(time.time() - t_on) * 1000:.0f} ms after "
-                          f"power-on): {reply}")
-                return reply
+            # 8155... is the LinkE's "no target", which is also what an unwired
+            # probe answers -- easy to misread as a dead board.
+            if reply == "ERR" or reply.startswith("8155"):
+                continue
+            # Refuse to erase a part that is not the one we were aimed at. A
+            # good connect looks like 82 0d 05 8b 70 ... -- family then chip id.
+            raw = bytes.fromhex(reply)
+            if len(raw) < 5 or raw[3] != CH570_FAMILY or raw[4] != CH570_CHIP_ID:
+                print(f"attached part is not a CH570 (connect reply {reply}); "
+                      f"refusing to flash", file=sys.stderr)
+                return None
+            if verbose:
+                print(f"debug window claimed on attempt {attempt + 1} "
+                      f"({(time.time() - t_on) * 1000:.0f} ms after "
+                      f"power-on): {reply}")
+            return reply
         return None
     finally:
         usb.util.release_interface(dev, 0)
@@ -145,7 +156,9 @@ def flash(image_path, serial):
     img = pathlib.Path(image_path).read_bytes()
     if not img:
         sys.exit(f"{image_path} is empty")
-    print(f"flashing {len(img)} bytes from {image_path} via {serial}")
+    # flush: the grab's failures go to stderr, so an unflushed stdout here
+    # makes the bench log read backwards.
+    print(f"flashing {len(img)} bytes from {image_path} via {serial}", flush=True)
 
     tmp = tempfile.mkdtemp(prefix="ch570flash-")
     try:
@@ -198,6 +211,7 @@ def flash(image_path, serial):
 
 
 def main():
+    """CLI entry point: 0 when the whole image verified, 1 otherwise."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("image", help="raw .bin to program at flash offset 0")
     ap.add_argument("--probe", default="CF148F065446",
