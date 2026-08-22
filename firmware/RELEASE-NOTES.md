@@ -204,9 +204,28 @@ the table above. The booted app then reported build id `132BF22D` over IAP
 `0x91`. That is the end-to-end check this section describes, now done for CH570
 slot A as well as CH592.
 
-Do not read that as broader coverage. It is the image pin and nothing else: no
-air leg, no encryption arm, no bond or provisioning path has run on CH570 under
-this pin.
+**CH570 production path, on silicon 2026-08-22.** With the dongle on USB and the
+keyboard's UART restored, `bench/ch570_validate.py` now runs end to end in the
+order this project documents — keyboard broadcasting, dongle restarted into the
+running stream, i.e. the order OC-01 is about:
+
+| gate | result |
+|---|---|
+| G1 capability negotiated on air (`ENC_CAPABLE` latched) | **6/6** |
+| G2 live activation (`ok_count` climbs, F13 delivered host-side) | **4/5** |
+
+`drop_mac 0` and `replay 0` in every trial, `aes_redo 0`, `announce_retry 0`,
+`kat_fail 0`. The single G2 miss was a deliberately shortened 8 s observation
+window (`ok=0`, `mac=0`) rather than a crypto failure; at the intended 30 s hold
+G2 is 2/2. A representative pass: bond `flags 0x01` after the fresh pair, then
+USB `BondWrite` → `flags 0x03`, encryption ACTIVE with no reset, `ok 0->137`.
+
+That closes the CH570 half of the capability (P0 #3) and live-provisioning
+(P0 #2) legs, and is the first on-silicon evidence that capability latches in
+the documented pairing order rather than only in the control order.
+
+Still not covered on CH570: the six AES/CCM arms, the A/B power-cut acceptance,
+the encrypted soak and reacquire legs, and anything on CH572.
 
 One correction, because an earlier revision of this file claimed otherwise: the
 same image was first pushed over SWD with `bench/ch570_swd_flash.py`, which
@@ -221,11 +240,10 @@ delivered, boot KAT); both backwards-compatibility directions on one unmodified
 dongle image; and the two P1 regression experiments (same-peer re-pair key
 preservation, capability negotiation in the documented pairing order).
 
-**Do not treat this as a shipping sign-off.** A release still needs the CH570
-air legs, the six on-silicon AES arms, and the A/B power-cut acceptance. The
-CH570 is now on USB and reachable, so its remaining legs are blocked on the
-keyboard UART link (silent in both directions as of this writing), not on the
-dongle.
+**Do not treat this as a shipping sign-off.** A release still needs the six
+on-silicon AES arms, the A/B power-cut acceptance, the CH570 soak/reacquire
+legs, and CH572 hardware this bench does not have. The CH570 production path
+itself is now covered (table above).
 
 ## Known issues
 

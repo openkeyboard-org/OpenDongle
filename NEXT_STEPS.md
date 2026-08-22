@@ -51,11 +51,23 @@ first and its byte-for-byte "verify" was **wrong**. The app slot was still empty
 afterwards. Confirm CH570 flashes over USB, never from `ch570_swd_flash.py`
 output.
 
-What is still not covered: no CH572 on this bench at all, and the CH570 air and
-encryption legs are blocked on the **keyboard UART**, which is silent in both
-directions (the keyboard app runs and drives PB12/PB13; bridges to PA8/PA9 are
-in place, so this looks like the known marginal-wiring failure — reseat before
-theorising). Two further legs stay blocked by tooling: `aes-hw-validate` and the
+**The CH570 production path now passes on silicon** (2026-08-22, after reseating
+the keyboard UART): `bench/ch570_validate.py` gives **G1 capability-on-air 6/6**
+and **G2 live activation 4/5**, `drop_mac 0`/`replay 0` throughout, run in the
+documented pairing order — the order OC-01 is about. The one G2 miss was a
+shortened 8 s observation window, not a crypto failure; at the intended 30 s
+hold it is 2/2.
+
+Getting there needed three fixes to the harness itself, all timing, all of which
+had been reporting as a dead radio link: the dongle accepts a pair only for its
+first ~2-3 s of app uptime, the keyboard broadcasts for only ~5.3 s, and
+`--enter-bootloader` takes ~12 s to return — so the pair window has to be armed
+*late*, during the dongle's reboot, with the bond cleared *before* the keyboard
+arms (its tombstone is what stops an instant pair that the reset would then
+destroy). See the commit for the full account.
+
+What is still not covered: no CH572 on this bench at all; the CH570
+soak/reacquire legs; and two legs blocked by tooling — `aes-hw-validate` and the
 A/B power-cut bench both flash over SWD with minichlink, which cannot connect to
 ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
 `firmware/bench/README-link-encryption.md`).
