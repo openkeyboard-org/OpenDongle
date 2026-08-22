@@ -1404,14 +1404,18 @@ static uint8_t rf_crypt_pending_plain;
  * unbonded) and tombstone are the reset points -- NOT the beacon accept, and
  * NOT the fresh-pair relisten. Both of those look like tidy scope boundaries
  * and both lose the negotiation:
- *   - the advert is anonymous and arrives BEFORE the first beacon (the
- *     keyboard sends it in pair-broadcast slots 0-1, the beacon in slot 2),
- *     so clearing at accept deterministically erased the latch the advert
- *     had just set -- the capability was never persisted and encryption
- *     could never activate (2026-08-16 review, finding 3);
- *   - the relisten path retries the SAME still-broadcasting keyboard, whose
- *     adverts now come only one slot in eight, so a reset there loses the
- *     race again on every unconfirmed-promote retry.
+ *   - the advert is anonymous and arrives BEFORE the beacon we accept: the
+ *     keyboard leads every beacon with one (2.5 ms earlier, same channel), so
+ *     clearing at accept deterministically erases the latch the advert had
+ *     just set -- the capability is never persisted and encryption can never
+ *     activate (2026-08-16 review, finding 3). Before 2026-08-22 the advert
+ *     rode slots 0,1 then one in eight, which made this true only for a dongle
+ *     camped from the keyboard's first slot; joining mid-stream met a beacon
+ *     first and lost the capability outright (OC-01, measured 0/10 in the
+ *     documented pairing order, 12/12 after);
+ *   - the relisten path retries the SAME still-broadcasting keyboard, so a
+ *     reset there throws away a latch that is about to be re-set anyway, and
+ *     loses the race on any retry that promotes before the next advert.
  * The cost of the wide scope is a mislatch when a capable keyboard advertises
  * and a DIFFERENT keyboard's pair completes in the same camp session. That is
  * inert -- capability alone never enables encryption; a key must be

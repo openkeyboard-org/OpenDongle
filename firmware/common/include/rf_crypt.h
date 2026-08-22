@@ -72,11 +72,16 @@
  *     requirement. A same-peer accept keeps it -- a reconnect can never
  *     downgrade an encrypted bond to plaintext.
  *   - peer_capable: NEVER cleared at accept. The capability advert is
- *     anonymous and precedes the first beacon (broadcast slots 0-1 vs 2), so
- *     an accept-time clear deterministically erases what the advert just
- *     latched and the capability is never persisted -- the 2026-08-16
- *     review's finding 3. Its resets live at boot and tombstone; see the
- *     latch declaration in rf_task.c for the full scoping argument.
+ *     anonymous and precedes the beacon we accept -- since 2026-08-22 the
+ *     keyboard leads EVERY beacon with one, on the same channel, so this holds
+ *     wherever in the stream we join. (It did not always: the advert used to
+ *     ride slots 0,1 then one in eight, which held only for a dongle camped
+ *     from the keyboard's very first slot and is why capability latched 0/10 in
+ *     the documented pairing order -- OC-01.) An accept-time clear therefore
+ *     erases what the advert just latched, and the capability is never
+ *     persisted -- the 2026-08-16 review's finding 3. Its resets live at boot
+ *     and tombstone; see the latch declaration in rf_task.c for the full
+ *     scoping argument.
  *
  * The unused parameter is the contract: whoever edits this signature is
  * looking at the one place an accept-time clear of the capability latch
