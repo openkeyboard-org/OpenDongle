@@ -839,7 +839,7 @@ static void rf_arm_bond_persist(void);
  * air-persist a record the boot validator then rejects — re-pair every boot
  * — so it must never be accepted in the first place). On CH570 the accept
  * sites live in the __HIGH_CODE radio-IRQ sink and the product sits against
- * the 2 KB stack-floor assert, so keep the check flash-resident (a call, not
+ * the CH570_STACK_FLOOR assert, so keep the check flash-resident (a call, not
  * an inline body — same precedent as rf_return_to_fresh_pair /
  * rf_test_synth_hid_tick). On CH59x (TMOS, ample SRAM) inline it. */
 #if !RF_TASK_EXECUTOR_TMOS
@@ -1514,15 +1514,24 @@ uint32_t rf_crypt_conn_rx;
 uint32_t rf_crypt_enc_shape;
 uint32_t rf_crypt_fifo_full;
 uint32_t rf_crypt_flush_drop;
-uint32_t rf_crypt_plain_drop;
 uint8_t  rf_crypt_len_max;
 uint8_t  rf_crypt_len_max_tag;
 #endif /* RF_CRYPT_DIAG_PREV_SESSION */
 
+/* NOT bench-gated, unlike its neighbours above: a refused plaintext downgrade
+ * on an ACTIVE encrypted bond is the one pre-verify drop with a security
+ * meaning, and on a product build it was previously invisible in EVERY channel
+ * -- the frame never reaches rf_crypt_rx, so no drop_reason[] bucket moves and
+ * the only downstream effect is an unattributed connection flap. That made an
+ * active downgrade/forgery attempt indistinguishable from RF flakiness on a
+ * shipping unit. 4 bytes of .bss against the CH570 floor's measured 1372 B of
+ * slack. Exported in the product 0x94 (iap.c). */
+uint32_t rf_crypt_plain_drop;
+
 static uint32_t rf_crypt_gen_session_id(void);   /* defined near rf_aa_rng16 */
 
 /* IRQ-sink helper (flash-resident noinline: the sink is __HIGH_CODE and CH570
- * sits against the 2 KB stack-floor assert -- same precedent as
+ * sits against the CH570_STACK_FLOOR assert -- same precedent as
  * rf_accept_peer_mac). Copy one encrypted frame into the FIFO; 1 if queued. */
 __attribute__((noinline))
 static uint8_t rf_crypt_fifo_push(const uint8_t *frame, uint8_t len)
@@ -1893,9 +1902,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                          * downgrade/forgery attempt. Drop it -- never forward,
                          * never confirm. (Polls and other frames fall through so
                          * poll-ack confirm + supervision are unchanged.) */
-#if RF_CRYPT_DIAG_PREV_SESSION
                         rf_crypt_plain_drop++;
-#endif
                         enc_handled = 1u;
                     }
                 }
@@ -3639,11 +3646,33 @@ static void rf_persist_bond_task(void)
     (void)__risc_v_enable_irq(irq);
 
     bond_record_t cur __attribute__((aligned(4)));
-    if (bond_load(&cur) && bond_tuple_equal(&cur, &want)) {
-        /* stored record already matches the full tuple (incl. the N09
-         * dongle identity); no write */
-        rf_bond_persisted = 1;
-        return;
+    if (bond_load(&cur)) {
+        /* A same-peer fresh pair rebuilds the candidate from RAM, which cannot
+         * carry link_key (rf_commit_bond_ram runs in the radio-IRQ sink and the
+         * AES engine has no key readback), so without this the keyless
+         * candidate would be written over a provisioned key -- and precisely
+         * because bond_tuple_equal() compares link_key, the skip below would
+         * NOT have caught it. Task context, on the IRQ-snapshot-isolated local:
+         * the only place both records are in scope. */
+        bond_carry_link_key(&cur, &want);
+        if (want.flags & BOND_FLAG_ENC_KEY) {
+            /* Keep the published RAM snapshot consistent with what is (or
+             * already was) in flash. Without this rf_bond_persisted would be
+             * latched while rf_bond_pending_rec still held the keyless
+             * candidate, falsifying that flag's documented meaning -- harmless
+             * today because nothing else consumes the pending record, but a
+             * trap for the rekey/KX work that will (Codex review). */
+            uint32_t irq2 = __risc_v_disable_irq();
+            tmos_memcpy(rf_bond_pending_rec.link_key, want.link_key, 16);
+            rf_bond_pending_rec.flags = want.flags;
+            (void)__risc_v_enable_irq(irq2);
+        }
+        if (bond_tuple_equal(&cur, &want)) {
+            /* stored record already matches the full tuple (incl. the N09
+             * dongle identity); no write */
+            rf_bond_persisted = 1;
+            return;
+        }
     }
 
     /* N08 defense-in-depth: never durably persist a tuple the next boot's

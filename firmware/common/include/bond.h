@@ -114,6 +114,62 @@ static inline int bond_key_flags_valid(const bond_record_t *rec)
     return bond_key_is_zero(rec->link_key);
 }
 
+/* Carry a provisioned link key across a fresh-pair persist for the SAME peer.
+ *
+ * rf_commit_bond_ram() rebuilds the pending record from RAM and cannot restore
+ * link_key: it runs in the __HIGH_CODE radio-IRQ sink where a DataFlash read is
+ * not legal, and hal_aes never lets an installed key back out (there is no
+ * readback API by design). A same-peer re-pair therefore built a KEYLESS
+ * candidate -- and because bond_tuple_equal() compares link_key, the pre-write
+ * skip did NOT fire, so the keyless record was written over the keyed one and
+ * the provisioned key was destroyed. Reachable because the boot window
+ * alternates onto the pair AA (rf_task.c), so a pairing-mode broadcast from the
+ * already-bonded peer classifies as fresh. Measured 8/8 on silicon 2026-08-22.
+ *
+ * The decision is keyed on the STORED record, never on the live
+ * rf_crypt_bond_enc latch: a host key-removal (IAP BondWrite, deferred status
+ * 0xB5) leaves the stored record keyless while that latch stays set until the
+ * live link drops, so keying off the latch would silently undo a deliberate
+ * downgrade. A different peer, a keyless store, or an erased page (bond_load
+ * fails, so this is never reached) all leave `want` untouched.
+ *
+ * Capability is not carried here because it does not need to be:
+ * rf_crypt_peer_capable is loaded from the stored record at boot and is
+ * deliberately never cleared on a same-peer accept, so the rebuilt candidate
+ * already arrives with ENC_CAPABLE. A same-peer re-pair therefore RESTORES the
+ * full 0x03 relationship, which is the point -- the bond remembers.
+ *
+ * The trade-off, stated plainly (Codex review): a peer that re-pairs WITHOUT
+ * the key it used to hold -- factory-reset, re-flashed to a plaintext build, or
+ * replacement hardware reusing the MAC -- now meets a dongle that still requires
+ * encryption, so the link is fail-closed dead until the operator clears the bond
+ * (IAP 0x89, or unpair). That is the correct failure direction and is strictly
+ * better than what it replaces: before this fix the same re-pair silently
+ * DOWNGRADED a provisioned pair to plaintext, which is the security failure
+ * AR-01 describes. MAC equality is peer identity, not proof of key possession;
+ * a cryptographic continuity check is KEXv1's job, not this repair's. */
+static inline void bond_carry_link_key(const bond_record_t *stored,
+                                       bond_record_t *want)
+{
+    int i;
+
+    if (!(stored->flags & BOND_FLAG_ENC_KEY) || !bond_key_flags_valid(stored)) {
+        return;
+    }
+    if (want->flags & BOND_FLAG_ENC_KEY) {
+        return;                  /* candidate already carries its own key */
+    }
+    for (i = 0; i < 6; i++) {
+        if (stored->peer_mac[i] != want->peer_mac[i]) {
+            return;              /* a different keyboard never inherits a key */
+        }
+    }
+    for (i = 0; i < 16; i++) {
+        want->link_key[i] = stored->link_key[i];
+    }
+    want->flags |= BOND_FLAG_ENC_KEY;
+}
+
 /* The reconnect-critical persistence tuple, INCLUDING the advertised dongle
  * identity (CODEREVIEW N09: auto-persist used to compare/copy only
  * AA/interval/timeout/peer, silently reverting a configured dongle_mac to
