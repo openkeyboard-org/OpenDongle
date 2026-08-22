@@ -21,7 +21,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ch570_validate import (  # noqa: E402
-    Kbd, Iap, BENCH_KEY, KBD_PORT, inject_f13, log)
+    Kbd, Iap, BENCH_KEY, KBD_PORT, WANT_FAMILY, WANT_PROFILE, inject_f13, log)
 
 MINICHLINK = os.path.expanduser(
     "~/Development/Personal/WCH/ch32fun/minichlink/minichlink")
@@ -101,12 +101,15 @@ def soak(kbd, dg, seconds, label):
             worst_mac = max(worst_mac, d["mac"])
         if time.time() - tail_mark >= tail_window:
             # A window in which nothing verified is a stall, even if the
-            # cumulative counter climbed earlier in the run.
-            if not fresh or fresh["ok"] <= tail_ok:
+            # cumulative counter climbed earlier in the run. Judge on the LAST
+            # good sample, not on `fresh`: a single 1 s IAP read timeout is not
+            # evidence the link died (CodeRabbit review).
+            latest = d["ok"] if d else tail_ok
+            if latest <= tail_ok:
                 stalls += 1
                 log(f"  STALL: no verified frames in the last {tail_window:.0f}s "
                     f"(ok stuck at {tail_ok})")
-            tail_ok = fresh["ok"] if fresh else tail_ok
+            tail_ok = latest
             tail_mark = time.time()
         if time.time() - last_log >= 20.0 and d:
             log(f"  ok={d['ok']} mac={d['mac']} replay={d['replay']} "
@@ -119,15 +122,21 @@ def soak(kbd, dg, seconds, label):
     # Pre-verify drops are silent in the cumulative counters, so require them
     # flat too: shape/inactive/engine moving means frames arrived and were
     # rejected before the MAC check ever ran.
+    # Pre-verify drops are invisible in the cumulative counters. enc_shape only
+    # exists on the bench layout, but plain_drop is now exported on product too,
+    # so at least one of these checks runs on every profile.
     shape_clean = True
-    if final and d0 and "conn_rx" in final and "conn_rx" in d0:
-        shape_clean = final.get("enc_shape", 0) == d0.get("enc_shape", 0)
+    for field in ("enc_shape", "plain_drop"):
+        if final and d0 and field in final and field in d0:
+            if final[field] != d0[field]:
+                shape_clean = False
+                log(f"{label}: {field} moved {d0[field]} -> {final[field]}")
     log(f"{label}: ok {ok0}->{final['ok'] if final else '?'}, "
         f"worst drop_mac {worst_mac}, stalled windows {stalls}")
     if stalls:
         log(f"{label}: FAIL -- {stalls} window(s) verified nothing")
     if not shape_clean:
-        log(f"{label}: FAIL -- enc_shape moved (pre-verify drops)")
+        log(f"{label}: FAIL -- pre-verify drops occurred")
     climbed = climbed and stalls == 0 and shape_clean
     return climbed and worst_mac == 0
 
@@ -136,6 +145,7 @@ def main():
     dg = Iap()
     dg.handshake()
     dg.arm()
+    dg.require(WANT_FAMILY, WANT_PROFILE)
     valid, flags = dg.bond_flags()
     log(f"dongle bond flags=0x{flags:02X} ({dg.status_line()}) "
         f"-- want 0x03 (provisioned)")

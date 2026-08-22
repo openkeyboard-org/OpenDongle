@@ -41,6 +41,9 @@ PROVISION = os.path.join(HERE, "provision_link_key.py")
 
 VID, PID = 0x0C45, 0xFEFE
 
+# Despite the ch570_* name this validator is chip-generic (it finds the dongle by
+# USB identity, not family), so the family is a parameter and defaults to the
+# CH592 currently on the bench.
 # Which dongle this run is allowed to drive, and therefore which 0x94 layout to
 # expect. family: 0x70 = CH570, 0x92 = CH592 (DONGLE_CHIP_FAMILY_ID).
 # profile: 1 = product, 2 = bench (DONGLE_BUILD_PROFILE). Override per run.
@@ -268,8 +271,10 @@ def _reopen_iap(timeout=40.0):
                 dev = cand
                 break
             cand.close()
+        except KeyboardInterrupt:
+            raise
         except BaseException:
-            pass
+            pass                          # absent/settling: keep waiting
         time.sleep(1.0)
     if dev is None:
         raise SystemExit("dongle did not come back after reset")
@@ -301,8 +306,13 @@ def main():
         raise SystemExit(f"dongle BondClear failed: {r.hex() if r else 'timeout'}")
     log("dongle bond cleared (0x89); resetting to lift the pair tombstone")
     dg.close()
-    subprocess.run([OPENDONGLE_CLI, "--enter-bootloader", "--force"],
-                   capture_output=True, timeout=30)
+    rst = subprocess.run([OPENDONGLE_CLI, "--enter-bootloader", "--force"],
+                         capture_output=True, timeout=30)
+    if rst.returncode != 0:
+        raise SystemExit(
+            f"dongle reset failed (rc={rst.returncode}); the pair tombstone is "
+            f"still up and no pair can complete: "
+            f"{rst.stderr.decode(errors='replace').strip()[:200]}")
     dg = _reopen_iap()
     log(f"dongle back up ({dg.status_line()}), bond {dg.bond_flags()}")
 

@@ -20,7 +20,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ch570_validate import (  # noqa: E402
-    Iap, Kbd, BENCH_KEY, KBD_PORT, inject_f13, log)
+    Iap, Kbd, BENCH_KEY, KBD_PORT, WANT_FAMILY, WANT_PROFILE, inject_f13, log)
 
 MINICHLINK = os.path.expanduser(
     "~/Development/Personal/WCH/ch32fun/minichlink/minichlink")
@@ -73,6 +73,7 @@ def main():
     dg = Iap()
     dg.handshake()
     dg.arm()
+    dg.require(WANT_FAMILY, WANT_PROFILE)
     valid, flags = dg.bond_flags()
     if not (valid and flags & 0x02):
         log("ABORT: dongle not provisioned -- run ch570_validate.py first")

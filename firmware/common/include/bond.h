@@ -148,6 +148,19 @@ static inline int bond_key_flags_valid(const bond_record_t *rec)
  * DOWNGRADED a provisioned pair to plaintext, which is the security failure
  * AR-01 describes. MAC equality is peer identity, not proof of key possession;
  * a cryptographic continuity check is KEXv1's job, not this repair's. */
+static inline int bond_peer_mac_equal(const bond_record_t *a,
+                                      const bond_record_t *b)
+{
+    int i;
+
+    for (i = 0; i < 6; i++) {
+        if (a->peer_mac[i] != b->peer_mac[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static inline void bond_carry_link_key(const bond_record_t *stored,
                                        bond_record_t *want)
 {
@@ -159,10 +172,8 @@ static inline void bond_carry_link_key(const bond_record_t *stored,
     if (want->flags & BOND_FLAG_ENC_KEY) {
         return;                  /* candidate already carries its own key */
     }
-    for (i = 0; i < 6; i++) {
-        if (stored->peer_mac[i] != want->peer_mac[i]) {
-            return;              /* a different keyboard never inherits a key */
-        }
+    if (!bond_peer_mac_equal(stored, want)) {
+        return;                  /* a different keyboard never inherits a key */
     }
     for (i = 0; i < 16; i++) {
         want->link_key[i] = stored->link_key[i];

@@ -3657,14 +3657,24 @@ static void rf_persist_bond_task(void)
         bond_carry_link_key(&cur, &want);
         if (want.flags & BOND_FLAG_ENC_KEY) {
             /* Keep the published RAM snapshot consistent with what is (or
-             * already was) in flash. Without this rf_bond_persisted would be
-             * latched while rf_bond_pending_rec still held the keyless
-             * candidate, falsifying that flag's documented meaning -- harmless
-             * today because nothing else consumes the pending record, but a
-             * trap for the rekey/KX work that will (Codex review). */
+             * already was) in flash: without this rf_bond_persisted would latch
+             * while rf_bond_pending_rec still held the keyless candidate,
+             * falsifying that flag's documented meaning -- harmless today
+             * because nothing else consumes the pending record, but a trap for
+             * the rekey/KX work that will (Codex review).
+             *
+             * bond_load() above ran with interrupts ENABLED, so the radio IRQ
+             * may have published a newer candidate for a DIFFERENT peer in the
+             * meantime. Re-check the peer under the mask before stamping, or
+             * this write-back would copy the old peer's key onto the new peer's
+             * record -- the exact inversion of what the carry is for
+             * (CodeRabbit review). A mismatch means our `want` is already stale;
+             * leave the newer candidate alone and let its own persist run. */
             uint32_t irq2 = __risc_v_disable_irq();
-            tmos_memcpy(rf_bond_pending_rec.link_key, want.link_key, 16);
-            rf_bond_pending_rec.flags = want.flags;
+            if (bond_peer_mac_equal(&rf_bond_pending_rec, &want)) {
+                tmos_memcpy(rf_bond_pending_rec.link_key, want.link_key, 16);
+                rf_bond_pending_rec.flags = want.flags;
+            }
             (void)__risc_v_enable_irq(irq2);
         }
         if (bond_tuple_equal(&cur, &want)) {
