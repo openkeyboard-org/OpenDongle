@@ -29,9 +29,23 @@ KBD_PROBE = "CEBD8F0653EF"
 
 
 def kbd_power(state):
+    """Drive the keyboard's rail, and FAIL LOUDLY if minichlink refuses.
+
+    The returncode used to be discarded, so a power cycle that never happened
+    (probe busy, wrong serial, binary present but failing) left the link up and
+    the test then passed vacuously -- the worst shape of failure for an
+    acceptance test, and precisely what the vendored ab_bench harness warns
+    about. NOTE: minichlink cannot connect to CH5xx parts at all on this bench
+    (it pre-selects CHIP_CH32V10x before the LinkE connect); -kt/-k3 skip target
+    init so they still work, but see bench/README-link-encryption.md.
+    """
     flag = "-kt" if state == "off" else "-k3"
-    subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
-                   capture_output=True, timeout=30)
+    p = subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
+                       capture_output=True, timeout=30)
+    if p.returncode != 0:
+        raise SystemExit(
+            f"keyboard power {state} FAILED (minichlink rc={p.returncode}): "
+            f"{p.stderr.decode(errors='replace').strip()[:200]}")
 
 
 def reconnect_and_key(kbd, dg):
@@ -68,22 +82,53 @@ def soak(kbd, dg, seconds, label):
     last_inj = last_log = 0.0
     d = d0
     worst_mac = d0["mac"] if d0 else 0
+    # Liveness is checked per WINDOW, not once at the end: `ok > ok0` over the
+    # whole soak is satisfied by a link that verified for five seconds and then
+    # died, and worst_mac then stays 0 precisely BECAUSE nothing is arriving.
+    # Track the tail separately so a mid-window death fails.
+    tail_window = 20.0
+    tail_ok = ok0
+    tail_mark = time.time()
+    stalls = 0
     while time.time() < end:
         kbd.pump()
         if time.time() - last_inj >= 3.0:
             inject_f13(kbd)
             last_inj = time.time()
-        d = dg.crypt_diag() or d
+        fresh = dg.crypt_diag()
+        d = fresh or d
         if d:
             worst_mac = max(worst_mac, d["mac"])
+        if time.time() - tail_mark >= tail_window:
+            # A window in which nothing verified is a stall, even if the
+            # cumulative counter climbed earlier in the run.
+            if not fresh or fresh["ok"] <= tail_ok:
+                stalls += 1
+                log(f"  STALL: no verified frames in the last {tail_window:.0f}s "
+                    f"(ok stuck at {tail_ok})")
+            tail_ok = fresh["ok"] if fresh else tail_ok
+            tail_mark = time.time()
         if time.time() - last_log >= 20.0 and d:
             log(f"  ok={d['ok']} mac={d['mac']} replay={d['replay']} "
                 f"aes_redo={d.get('aes_redo', '-')} "
                 f"announce_retry={d.get('announce_retry', '-')}")
             last_log = time.time()
         time.sleep(0.2)
-    climbed = d and d["ok"] > ok0
-    log(f"{label}: ok {ok0}->{d['ok'] if d else '?'}, worst drop_mac {worst_mac}")
+    final = dg.crypt_diag() or d
+    climbed = bool(final and final["ok"] > ok0)
+    # Pre-verify drops are silent in the cumulative counters, so require them
+    # flat too: shape/inactive/engine moving means frames arrived and were
+    # rejected before the MAC check ever ran.
+    shape_clean = True
+    if final and d0 and "conn_rx" in final and "conn_rx" in d0:
+        shape_clean = final.get("enc_shape", 0) == d0.get("enc_shape", 0)
+    log(f"{label}: ok {ok0}->{final['ok'] if final else '?'}, "
+        f"worst drop_mac {worst_mac}, stalled windows {stalls}")
+    if stalls:
+        log(f"{label}: FAIL -- {stalls} window(s) verified nothing")
+    if not shape_clean:
+        log(f"{label}: FAIL -- enc_shape moved (pre-verify drops)")
+    climbed = climbed and stalls == 0 and shape_clean
     return climbed and worst_mac == 0
 
 

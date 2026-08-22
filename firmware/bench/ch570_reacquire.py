@@ -28,9 +28,23 @@ KBD_PROBE = "CEBD8F0653EF"
 
 
 def kbd_power(state):
+    """Drive the keyboard's rail, and FAIL LOUDLY if minichlink refuses.
+
+    The returncode used to be discarded, so a power cycle that never happened
+    (probe busy, wrong serial, binary present but failing) left the link up and
+    the test then passed vacuously -- the worst shape of failure for an
+    acceptance test, and precisely what the vendored ab_bench harness warns
+    about. NOTE: minichlink cannot connect to CH5xx parts at all on this bench
+    (it pre-selects CHIP_CH32V10x before the LinkE connect); -kt/-k3 skip target
+    init so they still work, but see bench/README-link-encryption.md.
+    """
     flag = "-kt" if state == "off" else "-k3"
-    subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
-                   capture_output=True, timeout=30)
+    p = subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
+                       capture_output=True, timeout=30)
+    if p.returncode != 0:
+        raise SystemExit(
+            f"keyboard power {state} FAILED (minichlink rc={p.returncode}): "
+            f"{p.stderr.decode(errors='replace').strip()[:200]}")
 
 
 def link_up(kbd, dg, seconds=25.0):
