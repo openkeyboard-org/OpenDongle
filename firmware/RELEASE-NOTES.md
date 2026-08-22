@@ -224,6 +224,31 @@ That closes the CH570 half of the capability (P0 #3) and live-provisioning
 (P0 #2) legs, and is the first on-silicon evidence that capability latches in
 the documented pairing order rather than only in the control order.
 
+**OC-01 acceptance — PASSES.** `bench/oc01_experiment.py`, 12 trials per arm:
+
+| arm | order | capability latched |
+|---|---|---|
+| A | documented (keyboard first, dongle joins mid-stream) | **12/12** |
+| B | control (dongle listening first) | **12/12** |
+
+Against the pre-fix baseline of 0/10 in that same documented order, Fisher exact
+**p = 1.55e-06**. The plan's gate was Arm A >= 11/12 with Arm B 12/12; both are
+met. Capability now latches regardless of pairing order, which is what the
+advert-lead change was for.
+
+**OD-01 acceptance — NOT ESTABLISHED (precondition unreachable).** Be careful
+with this one. A first pass reported 8/8 "key kept" and that result was
+**vacuous**: the session AA in the bond record was identical before and after
+every re-pair, and a genuine fresh pair always mints a new AA. Dongle-side
+tracing showed why — a dongle that already holds a valid bond sits in
+`conn=waiting-reconnect` and never accepts a same-peer fresh pair, even with the
+keyboard re-arming its broadcast every 4 s across the entire reboot. The
+keyboard's `0x32 CONNECTED` in those runs is spurious; it drops ~3 s later. So
+the key-preservation path was never entered and nothing was measured either way.
+`bench/od01_experiment.py` now checks the session AA and reports INCONCLUSIVE
+rather than a pass. Reproducing OD-01 needs a way to make a bonded dongle accept
+a same-peer fresh pair, which this bench has not found.
+
 Still not covered on CH570: the six AES/CCM arms, the A/B power-cut acceptance,
 the encrypted soak and reacquire legs, and anything on CH572.
 

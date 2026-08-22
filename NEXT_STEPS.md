@@ -66,6 +66,21 @@ first ~2-3 s of app uptime, the keyboard broadcasts for only ~5.3 s, and
 arms (its tombstone is what stops an instant pair that the reset would then
 destroy). See the commit for the full account.
 
+**OC-01 acceptance PASSES** (`firmware/bench/oc01_experiment.py`, 12 trials per
+arm): Arm A (documented order) **12/12**, Arm B (control) **12/12**, against a
+0/10 pre-fix baseline in that same order — Fisher exact **p = 1.55e-06**. The
+plan's gate was A >= 11/12 and B 12/12.
+
+**OD-01 acceptance is NOT established, and an earlier 8/8 "pass" was vacuous.**
+The session AA never changed across the re-pair, and a real fresh pair always
+mints a new one; dongle-side tracing showed it sits in `conn=waiting-reconnect`
+and refuses a same-peer fresh pair while it holds a valid bond, even with the
+keyboard re-arming every 4 s across the whole reboot. The harness now gates on
+the session AA and reports INCONCLUSIVE. **Open question:** how to make a bonded
+dongle accept a same-peer fresh pair — without that, OD-01 cannot be exercised
+on hardware and the A1 key-preservation fix rests on the host test
+(`test_bond_key_preservation.py`) plus code review alone.
+
 What is still not covered: no CH572 on this bench at all; the CH570
 soak/reacquire legs; and two legs blocked by tooling — `aes-hw-validate` and the
 A/B power-cut bench both flash over SWD with minichlink, which cannot connect to
