@@ -36,20 +36,46 @@ orders, with the 24-trial experiment as the regression gate.
 
 The byte-changing discipline (`TODO.md` preamble): every firmware /
 linker / build-id change must land with a complete matrix run and re-pinned
-digests. This session exercised the crypto and robustness paths but **not** the
-full matrix. Remaining:
+digests.
 
-- [ ] Both chips: `make -C firmware release` end-to-end on a machine with both
-      pinned toolchains (GCC15 app + GCC12 OpenBoot) — app + factory + both
-      slots + bundles + `aes-hw-build`.
-- [ ] `make -C firmware aes-hw-validate` — the six on-silicon AES/CCM arms
-      (`ch570-asm-a/-asm-f/-c`, `ch572-hw/-asm-a`, `ch592-hw`).
-- [ ] OpenBoot A/B power-cut acceptance (`firmware/validation/openboot_ab_bench.py`)
-      on **both** chips (CH592 has less A/B hardware evidence than CH570).
+**Status 2026-08-22: digests ARE re-pinned (`firmware/RELEASE-NOTES.md`), and
+the CH592 half of the matrix ran. The CH570/CH572 half did not, and cannot on
+this bench.** The bench carries two CH592F boards and no CH570 or CH572, and two
+further legs are blocked by tooling rather than scheduling: `aes-hw-validate` and
+the A/B power-cut bench both flash over SWD with minichlink, which cannot connect
+to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
+`firmware/bench/README-link-encryption.md`), and the dongle exposes no usable SWD
+at all. Those legs need a bench with the parts and a minichlink that can reach
+them.
+
+- [x] Both chips: `make -C firmware release` end-to-end with both pinned
+      toolchains (GCC15 app + GCC12 OpenBoot) — app + factory + both slots +
+      bundles + `aes-hw-build`. **PASS**, `release: all gates passed`.
+- [x] Digests re-pinned for both chips / both slots, and CH592 slot A verified
+      on silicon (bundle COMMIT `verify OK (device crc32 0x20E39055)`, then IAP
+      `0x91` reported build id `44899EB2`).
+- [x] Production path on the pinned images: capability negotiated on air,
+      `BondWrite -> 0x00` live activation with no reset, `ok 0->143`,
+      `drop_mac 0`, F13 delivered host-side, boot KAT ok.
+- [x] P1 regression gates on the pinned images: same-peer re-pair preserves the
+      key (0 destroyed / 6 kept, was 8/8 destroyed); capability negotiation in
+      the documented pairing order (was 0/10).
+- [x] Backwards compatibility on ONE unmodified dongle image: a plaintext
+      keyboard pairs and delivers HID with `ENC_CAPABLE` never latched and zero
+      CCM frames, provisioning correctly refuses that bond, and the same dongle
+      then auto-negotiates encryption with the encrypted keyboard.
+- [ ] **BLOCKED (no CH570/CH572 on this bench, and minichlink cannot drive
+      CH5xx):** `make -C firmware aes-hw-validate` — the six on-silicon AES/CCM
+      arms (`ch570-asm-a/-asm-f/-c`, `ch572-hw/-asm-a`, `ch592-hw`).
+- [ ] **BLOCKED (same reason):** OpenBoot A/B power-cut acceptance
+      (`firmware/validation/openboot_ab_bench.py`) on both chips. Its probe
+      allow-list was inverted and is now fixed, so it is ready to run on a bench
+      that can reach the target.
 - [ ] Suspend/resume replay bench case: queue a mouse or consumer report, force
       a host suspend/resume, confirm no stale/stuck report (M2 EP2/EP3 fix).
 - [ ] EP6 pipelined-OUT + bus-reset-mid-IAP on **CH592** as well
-      (`firmware/bench/usb_robustness_test.py` — done on CH570).
+      (`firmware/bench/usb_robustness_test.py` — done on CH570). The reset leg
+      needs `USBDEVFS_RESET`, i.e. root, which this session did not have.
 - [ ] CH570 26-bit clamp: wall-clock the reacquire watchdog against ~2.125 s
       (qualitatively confirmed via forced reconnect; the plan wants a measured
       wall-clock case).
