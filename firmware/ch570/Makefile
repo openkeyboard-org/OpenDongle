@@ -123,7 +123,7 @@ CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 # The SEAM default (src/hal_aes_ch570_impl.h) is ASM_A, but the PRODUCTION CH570
 # build ships ASM_F (flash-resident kernel): with optional link encryption
 # (DONGLE_RF_CRYPT) enabled, ASM_A's SRAM-resident S-box + round-key schedule
-# pushes the image past the 2 KB stack floor (link fails), whereas the dongle
+# pushes the image past the 1.75 KB stack floor (link fails), whereas the dongle
 # only DECRYPTS, in task context, where ASM_F's higher per-block cost is off the
 # phase-critical poll path. ASM_F REQUIRES CORECFGR bit 3 (0x2D) -- set in
 # production, see src/ch570_corecfgr.h. Override with e.g.
@@ -229,7 +229,7 @@ FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
 OPENBOOT_BIN := $(BUILD)/$(TARGET)-openboot.bin
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
-CONFIG_TEXT := schema=7||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x800||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
+CONFIG_TEXT := schema=7||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x700||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
 # $(ASM_SRC) belongs here too: without it, editing either AES kernel changes
 # the firmware without changing its build identity (CodeRabbit/Codex review).
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(ASM_SRC) $(wildcard $(COMMON)/include/*.h)

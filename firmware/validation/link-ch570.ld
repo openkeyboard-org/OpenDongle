@@ -173,8 +173,10 @@ SECTIONS
     } >RAM
 
     /* The one memory assertion worth keeping: the image plus a usable stack
-     * has to fit. 2 KiB matches the production stack floor, so a validation
-     * image that fits here would also have stack headroom in production. */
+     * has to fit. 2 KiB is now STRICTER than production (CH570_STACK_FLOOR is
+     * 0x700 = 1.75 KiB since the encrypted image landed), which is deliberate:
+     * a validation image is standalone, so holding it to the older, larger
+     * reserve keeps it a conservative gate rather than a moving target. */
     ASSERT((ORIGIN(RAM) + LENGTH(RAM) - _validate_keep_end) >= 0x800,
            "CH570 validation image leaves less than a 2 KiB stack")
 }

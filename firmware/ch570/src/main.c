@@ -276,7 +276,7 @@ static inline uint32_t st_systick(void)
  * accounting. Ensure it runs (free-running, CMP=max, sysclk) before periodic mode
  * relies on it — otherwise st_systick() reads a frozen counter and the
  * accounting silently does nothing (freerun proof S10). Idempotent.
- * Flash-resident: mode-entry only, not per-fire (2 KB stack-floor budget). */
+ * Flash-resident: mode-entry only, not per-fire (CH570_STACK_FLOOR budget). */
 static inline void st_systick_ensure(void)
 {
     if ((SysTick->CTLR & SysTick_CTLR_STE) == 0u) {
@@ -530,7 +530,7 @@ static void st_periodic_drain(void)
  * clear any latched CYC_END, THEN clear the ownership flag so
  * the one-shot st_now() formula (st_epoch + R32_TMR_COUNT) reads `now`. The
  * caller re-arms (st_rearm) after its own mutation. Flash-resident: runs
- * only on teardown/claim transitions, never per-fire (2 KB stack budget).
+ * only on teardown/claim transitions, never per-fire (CH570_STACK_FLOOR budget).
  * noinline: keep out of the SRAM-resident mutator callers. */
 __attribute__((noinline))
 static void st_periodic_exit_locked(void)
