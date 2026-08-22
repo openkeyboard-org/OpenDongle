@@ -180,12 +180,41 @@ Consequences and workarounds:
 - `CFG_RESET_EN=0` on these parts: NRST is a GPIO, so a reset button does
   nothing and only a power-cycle (or `--enter-bootloader`) resets the dongle.
 
-## Flashing a CH570 over SWD
+## Recovering a CH570: use USB, not SWD
 
-Use `bench/ch570_swd_flash.py <image.bin> --probe <SERIAL>`. Do not drive WCH
-OpenOCD by hand here: three `wch_riscv` quirks each present as a hardware fault,
-and two of them make a *correct* flash look like a failed one. Measured on
-silicon 2026-08-22 while recovering a half-programmed part.
+**The supported path is `wchisp` (WCH BootROM ISP) then `openboot flash`.** Only
+that path has ever been shown to commit on this bench, and only it produces real
+evidence: OpenBoot's COMMIT is a *device-computed* crc32, so it can be checked
+against the `RELEASE-NOTES` pin rather than trusted.
+
+```
+# 1. Chip in ISP (it enters on its own when the app slot is empty; ~10 s window,
+#    and the window is an IDLE timeout, so a whole sequence fits in one session).
+#    ch37x binds the device, so detach it first -- permissions are already fine.
+wchisp config disable-readout      # BootROM 2.30 refuses Program while readable
+# 2. Then, once OpenBoot is up (0c45:fefe):
+openboot --vid 0x0c45 --pid 0xfefe flash firmware/ch570/build/ch570-product.obb --force
+```
+
+Measured 2026-08-22: `commit OK (len 30924, crc32 0xD0BA5455)`, matching the
+CH570 slot A pin, and the booted app then reported build `132BF22D` over IAP.
+
+Two traps in that sequence. `wchisp erase` (and `flash` without `--no-erase`)
+knocks the BootROM off the bus mid-operation -- `Erased 118 code flash sectors`
+is followed by `ENODEV` -- so let OpenBoot do the erasing. And each `wchisp`
+step can reset the part, so a script must wait for a *fresh* appearance rather
+than a still-present one, or every later step silently runs against a dying
+session.
+
+### SWD, and why its "verify" cannot be believed
+
+`bench/ch570_swd_flash.py` exists for a part with no bootloader to talk to. It
+programs, but **its readback is not proof of a commit**: a run that reported all
+118816 bytes matching left the app slot *empty* -- the part booted to the WCH
+factory ISP and OpenBoot then reported `slots 2 (active none)`. This is the
+standing CH5xx rule (SWD reads return stale-but-plausible data) biting again, so
+always confirm over USB. What follows is about getting the tool to run at all,
+not about trusting its output.
 
 - **The debug window is a few ms wide.** PA0/PA1 are SWDIO/SWCLK *and* USB
   D-/D+, so once an image reaches USB init it clears `RB_PIN_DEBUG_EN` and takes
@@ -198,21 +227,23 @@ silicon 2026-08-22 while recovering a half-programmed part.
   0 0 last off` reports `Success to Disable Read-Protect`, and the *next* write
   still fails with `Read-Protect Status Currently Enabled`. Reissue it before
   every erase and every write.
-- **The flash read path only exposes the most recently programmed 16 KB
-  window.** Everything else returns a constant `0xf3f9bda9` or aliases that
-  window -- dump the whole image and it is 100% periodic at 16 KB. So
-  `verify_image` across the whole image can *never* pass, and its failure says
-  nothing about whether the flash is good. Worse, issuing the unlock immediately
-  *before* a read is itself what selects the `0xf3f9bda9` mode, so an otherwise
-  clean verify fails purely because of the unlock in front of it. Read each
-  chunk back right after writing it, while its own window is live; that is a
-  genuine byte-for-byte verify of the whole image, taken in eight pieces.
-- **A freshly grabbed chip is halted in BootROM with the array unmapped.** Reads
-  taken before the session's first erase/write alias ROM and look like plausible
-  firmware -- structurally valid startup code that matches no build in the tree.
-  Never trust a read taken before a flash operation.
+- **Whole-image reads come back 100% periodic at 16 KB**, so `verify_image`
+  across the image never passes and its failure says nothing either way. Reading
+  each chunk back immediately after writing it *does* match -- but see the
+  warning above: that match is not evidence the write committed.
+- **`0xf3f9bda9` is what ERASED CH570 flash reads as**, not a fault and not a
+  protection artifact. Confirmed from the running app: a cleared bond region
+  reads `a9 bd f9 f3` repeated and `opendongle --info` correctly reports the bond
+  absent. Do not read that pattern as "the read path is broken" -- an earlier
+  pass through this wasted hours on exactly that misreading. (The pre-existing
+  bench note already said `a9bdf9f3`-pattern reads happen even with read
+  protection "disabled".)
+- **A freshly grabbed chip is halted in BootROM.** Reads taken before the
+  session's first erase/write look like plausible firmware -- structurally valid
+  startup code that matches no build in the tree.
 
-Confidence that the part is actually programmed, without a USB path: the app
-slice at the slot base must crc32 to the `RELEASE-NOTES` pin, and a core halted
-~1 s after power-on should show `pc` advancing through `__HIGH_CODE` in SRAM
-(`0x2000_xxxx`) with `mcause == 0` and a sane `sp`/`ra`.
+There is no sound way to confirm a CH570 is programmed from SWD alone. `pc`
+advancing through `__HIGH_CODE` with `mcause == 0` only shows *something* is
+running, and on a part whose app slot is empty that something is the BootROM.
+Confirm over USB: `openboot probe` must report an active slot, and
+`opendongle --info` must report the pinned build id.

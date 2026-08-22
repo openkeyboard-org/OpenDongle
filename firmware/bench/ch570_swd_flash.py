@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Flash and verify a CH570 over SWD, around three WCH-driver quirks.
+"""Program a CH570 over SWD, around three WCH-driver quirks.
+
+READ THIS FIRST -- this tool's readback is NOT proof that the flash committed.
+On 2026-08-22 a run of this tool reported all 118816 bytes reading back
+byte-for-byte, and the part still had an EMPTY app slot afterwards: it booted
+into the WCH factory ISP bootloader, and OpenBoot then reported
+`slots 2 (active none)`. Whatever the per-chunk readback was reading, it was
+not committed flash. That is consistent with the standing bench rule that CH5xx
+SWD reads return stale-but-plausible data (see bench/README-link-encryption.md).
+
+**The supported recovery path is USB, not SWD**: WCH BootROM ISP to clear the
+config, then `openboot ... flash <bundle>.obb`, whose COMMIT attestation is a
+device-computed crc32 and therefore a real end-to-end check. Reach for this
+tool only when there is no bootloader on the part to talk to, and confirm the
+result over USB afterwards -- never from this tool's output alone.
 
 The CH570 is the awkward part on this bench: its SWD pins ARE its USB pins
 (PA0 = SWDIO/UDM, PA1 = SWCLK/UDP), so a running image can take the debug
@@ -14,23 +28,21 @@ ways that each look like a hardware fault. All three were measured on silicon
    write fails with "Read-Protect Status Currently Enabled", so the unlock is
    reissued before every erase and every write.
 
-3. The flash READ path only exposes the most recently programmed 16 KB window.
-   Every other address either returns a constant 0xf3f9bda9 or aliases that
-   window -- a whole-image readback is 100% periodic at 16 KB. Two corollaries
-   that cost hours if you don't know them:
-     - `verify_image` over the whole image can never pass, and its failure says
-       nothing about whether the flash is correct.
-     - issuing `flash protect ... off` immediately BEFORE a read is what puts
-       the controller into the 0xf3f9bda9 mode, so an otherwise-good verify
-       fails purely because of the unlock in front of it.
-   This tool therefore reads each chunk back immediately after writing it,
-   while that chunk's own window is still the live one. That is a real
-   byte-for-byte verify of the whole image, just taken in eight pieces.
+3. Whole-image readbacks come back 100% periodic at 16 KB, so `verify_image`
+   over the whole image never passes and its failure says nothing either way.
+   Reading each chunk back right after writing it does match, which is what
+   this tool does -- but per the warning above, that match is not evidence the
+   write committed.
 
-A freshly grabbed chip is also halted in BootROM with the flash array unmapped,
-so reads taken before the session's first erase/write alias ROM and look like
-plausible-but-wrong firmware. Never trust a read taken before a flash
-operation.
+0xf3f9bda9 is simply what ERASED CH570 flash reads as -- not a fault and not a
+protection artifact. Confirmed from the running app: a cleared bond region reads
+`a9 bd f9 f3` repeated while `opendongle --info` correctly reports the bond
+absent. An earlier pass through this misread that pattern as a broken read path
+and lost hours to it.
+
+A freshly grabbed chip is halted in BootROM, so reads taken before the session's
+first erase/write look like plausible-but-wrong firmware: structurally valid
+startup code matching no build in the tree.
 
 Usage:
     ch570_swd_flash.py <image.bin> [--probe SERIAL]
@@ -202,9 +214,15 @@ def flash(image_path, serial):
             bad = sum(1 for a, b in zip(want, got) if a != b)
             bad += abs(len(want) - len(got))
             print(f"  0x{base:06x}  {len(want):6d} B  "
-                  f"{'OK' if bad == 0 else f'{bad} BAD BYTES'}")
+                  f"{'readback matched' if bad == 0 else f'{bad} BAD BYTES'}")
             ok &= bad == 0
-        print(f"{'VERIFIED' if ok else 'FAILED'}: {len(img)} bytes")
+        if ok:
+            print(f"PROGRAMMED: {len(img)} bytes, readback matched.")
+            print("NOT A COMMIT GUARANTEE -- a clean run here has still left an "
+                  "empty app slot.\nConfirm over USB (openboot probe / "
+                  "opendongle --info) before believing this.")
+        else:
+            print(f"FAILED: {len(img)} bytes")
         return ok
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

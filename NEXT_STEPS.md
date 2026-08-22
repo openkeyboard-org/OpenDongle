@@ -40,20 +40,25 @@ digests.
 
 **Status 2026-08-22: digests ARE re-pinned (`firmware/RELEASE-NOTES.md`), the
 CH592 half of the matrix ran, and the CH570 *image* pin is now verified on
-silicon.** A CH570 joined the bench later that day wired to a WCH-LinkE;
-`firmware/bench/ch570_swd_flash.py` programmed the pinned product image, read
-back all 118816 bytes byte-for-byte, and the app slice at `0x00002000` crc32s to
-the pinned `0xD0BA5455`. That also gives CH570 the SWD path minichlink cannot.
+silicon.** A CH570 joined the bench later that day and was recovered over USB
+(WCH BootROM ISP to clear the config, then `openboot flash ch570-product.obb`).
+COMMIT answered `crc32 0xD0BA5455` — computed by the device — matching the pin,
+and the booted app reported build `132BF22D` over IAP. It is now live on USB as
+`0c45:fefe`.
 
-What is still not covered: no CH572 on this bench at all, and every remaining
-CH570 leg needs USB — on CH570 the SWD pins ARE the USB pins (PA0/PA1 are
-SWDIO/SWCLK and D-/D+), so while the part is wired to the probe it cannot
-enumerate. Two further legs stay blocked by tooling: `aes-hw-validate` and the
+Note for anyone reading an older revision of this file: the SWD route was tried
+first and its byte-for-byte "verify" was **wrong**. The app slot was still empty
+afterwards. Confirm CH570 flashes over USB, never from `ch570_swd_flash.py`
+output.
+
+What is still not covered: no CH572 on this bench at all, and the CH570 air and
+encryption legs are blocked on the **keyboard UART**, which is silent in both
+directions (the keyboard app runs and drives PB12/PB13; bridges to PA8/PA9 are
+in place, so this looks like the known marginal-wiring failure — reseat before
+theorising). Two further legs stay blocked by tooling: `aes-hw-validate` and the
 A/B power-cut bench both flash over SWD with minichlink, which cannot connect to
 ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
-`firmware/bench/README-link-encryption.md`), and the dongle exposes no usable SWD
-at all. Porting those two harnesses onto `ch570_swd_flash.py` would unblock their
-CH570 arms without new hardware.
+`firmware/bench/README-link-encryption.md`).
 
 - [x] Both chips: `make -C firmware release` end-to-end with both pinned
       toolchains (GCC15 app + GCC12 OpenBoot) — app + factory + both slots +
@@ -74,14 +79,14 @@ CH570 arms without new hardware.
 - [ ] **BLOCKED (no CH572 on this bench; minichlink cannot drive CH5xx):**
       `make -C firmware aes-hw-validate` — the six on-silicon AES/CCM arms
       (`ch570-asm-a/-asm-f/-c`, `ch572-hw/-asm-a`, `ch592-hw`). The three CH570
-      arms are now reachable in principle: a CH570 is on the bench and
-      `bench/ch570_swd_flash.py` can flash it, so this needs the harness ported
-      off minichlink rather than new hardware.
+      arms are now reachable in principle — a CH570 is on the bench and flashes
+      cleanly over USB OpenBoot — so this needs the harness ported off
+      minichlink onto that path rather than new hardware.
 - [ ] **BLOCKED (minichlink cannot drive CH5xx):** OpenBoot A/B power-cut
       acceptance (`firmware/validation/openboot_ab_bench.py`) on both chips. Its
       probe allow-list was inverted and is now fixed, so it is ready to run on a
       bench that can reach the target. Same escape as the AES arms: its CH570
-      leg only needs porting onto `bench/ch570_swd_flash.py`.
+      leg only needs porting onto the USB OpenBoot path.
 - [ ] Suspend/resume replay bench case: queue a mouse or consumer report, force
       a host suspend/resume, confirm no stale/stuck report (M2 EP2/EP3 fix).
 - [ ] EP6 pipelined-OUT + bus-reset-mid-IAP on **CH592** as well

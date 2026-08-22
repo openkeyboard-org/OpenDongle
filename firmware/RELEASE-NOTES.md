@@ -197,18 +197,23 @@ over SWD with minichlink, which cannot connect to ANY CH5xx part (it pre-selects
 `bench/README-link-encryption.md`), and the dongle exposes no usable SWD at all.
 
 **CH570 slot A, verified on silicon 2026-08-22 — image only.** A CH570 joined
-the bench wired to a WCH-LinkE. `bench/ch570_swd_flash.py` programmed the pinned
-product image and read back all 118816 bytes byte-for-byte, and the app slice at
-the `0x00002000` slot base crc32s to `0xD0BA5455`, matching the table above. The
-part then ran healthy (`pc` advancing through `__HIGH_CODE` in SRAM, `mcause 0`,
-sane `sp`/`ra`). That retires "no CH570 on the bench" for the *image* pin, and
-`ch570_swd_flash.py` gives CH570 the SWD path minichlink cannot.
+the bench and was recovered over USB: WCH BootROM ISP to clear the config, then
+`openboot flash ch570-product.obb`, which answered
+`commit OK (len 30924, crc32 0xD0BA5455)` — a *device-computed* crc32 matching
+the table above. The booted app then reported build id `132BF22D` over IAP
+`0x91`. That is the end-to-end check this section describes, now done for CH570
+slot A as well as CH592.
 
-It retires nothing else. Every remaining CH570 leg needs USB — the crc32-at-
-COMMIT round trip, the IAP `0x91` build-id readback, and all of the air and
-encryption arms — and on CH570 the SWD pins ARE the USB pins (PA0/PA1 are
-SWDIO/SWCLK and D-/D+). While the part is wired to the probe it cannot enumerate,
-so those legs are blocked on rewiring it to USB, not on tooling.
+Do not read that as broader coverage. It is the image pin and nothing else: no
+air leg, no encryption arm, no bond or provisioning path has run on CH570 under
+this pin.
+
+One correction, because an earlier revision of this file claimed otherwise: the
+same image was first pushed over SWD with `bench/ch570_swd_flash.py`, which
+reported all 118816 bytes reading back byte-for-byte — and the part still had an
+**empty app slot** afterwards (`openboot probe` → `slots 2 (active none)`, and
+the part booted into the WCH factory ISP). A CH5xx SWD readback is not evidence
+of a commit. Only the USB COMMIT attestation above is.
 
 Covered for CH592 on this pin: the full release gate; the production path
 (capability negotiated on air, USB `BondWrite` live activation, encrypted HID
@@ -217,10 +222,10 @@ dongle image; and the two P1 regression experiments (same-peer re-pair key
 preservation, capability negotiation in the documented pairing order).
 
 **Do not treat this as a shipping sign-off.** A release still needs the CH570
-air and USB legs, the six on-silicon AES arms, and the A/B power-cut acceptance,
-on a bench that has the parts and an SWD path that can reach them -- which for
-CH570 now means `ch570_swd_flash.py` rather than minichlink, and a CH570 wired
-to USB rather than to the probe.
+air legs, the six on-silicon AES arms, and the A/B power-cut acceptance. The
+CH570 is now on USB and reachable, so its remaining legs are blocked on the
+keyboard UART link (silent in both directions as of this writing), not on the
+dongle.
 
 ## Known issues
 
