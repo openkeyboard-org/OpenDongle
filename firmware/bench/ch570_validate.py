@@ -59,6 +59,15 @@ BOND_SIZE = 48
 KST_CONNECTED, KST_HAS_BOND, KST_KEYED_OK, KST_KEY_REFUSED = 0x32, 0x35, 0x21, 0x36
 F13 = 0x68
 
+# How long to hold after `--enter-bootloader` before arming the keyboard's pair
+# window. Measured on this bench: the dongle's app is back ~12 s after the reset
+# call (OpenBoot holds it off ~10 s), and the keyboard broadcasts for only ~5.3 s
+# once armed, so arming at ~9.5 s puts the dongle's boot inside that window.
+REBOOT_LEAD = float(os.environ.get("DONGLE_REBOOT_LEAD", "9.5"))
+# Re-arm cadence while waiting: the keyboard window is ~5.3 s, so re-arm inside
+# it rather than letting it lapse between attempts.
+REARM_EVERY = 4.0
+
 t0 = time.time()
 
 
@@ -283,6 +292,17 @@ def _reopen_iap(timeout=40.0):
     return dev
 
 
+def _arm_pair(kbd):
+    """Open a fresh ~5.3 s keyboard pair window.
+
+    A6 51 is a no-op unless the 2.4G transport is selected, and another no-op
+    once the link is CONNECTED (rf_task.c guards it so a stray A6 51 cannot tear
+    down a healthy link), so re-arming is safe to repeat while waiting.
+    """
+    kbd.send([0xA6, 0x30]); time.sleep(0.4); kbd.pump()
+    kbd.send([0xA6, 0x51]); time.sleep(0.3); kbd.pump()
+
+
 def main():
     hold = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0
     fails = []
@@ -295,16 +315,59 @@ def main():
     log(f"dongle IAP up on {dg.node} ({dg.status_line()}) "
         f"family 0x{WANT_FAMILY:02X} profile {WANT_PROFILE}")
 
-    # G1 asks whether the capability advert survives THIS pair's beacon accept
-    # (P0 #3). BondRead returns the NV record, so a dongle left provisioned by an
-    # earlier run answers flags 0x03 the moment the keyboard reports CONNECTED --
-    # satisfying G1 without the advert having landed at all. Clear the bond first
-    # so the record read below can only have come from this pair. The clear
-    # tombstones pair-accept until the next MCU reset, so reset before pairing.
+    # THE ORDER OF THESE THREE STEPS IS LOAD-BEARING. Measured on the bench,
+    # both of the obvious orders fail, each in a way that reads like something
+    # else:
+    #
+    #   clear+reset the dongle, THEN bring the keyboard up -- bringing the
+    #   keyboard up costs 11 s of OpenBoot settle, and the dongle only accepts a
+    #   pair for the first ~2-3 s after boot, so the window is always gone.
+    #   Aborts with "keyboard never reported CONNECTED".
+    #
+    #   keyboard into pairing, THEN clear+reset the dongle -- the dongle is
+    #   still running and still in pairing, so the pair completes the instant
+    #   A6 51 lands (kbd 0x31 PAIRING then 0x32 CONNECTED in the same 10 ms).
+    #   The clear+reset then destroys exactly that pair and leaves the keyboard
+    #   bonded to a dongle that has forgotten it, so no fresh pair follows.
+    #
+    # What works is to split the clear from the reset: clear FIRST, which
+    # tombstones pair-accept until the next MCU reset and so holds the dongle
+    # off while the keyboard enters pairing; then reset, which lifts the
+    # tombstone and drops the dongle into the keyboard's already-running beacon
+    # stream inside its own 2-3 s window. That is also the order this project
+    # documents -- keyboard first, dongle restarted into the running stream --
+    # i.e. the order OC-01 is about, so G1 below tests the capability advert
+    # rather than the control order.
+    #
+    # G1 needs the clear for a second reason: BondRead returns the NV record, so
+    # a dongle left provisioned by an earlier run would answer flags 0x03 the
+    # moment the keyboard reports CONNECTED, satisfying G1 without the advert
+    # having landed at all.
     r = dg.txn(0x89)
     if not r or r[0] != 0x0F or r[2] != 0x00:
         raise SystemExit(f"dongle BondClear failed: {r.hex() if r else 'timeout'}")
-    log("dongle bond cleared (0x89); resetting to lift the pair tombstone")
+    log("dongle bond cleared (0x89); pair-accept tombstoned until its reset")
+
+    kbd = Kbd(KBD_PORT)
+    log("keyboard port open (DTR-reset); settling 11 s through OpenBoot window")
+    time.sleep(11.0)
+    kbd.ser.read(4096)
+
+    # Select 2.4G, drop any stale keyboard bond, select 2.4G again, then pair.
+    # A6 51 is a no-op unless the 2.4G transport is selected first.
+    kbd.send([0xA6, 0x30]); time.sleep(0.6); kbd.pump()
+    kbd.send([0xA6, 0x52]); time.sleep(1.0); kbd.pump()
+    log("keyboard unpaired (A6 52)")
+    kbd.send([0xA6, 0x30]); time.sleep(0.6); kbd.pump()
+
+    # THE TWO PAIR WINDOWS ARE SHORTER THAN THE REBOOT, so A6 51 has to be armed
+    # LATE -- during the dongle's reboot, not before it. The keyboard broadcasts
+    # for RF_PAIR_WINDOW_TICKS (8480 ticks, ~5.3 s) and the dongle only accepts a
+    # pair for its first ~2-3 s of app uptime, but --enter-bootloader takes ~12 s
+    # to come back because OpenBoot holds the app off. Arming before the reset
+    # therefore always misses: the keyboard window has been shut ~7 s by the time
+    # the dongle is listening, which reads as "keyboard never reported
+    # CONNECTED" and looks like a dead link rather than a timing miss.
     dg.close()
     rst = subprocess.run([OPENDONGLE_CLI, "--enter-bootloader", "--force"],
                          capture_output=True, timeout=30)
@@ -313,32 +376,35 @@ def main():
             f"dongle reset failed (rc={rst.returncode}); the pair tombstone is "
             f"still up and no pair can complete: "
             f"{rst.stderr.decode(errors='replace').strip()[:200]}")
+    log(f"dongle rebooting; holding {REBOOT_LEAD:.1f}s, then arming the "
+        f"keyboard so its window overlaps the dongle's boot")
+    time.sleep(REBOOT_LEAD)
+    _arm_pair(kbd)
     dg = _reopen_iap()
-    log(f"dongle back up ({dg.status_line()}), bond {dg.bond_flags()}")
-
-    kbd = Kbd(KBD_PORT)
-    log("keyboard port open (DTR-reset); settling 11 s through OpenBoot window")
-    time.sleep(11.0)
-    kbd.ser.read(4096)
-
-    # Clear the stale keyboard bond (survived the SWD factory flash), then pair.
-    kbd.send([0xA6, 0x30]); time.sleep(0.6); kbd.pump()
-    kbd.send([0xA6, 0x52]); time.sleep(1.0); kbd.pump()
-    log("keyboard unpaired (A6 52)")
-    kbd.send([0xA6, 0x30]); time.sleep(0.6); kbd.pump()
-    kbd.send([0xA6, 0x51])
-    log("A6 51: broadcasting for pair; waiting for CONNECTED + dongle bond")
+    # Everything before this instant belongs to the previous bond: the keyboard
+    # reconnects to the old bond during the settle above and reports CONNECTED
+    # for it. Scope the wait to after the reset or that stale CONNECTED makes
+    # any run look like it paired.
+    pair_since = time.time() - t0
+    log(f"dongle back up ({dg.status_line()}), bond {dg.bond_flags()}; "
+        f"waiting for a FRESH pair")
 
     deadline = time.time() + 60.0
     dg_valid, dg_flags = False, 0
+    next_arm = time.time() + REARM_EVERY
     while time.time() < deadline:
         kbd.pump()
-        if kbd.saw(KST_CONNECTED):
+        if kbd.saw(KST_CONNECTED, since=pair_since):
             dg_valid, dg_flags = dg.bond_flags()
             if dg_valid:
                 break
+        elif time.time() >= next_arm:
+            # The window lapsed without a pair; open another one rather than
+            # spending the remaining timeout with the keyboard silent.
+            _arm_pair(kbd)
+            next_arm = time.time() + REARM_EVERY
         time.sleep(0.1)
-    if not kbd.saw(KST_CONNECTED):
+    if not kbd.saw(KST_CONNECTED, since=pair_since):
         print("ABORT: keyboard never reported CONNECTED (5B 32) within 60 s")
         return 1
     if not dg_valid:
