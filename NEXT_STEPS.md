@@ -18,17 +18,23 @@ bench validation.
 
 Both dongle chips, over the production path (capability negotiated on air →
 USB-IAP provisioning → live activation → 0-MAC encrypted HID): capability
-(P0 #3), live provisioning (P0 #2), encrypted soaks (CH570 ~14.6k / CH592
+(P0 #3 -- but see the note below), live provisioning (P0 #2), encrypted soaks (CH570 ~14.6k / CH592
 ~6.2k frames, `drop_mac 0`), USB robustness (EP6 wedge + bus-reset IAP
 cancel), CH570 26-bit reacquire clamp, CH592 boot KAT, and stack watermarks
 (CH570 548 B → floor `0x700`; CH592 516 B of 1824 B). CH570 product image now
 links (P0 #4 closed).
 
+**Capability qualifier (2026-08-22):** those runs camped the dongle in pairing
+BEFORE the keyboard broadcast. In the order this project documents -- keyboard
+first, dongle restarted into the running stream -- capability latched 0/10
+(OC-01). Fixed by leading every beacon with the advert; now 12/12 in both
+orders, with the 24-trial experiment as the regression gate.
+
 ---
 
 ## Gate 1 — full hardware matrix + digest re-pin (blocks merge)
 
-The byte-changing discipline (`firmware/TODO.md` preamble): every firmware /
+The byte-changing discipline (`TODO.md` preamble): every firmware /
 linker / build-id change must land with a complete matrix run and re-pinned
 digests. This session exercised the crypto and robustness paths but **not** the
 full matrix. Remaining:
@@ -88,7 +94,7 @@ MAC-verify verb (not additive); state KDF-vs-direct-CMAC domain separation
 normatively; EV10 provisional-apply must snapshot+restore session/counter; fix
 the §5.4 dual-`K_ann` verify wording.
 
-## Deferred / lower priority (`firmware/TODO.md`)
+## Deferred / lower priority (`TODO.md`)
 
 Not part of this effort; batch with a future re-validation:
 

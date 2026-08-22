@@ -154,3 +154,28 @@ so it is restarted for the pairing/mint dance by power-cycling its probe rails
 
 IAP `0x95` (`CMD_CRYPT_LAST_FAIL`) exposes the same failure latch over USB for
 when a receiver with USB returns.
+
+## Bench tooling: minichlink cannot reach a CH5xx part
+
+`minichlink` pre-selects `CHIP_CH32V10x` before the WCH-LinkE target-connect, and
+a CH5xx only answers that connect after `81 0c 02 <family>`. Every attempt
+therefore fails with `81 55 01 01` ("no target") -- the same message an unwired
+probe gives, which makes it easy to misdiagnose as a hardware fault. Proven over
+raw USB against a live CH592: family `0x01` fails, family `0x0b` (CH59x) returns
+`82 0d 05 0b 92 ...`, i.e. chip id `0x92`.
+
+Consequences and workarounds:
+
+- `make flash-factory` and any probe power-cycle path are affected. A locally
+  patched minichlink with a family-sweep fallback works; it is not upstream.
+- **WCH OpenOCD works** but must be told the family:
+  `openocd -f wch-riscv.cfg -c "adapter serial <PROBE>" -c "chip_id CH59x"`.
+  Its `wch_riscv` flash driver erases and reads correctly but fails a single
+  large image write -- write in 16 KB chunks and it verifies clean.
+- **The CH592 dongle has no usable SDI at all** (the connect fails under every
+  family while the part is provably alive on USB), consistent with a USB image
+  clearing `RB_PIN_DEBUG_EN`. Drive it over USB IAP, and update it over USB
+  OpenBoot (`opendongle --enter-bootloader` then `openboot ... flash <obb>`),
+  which needs neither SDI nor root.
+- `CFG_RESET_EN=0` on these parts: NRST is a GPIO, so a reset button does
+  nothing and only a power-cycle (or `--enter-bootloader`) resets the dongle.
