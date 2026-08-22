@@ -70,3 +70,23 @@ the dump is the only readout.
 `0x700` permanently (that edit moves the build id; it batches with this
 campaign's matrix run and digest re-pin). Otherwise: fallbacks above, and
 keep the measured number with the record.
+
+**Result (2026-08-18):** on-silicon run over the encrypted-link exercise (pair
++ USB provision + soak) measured **max_depth 548 B, slack 1372 B** at the
+0x700 candidate (`low 0x20002DCC`, `_end 0x20002870`, `top 0x20002FF0`; 1920 B
+physical gap). 548 + 128 = 676 ≪ 1792, so the floor was cut to `0x700` and the
+plain production CH570 image now links with no `--defsym` override (RAM
+10352/12272 B). The reading is from the encrypted-link paths only, not the
+full matrix above; the ~1.24 KB of unused reserve absorbs the unmeasured
+deep paths (fault frame, nested RF/USB/AES) with wide margin, but a full-matrix
+re-measure is still the belt-and-braces before the final release build.
+
+**CH592 result (2026-08-18):** measured **max_depth 516 B, slack 1308 B** of
+the 1824 B true stack (`_susrstack 0x200060D0 .. _eusrstack 0x200067F0`),
+steady across pair + provision + a 150 s / ~6.2k-frame encrypted soak with
+forced reconnect. Resolves review #18 (the 1824 B budget was never measured):
+ample headroom, not tight. NOTE the CH592 scan starts at `_susrstack`, not
+`_end` -- an RF/BLE arena, the heap, and the retained fault record sit between
+`_end` and the stack and are all written at boot, so a from-`_end` scan (the
+CH570 shape) stopped at the fault record and reported a bogus ~4 KB depth.
+`stack_watermark.h` picks the floor per chip via `RF_TASK_EXECUTOR_TMOS`.

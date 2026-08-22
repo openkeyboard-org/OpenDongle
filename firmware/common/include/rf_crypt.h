@@ -71,12 +71,22 @@
  *     change, so a new keyless bond cannot inherit the previous bond's key
  *     requirement. A same-peer accept keeps it -- a reconnect can never
  *     downgrade an encrypted bond to plaintext.
- *   - peer_capable: NEVER cleared at accept. The capability advert is
- *     anonymous and precedes the first beacon (broadcast slots 0-1 vs 2), so
- *     an accept-time clear deterministically erases what the advert just
- *     latched and the capability is never persisted -- the 2026-08-16
- *     review's finding 3. Its resets live at boot and tombstone; see the
- *     latch declaration in rf_task.c for the full scoping argument.
+ *   - peer_capable: preserved across every accept, so the advert this pairing
+ *     latched is the one that gets persisted. Its only resets are boot and
+ *     tombstone; see the latch declaration in rf_task.c for the full scoping
+ *     argument.
+ *
+ *     Why it must stay that way: the advert is anonymous and arrives just
+ *     before the beacon we accept, so a clear placed on the accept path WOULD
+ *     erase what the advert had just set, and the capability would never be
+ *     persisted. That clear existed once and did exactly that -- the 2026-08-16
+ *     review's finding 3. Do not reintroduce it.
+ *
+ *     The "arrives just before" half is only true because the keyboard leads
+ *     EVERY beacon with an advert on the same channel (since 2026-08-22). Under
+ *     the older slots-0,1-then-one-in-eight schedule it held only for a dongle
+ *     camped from the keyboard's very first slot, which is why capability
+ *     latched 0/10 in the documented pairing order (OC-01).
  *
  * The unused parameter is the contract: whoever edits this signature is
  * looking at the one place an accept-time clear of the capability latch

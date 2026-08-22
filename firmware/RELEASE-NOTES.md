@@ -126,10 +126,10 @@ not need a source edit.
 reacquire gating out rebooted keyboards). That is a separate v0.96.x fix, and
 both want the same bench re-validation pass.
 
-## Security property: the RF link provides no confidentiality
+## Security property: plaintext by default, AES-128-CCM when negotiated
 
-The Bridge75 2.4 GHz data path applies **no confidentiality protection**, by
-design and for wire compatibility with the production keyboard. Specifically:
+The Bridge75 2.4 GHz data path ships **plaintext by default**, for wire
+compatibility with the production keyboard. In that configuration:
 
 - The per-session access address is sent in **cleartext** in the pair-ACK on the
   well-known pairing address.
@@ -137,12 +137,138 @@ design and for wire compatibility with the production keyboard. Specifically:
   constant.
 - HID reports travel **verbatim** on the link (`rf_protocol.h`, `rf_task.c`).
 
-The prebuilt vendor BLE archive contains cryptographic and SMP routines, but this
-product uses raw `RF_Rx`/`RF_Tx` and never invokes them. An attacker within radio
-range can recover keystrokes. This is a property of the wire protocol, not a
-defect to be fixed in this firmware — fixing it would break interoperability with
-the production keyboard. It is stated here so it is an explicit, accepted property
-rather than an implicit one.
+An attacker within radio range can recover keystrokes from such a link. That is a
+property of the stock wire protocol, and it remains the default so that an
+existing keyboard keeps working unchanged.
+
+**Optional link encryption.** This firmware can also verify and decrypt
+AES-128-CCM uplink frames (`rf_crypt.c`). It is **negotiated, never required**:
+encryption goes active only for a bond that carries BOTH the capability the
+keyboard advertised at pairing AND a link key provisioned over USB
+(`bond_enc_active()` is an AND of the two flags). A stock keyboard never sends
+the advert, so its bond stays plaintext and its behaviour is byte-identical to
+before. Once a bond IS encrypting, a plaintext HID frame on it is refused rather
+than forwarded, and the refusal is counted (`plain_drop`, IAP `0x94`).
+
+What this does NOT yet provide, and should not be read as providing:
+
+- **Key establishment.** The link key is provisioned out-of-band over USB. There
+  is no on-air key agreement; that is KEXv1 (`docs/key-establishment.md`, a draft
+  that is not approved for implementation).
+- **An authenticated capability advert.** The advert is anonymous and
+  unauthenticated, so an attacker in range at pairing time can suppress it and
+  hold a fresh pair at plaintext. Once a pair is keyed, a reconnect cannot
+  downgrade it.
+- **Downlink or pairing-traffic protection.** Only the keyboard->dongle HID
+  uplink is sealed.
+- **Replay resistance across a dongle reboot.** The receiver's replay high-water
+  is not persisted, and the per-boot nonce inputs are correlated on CH592; see
+  the security review for the quantified residue.
+
+## Pinned build identity and image digests
+
+Re-pinned 2026-08-22, after the link-encryption batch (key preservation on
+re-pair, capability-advert scheduling, downgrade observability, the CH570
+stack-floor descriptor sweep). Produced by `make -C firmware release` with the
+pinned toolchains -- MounRiver GCC15 for the application, GCC12 for OpenBoot --
+which also runs the host suites, both slots, both bundles and the compiled-in
+bench-key byte scan.
+
+| chip | slot | base | build id | image crc32 | bytes |
+|---|---|---|---|---|---|
+| CH570 | A | `0x00002000` | `0x132BF22D` | `0xD0BA5455` | 30924 |
+| CH570 | B | `0x0001E000` | `0x1914B9AA` | `0xA927252B` | 30924 |
+| CH592 | A | `0x00002000` | `0x44899EB2` | `0x20E39055` | 50308 |
+| CH592 | B | `0x00039000` | `0x560FB702` | `0x3C396A1F` | 50388 |
+
+The crc32 column is the value the `.obb` bundle records and the device reports
+back at COMMIT, so it can be checked end-to-end rather than trusted. Verified on
+silicon for CH592 slot A: the dongle flashed from this bundle answered
+`verify OK (device crc32 0x20E39055)` and then reported build id `44899EB2` over
+IAP `0x91`.
+
+**Hardware-matrix status for this pin — PARTIAL, and the gaps are structural.**
+The bench that produced it carries two CH592F boards (a USB dongle and a
+UART keyboard) and no CH572, so the CH572 legs of the matrix could not run at
+all. Two further legs are blocked by tooling rather than by scheduling:
+`aes-hw-validate` and the OpenBoot A/B power-cut bench both flash their target
+over SWD with minichlink, which cannot connect to ANY CH5xx part (it pre-selects
+`CHIP_CH32V10x` before the LinkE target-connect -- see
+`bench/README-link-encryption.md`), and the dongle exposes no usable SWD at all.
+
+**CH570 slot A, verified on silicon 2026-08-22 — image only.** A CH570 joined
+the bench and was recovered over USB: WCH BootROM ISP to clear the config, then
+`openboot flash ch570-product.obb`, which answered
+`commit OK (len 30924, crc32 0xD0BA5455)` — a *device-computed* crc32 matching
+the table above. The booted app then reported build id `132BF22D` over IAP
+`0x91`. That is the end-to-end check this section describes, now done for CH570
+slot A as well as CH592.
+
+**CH570 production path, on silicon 2026-08-22.** With the dongle on USB and the
+keyboard's UART restored, `bench/ch570_validate.py` now runs end to end in the
+order this project documents — keyboard broadcasting, dongle restarted into the
+running stream, i.e. the order OC-01 is about:
+
+| gate | result |
+|---|---|
+| G1 capability negotiated on air (`ENC_CAPABLE` latched) | **6/6** |
+| G2 live activation (`ok_count` climbs, F13 delivered host-side) | **4/5** |
+
+`drop_mac 0` and `replay 0` in every trial, `aes_redo 0`, `announce_retry 0`,
+`kat_fail 0`. The single G2 miss was a deliberately shortened 8 s observation
+window (`ok=0`, `mac=0`) rather than a crypto failure; at the intended 30 s hold
+G2 is 2/2. A representative pass: bond `flags 0x01` after the fresh pair, then
+USB `BondWrite` → `flags 0x03`, encryption ACTIVE with no reset, `ok 0->137`.
+
+That closes the CH570 half of the capability (P0 #3) and live-provisioning
+(P0 #2) legs, and is the first on-silicon evidence that capability latches in
+the documented pairing order rather than only in the control order.
+
+**OC-01 acceptance — PASSES.** `bench/oc01_experiment.py`, 12 trials per arm:
+
+| arm | order | capability latched |
+|---|---|---|
+| A | documented (keyboard first, dongle joins mid-stream) | **12/12** |
+| B | control (dongle listening first) | **12/12** |
+
+Against the pre-fix baseline of 0/10 in that same documented order, Fisher exact
+**p = 1.55e-06**. The plan's gate was Arm A >= 11/12 with Arm B 12/12; both are
+met. Capability now latches regardless of pairing order, which is what the
+advert-lead change was for.
+
+**OD-01 acceptance — NOT ESTABLISHED (precondition unreachable).** Be careful
+with this one. A first pass reported 8/8 "key kept" and that result was
+**vacuous**: the session AA in the bond record was identical before and after
+every re-pair, and a genuine fresh pair always mints a new AA. Dongle-side
+tracing showed why — a dongle that already holds a valid bond sits in
+`conn=waiting-reconnect` and never accepts a same-peer fresh pair, even with the
+keyboard re-arming its broadcast every 4 s across the entire reboot. The
+keyboard's `0x32 CONNECTED` in those runs is spurious; it drops ~3 s later. So
+the key-preservation path was never entered and nothing was measured either way.
+`bench/od01_experiment.py` now checks the session AA and reports INCONCLUSIVE
+rather than a pass. Reproducing OD-01 needs a way to make a bonded dongle accept
+a same-peer fresh pair, which this bench has not found.
+
+Still not covered on CH570: the six AES/CCM arms, the A/B power-cut acceptance,
+the encrypted soak and reacquire legs, and anything on CH572.
+
+One correction, because an earlier revision of this file claimed otherwise: the
+same image was first pushed over SWD with `bench/ch570_swd_flash.py`, which
+reported all 118816 bytes reading back byte-for-byte — and the part still had an
+**empty app slot** afterwards (`openboot probe` → `slots 2 (active none)`, and
+the part booted into the WCH factory ISP). A CH5xx SWD readback is not evidence
+of a commit. Only the USB COMMIT attestation above is.
+
+Covered for CH592 on this pin: the full release gate; the production path
+(capability negotiated on air, USB `BondWrite` live activation, encrypted HID
+delivered, boot KAT); both backwards-compatibility directions on one unmodified
+dongle image; and the two P1 regression experiments (same-peer re-pair key
+preservation, capability negotiation in the documented pairing order).
+
+**Do not treat this as a shipping sign-off.** A release still needs the six
+on-silicon AES arms, the A/B power-cut acceptance, the CH570 soak/reacquire
+legs, and CH572 hardware this bench does not have. The CH570 production path
+itself is now covered (table above).
 
 ## Known issues
 

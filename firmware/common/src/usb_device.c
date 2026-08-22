@@ -333,15 +333,32 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                 usb_remote_wakeup = (uint8_t)(bRequest == 0x03);
 #endif
             } else if ((bmReqType & 0x1F) == 0x02 && wValue == 0x0000 && bRequest == 0x01) {
-                /* CLEAR_FEATURE(ENDPOINT_HALT) */
+                /* CLEAR_FEATURE(ENDPOINT_HALT). wIndex bit 7 selects the
+                 * direction and MUST be decoded (TODO.md; 2026-08-16 review,
+                 * finding 24): masking it off always reset the IN half, so a
+                 * host clearing the halt on EP6 OUT (0x06) -- the one
+                 * bidirectional endpoint (R8_UEP567_MOD enables both halves,
+                 * the descriptor declares OUT 0x06) -- reset the WRONG
+                 * direction and left the OUT half untouched. IN halves reset
+                 * to NAK-until-armed with DATA0; the OUT half returns to
+                 * ACK-ready with DATA0 (a fresh OUT landing while a command
+                 * is pending is dropped-and-re-ACKed by the EP6 OUT ISR
+                 * case, so this cannot break the one-slot flow control).
+                 * Direction/endpoint pairs that do not exist STALL. */
                 uint8_t ep = wIndex & 0x0F;
-                switch (ep) {
-                case 1: R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 5: R8_UEP5_CTRL = (R8_UEP5_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 6: R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                default: err = 0xFF; break;
+                if (wIndex & 0x80u) {
+                    switch (ep) {
+                    case 1: R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 5: R8_UEP5_CTRL = (R8_UEP5_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 6: R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    default: err = 0xFF; break;
+                    }
+                } else if (ep == 6u) {
+                    R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES)) | UEP_R_RES_ACK;
+                } else {
+                    err = 0xFF;
                 }
             } else {
                 err = 0xFF;
@@ -535,13 +552,21 @@ static __attribute__((noinline)) void USB_SuspendResume(void)
      * HID IN reports (see USB_Send*). */
     if (R8_USB_MIS_ST & RB_UMS_SUSPEND) {
         usb_suspended = 1;   /* host stopped SOF -- bus is idle */
-        /* NAK any boot-keyboard report that was armed (T_RES=ACK) but not polled
-         * before SOF stopped, so the host's first EP1 IN poll on resume can't
-         * return it as a stale keystroke ahead of the USB_PollEP6 keys-up flush
-         * (CODEREVIEW F12). Mask only T_RES so the data toggle is preserved: the
-         * host never received the NAK'd report, so its expected toggle is
-         * unchanged and the resume re-arm continues the sequence. */
+        /* NAK any HID report that was armed (T_RES=ACK) but not polled before
+         * SOF stopped, so the host's first IN poll on resume can't return it
+         * as a stale event (CODEREVIEW F12). ALL THREE HID IN endpoints, not
+         * just the keyboard (TODO.md; 2026-08-16 review, finding 9): RF HID is
+         * change-driven, so a mouse/consumer PRESS could sit armed on EP2/EP3
+         * across the suspend while its RELEASE -- arriving during suspend --
+         * was correctly dropped by the usb_hid_in_ready gate; the host then
+         * resumed into a stuck button or held media key. EP5 is inert (nothing
+         * ever arms it) and EP6 is deliberately outside the HID suspend
+         * policy. Mask only T_RES so the data toggle is preserved: the host
+         * never received the NAK'd report, so its expected toggle is unchanged
+         * and the resume re-arm continues the sequence. */
         R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
+        R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
+        R8_UEP3_CTRL = (R8_UEP3_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
     } else {
         /* Resume signalling -- bus active again. On a real suspend->resume
          * edge, ask the main loop to flush an all-keys-up report (see
@@ -634,13 +659,29 @@ void USB_IRQHandler(void)
              * running them here would starve the ~1 Hz RF EV10 supervision and
              * drop the keyboard link. One slot suffices — IAP is strict
              * request/response, so the host waits for our EP6-IN reply. */
-            if ((R8_USB_INT_ST & RB_UIS_TOG_OK) && !iap_pkt_pending) {
+            if ((raw_st & RB_UIS_TOG_OK) && !iap_pkt_pending) {
                 uint8_t rx_len = R8_USB_RX_LEN;
                 if (rx_len > 64u) rx_len = 64u;
                 iap_pkt_len = rx_len;
                 iap_pkt_pending = 1;
+                /* Latched: NAK until USB_PollEP6 has run the command and
+                 * re-ACK'd -- the flow control described above. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+            } else {
+                /* NOT latched -- toggle mismatch (TOG_OK clear: the SIE already
+                 * ACKed a retransmission we must drop) or an OUT while a prior
+                 * command is still pending (a pipelining host). The old
+                 * unconditional NAK left the endpoint dead here FOREVER: the
+                 * only re-ACK lives behind iap_pkt_pending in USB_PollEP6, and
+                 * this path never set it -- no --info, no bond ops, no
+                 * --enter-bootloader until replug (TODO.md, review finding 8).
+                 * Keep the endpoint live instead; the dropped packet is the
+                 * host's to retry (IAP is strict request/response). The toggle
+                 * is evaluated from raw_st, the sample this dispatch already
+                 * took -- re-reading R8_USB_INT_ST here could see a LATER
+                 * event's flags. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
             }
-            R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             break;
 
         default:
