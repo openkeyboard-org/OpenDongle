@@ -179,3 +179,40 @@ Consequences and workarounds:
   which needs neither SDI nor root.
 - `CFG_RESET_EN=0` on these parts: NRST is a GPIO, so a reset button does
   nothing and only a power-cycle (or `--enter-bootloader`) resets the dongle.
+
+## Flashing a CH570 over SWD
+
+Use `bench/ch570_swd_flash.py <image.bin> --probe <SERIAL>`. Do not drive WCH
+OpenOCD by hand here: three `wch_riscv` quirks each present as a hardware fault,
+and two of them make a *correct* flash look like a failed one. Measured on
+silicon 2026-08-22 while recovering a half-programmed part.
+
+- **The debug window is a few ms wide.** PA0/PA1 are SWDIO/SWCLK *and* USB
+  D-/D+, so once an image reaches USB init it clears `RB_PIN_DEBUG_EN` and takes
+  the pins. Power-cycle the LinkE 3V3 rail and hammer the target-connect with no
+  delay between attempts; it lands ~20 ms after power-on. A blank part is
+  misleadingly easy to attach to -- it faults before ever closing the window --
+  so a grab loop calibrated on blank flash will fail the moment the part works.
+- **A single large image write fails; 16 KB chunks land cleanly.**
+- **The read-protect unlock covers exactly one flash operation.** `flash protect
+  0 0 last off` reports `Success to Disable Read-Protect`, and the *next* write
+  still fails with `Read-Protect Status Currently Enabled`. Reissue it before
+  every erase and every write.
+- **The flash read path only exposes the most recently programmed 16 KB
+  window.** Everything else returns a constant `0xf3f9bda9` or aliases that
+  window -- dump the whole image and it is 100% periodic at 16 KB. So
+  `verify_image` across the whole image can *never* pass, and its failure says
+  nothing about whether the flash is good. Worse, issuing the unlock immediately
+  *before* a read is itself what selects the `0xf3f9bda9` mode, so an otherwise
+  clean verify fails purely because of the unlock in front of it. Read each
+  chunk back right after writing it, while its own window is live; that is a
+  genuine byte-for-byte verify of the whole image, taken in eight pieces.
+- **A freshly grabbed chip is halted in BootROM with the array unmapped.** Reads
+  taken before the session's first erase/write alias ROM and look like plausible
+  firmware -- structurally valid startup code that matches no build in the tree.
+  Never trust a read taken before a flash operation.
+
+Confidence that the part is actually programmed, without a USB path: the app
+slice at the slot base must crc32 to the `RELEASE-NOTES` pin, and a core halted
+~1 s after power-on should show `pc` advancing through `__HIGH_CODE` in SRAM
+(`0x2000_xxxx`) with `mcause == 0` and a sane `sp`/`ra`.
