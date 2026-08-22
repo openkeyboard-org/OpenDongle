@@ -199,13 +199,25 @@ class MinichlinkSelection(unittest.TestCase):
         return parser.parse_args([]).minichlink
 
     def test_allow_list_is_checked_before_anything_runs(self):
-        """W4 is structural protection; it must precede execution, not follow."""
+        """W4 is structural protection; it must precede execution, not follow.
+
+        The refused fixture is the KEYBOARD's probe: every scenario here
+        whole-chip-erases its target, so driving CEBD8F0653EF would destroy the
+        paired OpenController keyboard. (Until 2026-08-22 this asserted the
+        inverse and pinned an inverted allow-list.)
+        """
         mc = self.wrapper.make_mc(self.module, CUSTOM, dry_run=False)
         with self.assertRaises(self.wrapper.MinichlinkError):
-            mc({"serial": "CF148F065446"}, "-E")
+            mc({"serial": "CEBD8F0653EF"}, "-E")
         self.assertEqual(
             self.captured, [],
             "a disallowed probe reached the command layer")
+
+    def test_the_dongle_probe_is_drivable(self):
+        """The bench part the Gate-1 A/B evidence is FOR must not be refused."""
+        mc = self.wrapper.make_mc(self.module, CUSTOM, dry_run=False)
+        mc({"serial": "CF148F065446"}, "-E")
+        self.assertTrue(self.captured, "the allowed probe never reached minichlink")
 
 
 class BuildHint(unittest.TestCase):
