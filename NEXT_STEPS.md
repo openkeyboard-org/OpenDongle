@@ -38,15 +38,22 @@ The byte-changing discipline (`TODO.md` preamble): every firmware /
 linker / build-id change must land with a complete matrix run and re-pinned
 digests.
 
-**Status 2026-08-22: digests ARE re-pinned (`firmware/RELEASE-NOTES.md`), and
-the CH592 half of the matrix ran. The CH570/CH572 half did not, and cannot on
-this bench.** The bench carries two CH592F boards and no CH570 or CH572, and two
-further legs are blocked by tooling rather than scheduling: `aes-hw-validate` and
-the A/B power-cut bench both flash over SWD with minichlink, which cannot connect
-to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
+**Status 2026-08-22: digests ARE re-pinned (`firmware/RELEASE-NOTES.md`), the
+CH592 half of the matrix ran, and the CH570 *image* pin is now verified on
+silicon.** A CH570 joined the bench later that day wired to a WCH-LinkE;
+`firmware/bench/ch570_swd_flash.py` programmed the pinned product image, read
+back all 118816 bytes byte-for-byte, and the app slice at `0x00002000` crc32s to
+the pinned `0xD0BA5455`. That also gives CH570 the SWD path minichlink cannot.
+
+What is still not covered: no CH572 on this bench at all, and every remaining
+CH570 leg needs USB — on CH570 the SWD pins ARE the USB pins (PA0/PA1 are
+SWDIO/SWCLK and D-/D+), so while the part is wired to the probe it cannot
+enumerate. Two further legs stay blocked by tooling: `aes-hw-validate` and the
+A/B power-cut bench both flash over SWD with minichlink, which cannot connect to
+ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
 `firmware/bench/README-link-encryption.md`), and the dongle exposes no usable SWD
-at all. Those legs need a bench with the parts and a minichlink that can reach
-them.
+at all. Porting those two harnesses onto `ch570_swd_flash.py` would unblock their
+CH570 arms without new hardware.
 
 - [x] Both chips: `make -C firmware release` end-to-end with both pinned
       toolchains (GCC15 app + GCC12 OpenBoot) — app + factory + both slots +
@@ -64,13 +71,17 @@ them.
       keyboard pairs and delivers HID with `ENC_CAPABLE` never latched and zero
       CCM frames, provisioning correctly refuses that bond, and the same dongle
       then auto-negotiates encryption with the encrypted keyboard.
-- [ ] **BLOCKED (no CH570/CH572 on this bench, and minichlink cannot drive
-      CH5xx):** `make -C firmware aes-hw-validate` — the six on-silicon AES/CCM
-      arms (`ch570-asm-a/-asm-f/-c`, `ch572-hw/-asm-a`, `ch592-hw`).
-- [ ] **BLOCKED (same reason):** OpenBoot A/B power-cut acceptance
-      (`firmware/validation/openboot_ab_bench.py`) on both chips. Its probe
-      allow-list was inverted and is now fixed, so it is ready to run on a bench
-      that can reach the target.
+- [ ] **BLOCKED (no CH572 on this bench; minichlink cannot drive CH5xx):**
+      `make -C firmware aes-hw-validate` — the six on-silicon AES/CCM arms
+      (`ch570-asm-a/-asm-f/-c`, `ch572-hw/-asm-a`, `ch592-hw`). The three CH570
+      arms are now reachable in principle: a CH570 is on the bench and
+      `bench/ch570_swd_flash.py` can flash it, so this needs the harness ported
+      off minichlink rather than new hardware.
+- [ ] **BLOCKED (minichlink cannot drive CH5xx):** OpenBoot A/B power-cut
+      acceptance (`firmware/validation/openboot_ab_bench.py`) on both chips. Its
+      probe allow-list was inverted and is now fixed, so it is ready to run on a
+      bench that can reach the target. Same escape as the AES arms: its CH570
+      leg only needs porting onto `bench/ch570_swd_flash.py`.
 - [ ] Suspend/resume replay bench case: queue a mouse or consumer report, force
       a host suspend/resume, confirm no stale/stuck report (M2 EP2/EP3 fix).
 - [ ] EP6 pipelined-OUT + bus-reset-mid-IAP on **CH592** as well

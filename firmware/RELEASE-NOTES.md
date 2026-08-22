@@ -189,12 +189,26 @@ IAP `0x91`.
 
 **Hardware-matrix status for this pin — PARTIAL, and the gaps are structural.**
 The bench that produced it carries two CH592F boards (a USB dongle and a
-UART keyboard) and no CH570 or CH572, so the CH570 and CH572 legs of the matrix
-could not run at all. Two further legs are blocked by tooling rather than by
-scheduling: `aes-hw-validate` and the OpenBoot A/B power-cut bench both flash
-their target over SWD with minichlink, which cannot connect to ANY CH5xx part
-(it pre-selects `CHIP_CH32V10x` before the LinkE target-connect -- see
+UART keyboard) and no CH572, so the CH572 legs of the matrix could not run at
+all. Two further legs are blocked by tooling rather than by scheduling:
+`aes-hw-validate` and the OpenBoot A/B power-cut bench both flash their target
+over SWD with minichlink, which cannot connect to ANY CH5xx part (it pre-selects
+`CHIP_CH32V10x` before the LinkE target-connect -- see
 `bench/README-link-encryption.md`), and the dongle exposes no usable SWD at all.
+
+**CH570 slot A, verified on silicon 2026-08-22 — image only.** A CH570 joined
+the bench wired to a WCH-LinkE. `bench/ch570_swd_flash.py` programmed the pinned
+product image and read back all 118816 bytes byte-for-byte, and the app slice at
+the `0x00002000` slot base crc32s to `0xD0BA5455`, matching the table above. The
+part then ran healthy (`pc` advancing through `__HIGH_CODE` in SRAM, `mcause 0`,
+sane `sp`/`ra`). That retires "no CH570 on the bench" for the *image* pin, and
+`ch570_swd_flash.py` gives CH570 the SWD path minichlink cannot.
+
+It retires nothing else. Every remaining CH570 leg needs USB — the crc32-at-
+COMMIT round trip, the IAP `0x91` build-id readback, and all of the air and
+encryption arms — and on CH570 the SWD pins ARE the USB pins (PA0/PA1 are
+SWDIO/SWCLK and D-/D+). While the part is wired to the probe it cannot enumerate,
+so those legs are blocked on rewiring it to USB, not on tooling.
 
 Covered for CH592 on this pin: the full release gate; the production path
 (capability negotiated on air, USB `BondWrite` live activation, encrypted HID
@@ -203,8 +217,10 @@ dongle image; and the two P1 regression experiments (same-peer re-pair key
 preservation, capability negotiation in the documented pairing order).
 
 **Do not treat this as a shipping sign-off.** A release still needs the CH570
-legs, the six on-silicon AES arms, and the A/B power-cut acceptance, on a bench
-that has the parts and a minichlink that can reach them.
+air and USB legs, the six on-silicon AES arms, and the A/B power-cut acceptance,
+on a bench that has the parts and an SWD path that can reach them -- which for
+CH570 now means `ch570_swd_flash.py` rather than minichlink, and a CH570 wired
+to USB rather than to the probe.
 
 ## Known issues
 
