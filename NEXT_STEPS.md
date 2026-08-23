@@ -91,10 +91,35 @@ the keyboard hops. Until that is solved OD-01 cannot be exercised on hardware,
 and the A1 key-preservation fix rests on `test_bond_key_preservation.py` plus
 code review alone.
 
+**The CH570 soak and reacquire legs did NOT run, and the reason is one shared
+root cause: bonded RECONNECT never completes on this bench.** Fresh pairing is
+reliable (12/12), but after a keyboard power-cycle the keyboard loops
+`0x35 HAS_BOND -> 0x21 KEYED_OK -> 0x32 CONNECTED -> 0x33 DISC` every ~3 s while
+the dongle sits in `conn=waiting-reconnect` with `ok` frozen; resetting the
+dongle into the keyboard's stream does not recover it either. Both legs are
+built on forcing link-loss and reacquiring, so neither can produce a result
+until that is understood. Plausibly the "natural-drop reconnect failure / silent
+phantom" the `RF_EnterPairing` comment already warns about (`rf_task.c:1866`),
+but that is a hypothesis, not a measurement — do not record it as a regression
+without evidence.
+
+Two further things that leg-hunting turned up:
+- `minichlink -kt/-k3` does **not** work on a CH5xx probe. The belief that those
+  flags skip target init and so survive minichlink's CH5xx limitation is wrong:
+  both return rc=223 (`WCH-LinkE invalid response failed (-1), command:
+  81 0d 01 02`). `firmware/bench/linke_power.py` now drives the rail directly
+  over USB instead, and both legs use it.
+- Opening the keyboard CDC DTR-resets the keyboard, so a harness can never
+  "attach to a live encrypted link" — the attach destroys it. Any soak has to
+  establish its own link.
+- The stack-watermark read (`0x96`) returns nothing on the pinned product image;
+  it needs a `DONGLE_STACK_WATERMARK=1` build, which is byte-changing and so
+  carries its own matrix cost.
+
 What is still not covered: no CH572 on this bench at all; the CH570
-soak/reacquire legs; and two legs blocked by tooling — `aes-hw-validate` and the
-A/B power-cut bench both flash over SWD with minichlink, which cannot connect to
-ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
+soak/reacquire legs (above); and two legs blocked by tooling — `aes-hw-validate`
+and the A/B power-cut bench both flash over SWD with minichlink, which cannot
+connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
 `firmware/bench/README-link-encryption.md`).
 
 - [x] Both chips: `make -C firmware release` end-to-end with both pinned

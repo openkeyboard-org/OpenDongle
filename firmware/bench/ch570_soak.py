@@ -20,32 +20,28 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import linke_power  # noqa: E402
 from ch570_validate import (  # noqa: E402
     Kbd, Iap, BENCH_KEY, KBD_PORT, WANT_FAMILY, WANT_PROFILE, inject_f13, log)
 
-MINICHLINK = os.path.expanduser(
-    "~/Development/Personal/WCH/ch32fun/minichlink/minichlink")
 KBD_PROBE = "CEBD8F0653EF"
 
 
 def kbd_power(state):
-    """Drive the keyboard's rail, and FAIL LOUDLY if minichlink refuses.
+    """Drive the keyboard's rail, and FAIL LOUDLY if it does not happen.
 
-    The returncode used to be discarded, so a power cycle that never happened
-    (probe busy, wrong serial, binary present but failing) left the link up and
-    the test then passed vacuously -- the worst shape of failure for an
-    acceptance test, and precisely what the vendored ab_bench harness warns
-    about. NOTE: minichlink cannot connect to CH5xx parts at all on this bench
-    (it pre-selects CHIP_CH32V10x before the LinkE connect); -kt/-k3 skip target
-    init so they still work, but see bench/README-link-encryption.md.
+    A power cycle that silently never happened leaves the link up and lets the
+    test pass vacuously -- the worst shape of failure for an acceptance gate --
+    so this raises rather than returning a status.
+
+    This used to shell out to minichlink -kt/-k3, on the belief that those flags
+    skip target init and so survive minichlink's inability to reach a CH5xx.
+    They do not: measured 2026-08-23, both return rc=223 ("WCH-LinkE invalid
+    response failed (-1), command: 81 0d 01 02"), because the probe is still
+    asked for connect status first. The rail commands need no target connection,
+    so linke_power drives them straight over USB.
     """
-    flag = "-kt" if state == "off" else "-k3"
-    p = subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
-                       capture_output=True, timeout=30)
-    if p.returncode != 0:
-        raise SystemExit(
-            f"keyboard power {state} FAILED (minichlink rc={p.returncode}): "
-            f"{p.stderr.decode(errors='replace').strip()[:200]}")
+    linke_power.rail(KBD_PROBE, state)
 
 
 def reconnect_and_key(kbd, dg):
@@ -157,18 +153,42 @@ def main():
     # is what mints + announces a session the (reset, unkeyed) keyboard can
     # adopt -- a bare A6 30 after a port-reset leaves it connected but without
     # the current session (fire-and-forget announce window already closed).
-    log("power-cycling keyboard (clean connect -> fresh session mint)")
-    kbd_power("off")
-    time.sleep(2.0)
-    kbd_power("on")
-    kbd = Kbd(KBD_PORT)
-    log("keyboard port open; settling 11 s")
-    time.sleep(11.0)
-    kbd.ser.read(4096)
+    # SOAK_ON_LIVE_LINK: soak whatever link is already up instead of forcing a
+    # reconnect first. Bonded RECONNECT is a narrow rendezvous on this bench --
+    # the dongle camps on a single RF_PROTO_RECONNECT_CAMP_CHANNEL while the
+    # keyboard hops -- so a keyboard power-cycle here leaves the keyboard
+    # looping 0x32 CONNECTED -> 0x33 DISC every ~3 s with the dongle stuck in
+    # conn=waiting-reconnect and ok frozen (measured 2026-08-23). Fresh PAIRING
+    # is reliable (12/12), so the usable recipe is: run ch570_validate.py to
+    # establish an encrypted link, then soak it with this flag set. The soak
+    # itself -- holding a session across EV10 rekeys with drop_mac 0 -- does not
+    # need a reconnect to be meaningful.
+    if os.environ.get("CH570_SOAK_ON_LIVE_LINK"):
+        kbd = Kbd(KBD_PORT)
+        log("soaking the LIVE link (no power-cycle); settling 11 s")
+        time.sleep(11.0)
+        kbd.ser.read(4096)
+        kbd.send(bytes([0xAE]) + BENCH_KEY)   # key is RAM-only; re-assert it
+        time.sleep(1.0)
+        kbd.pump()
+        d0 = dg.crypt_diag()
+        if not d0 or d0["ok"] == 0:
+            log("ABORT: no encrypted link to soak -- run ch570_validate.py first")
+            return 1
+        log(f"  live link confirmed (ok={d0['ok']}, mac={d0['mac']})")
+    else:
+        log("power-cycling keyboard (clean connect -> fresh session mint)")
+        kbd_power("off")
+        time.sleep(2.0)
+        kbd_power("on")
+        kbd = Kbd(KBD_PORT)
+        log("keyboard port open; settling 11 s")
+        time.sleep(11.0)
+        kbd.ser.read(4096)
 
-    if not reconnect_and_key(kbd, dg):
-        log("ABORT: could not establish the encrypted link")
-        return 1
+        if not reconnect_and_key(kbd, dg):
+            log("ABORT: could not establish the encrypted link")
+            return 1
     # Pure soak. Forced link-loss / reacquire is a separate, reliable test
     # (ch570_reacquire.py, hard probe power-cycle) -- a DTR port reopen does
     # not dependably reset the keyboard, so it is not used to force a drop.

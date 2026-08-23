@@ -19,32 +19,28 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import linke_power  # noqa: E402
 from ch570_validate import (  # noqa: E402
     Iap, Kbd, BENCH_KEY, KBD_PORT, WANT_FAMILY, WANT_PROFILE, inject_f13, log)
 
-MINICHLINK = os.path.expanduser(
-    "~/Development/Personal/WCH/ch32fun/minichlink/minichlink")
 KBD_PROBE = "CEBD8F0653EF"
 
 
 def kbd_power(state):
-    """Drive the keyboard's rail, and FAIL LOUDLY if minichlink refuses.
+    """Drive the keyboard's rail, and FAIL LOUDLY if it does not happen.
 
-    The returncode used to be discarded, so a power cycle that never happened
-    (probe busy, wrong serial, binary present but failing) left the link up and
-    the test then passed vacuously -- the worst shape of failure for an
-    acceptance test, and precisely what the vendored ab_bench harness warns
-    about. NOTE: minichlink cannot connect to CH5xx parts at all on this bench
-    (it pre-selects CHIP_CH32V10x before the LinkE connect); -kt/-k3 skip target
-    init so they still work, but see bench/README-link-encryption.md.
+    A power cycle that silently never happened leaves the link up and lets the
+    test pass vacuously -- the worst shape of failure for an acceptance gate --
+    so this raises rather than returning a status.
+
+    This used to shell out to minichlink -kt/-k3, on the belief that those flags
+    skip target init and so survive minichlink's inability to reach a CH5xx.
+    They do not: measured 2026-08-23, both return rc=223 ("WCH-LinkE invalid
+    response failed (-1), command: 81 0d 01 02"), because the probe is still
+    asked for connect status first. The rail commands need no target connection,
+    so linke_power drives them straight over USB.
     """
-    flag = "-kt" if state == "off" else "-k3"
-    p = subprocess.run([MINICHLINK, "-C", "linke", flag, "-l", KBD_PROBE],
-                       capture_output=True, timeout=30)
-    if p.returncode != 0:
-        raise SystemExit(
-            f"keyboard power {state} FAILED (minichlink rc={p.returncode}): "
-            f"{p.stderr.decode(errors='replace').strip()[:200]}")
+    linke_power.rail(KBD_PROBE, state)
 
 
 def link_up(kbd, dg, seconds=25.0):
