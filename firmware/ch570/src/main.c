@@ -19,6 +19,7 @@
 #include "sched.h"
 
 #include "iap.h"
+#include "stack_watermark.h"
 #include "usb_device.h"
 
 #include "rf_task.h"
@@ -67,6 +68,7 @@ static void usb_start(void)
 {
     USB_DevInit();
     USB_SetEP6OutCallback(IAP_PacketHandler);
+    USB_SetBusResetCallback(IAP_Reset);   /* reset cancels the IAP session */
 }
 
 static uint8_t rf_started;
@@ -685,6 +687,11 @@ int main(void)
 
     /* MUST be first: hash the pristine power-on SRAM into the session-AA seed. */
     ch570_capture_boot_entropy();
+#if DONGLE_STACK_WATERMARK
+    /* SECOND act, strictly after the entropy capture it would otherwise
+     * destroy (stack_watermark.h has the ordering contract). */
+    stack_watermark_paint();
+#endif
 
 
     reset_status = R8_RESET_STATUS;

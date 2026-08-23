@@ -5,6 +5,7 @@
  */
 
 #include "CH59x_common.h"
+#include "bond.h"
 #include "dongle_platform.h"
 #include "fault_record.h"
 
@@ -77,7 +78,10 @@ uint8_t dongle_nv_read(uint32_t off, void *out, uint32_t len)
 
 uint8_t dongle_nv_is_erased(uint32_t off, uint32_t len)
 {
-    uint8_t buf[32];
+    /* Sized to a whole bond record (BOND_RECORD_MAX_NV) so bond_clear()/
+     * bond_save() verification, which pass sizeof(bond_record_t), are not
+     * rejected as "over the buffer". Aligned for the EEPROM_READ DMA path. */
+    uint8_t buf[BOND_RECORD_MAX_NV] __attribute__((aligned(4)));
 
     if (len > sizeof(buf)) {
         return 0u;

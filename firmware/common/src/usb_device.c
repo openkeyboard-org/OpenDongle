@@ -73,6 +73,10 @@ static const uint8_t *usb_desc_ptr;
  * read. */
 static volatile uint8_t usb_led_state;
 static usb_ep6_out_cb_t ep6_out_cb;
+/* Invoked from the USB ISR's bus-reset path so the IAP layer can cancel its
+ * session state without usb_device.c gaining a link-time dependency on it
+ * (the same layering argument as ep6_out_cb). */
+static usb_bus_reset_cb_t usb_bus_reset_cb;
 
 /* USB suspend state. Set when the host stops SOF (RB_UIF_SUSPEND + bus idle),
  * cleared on resume and on bus reset. The dongle is bus-powered and keeps the
@@ -491,6 +495,22 @@ static __attribute__((noinline)) void USB_BusReset(void)
     R8_USB_DEV_AD = 0;
     usb_config = 0;
     usb_dev_addr = 0;
+
+    /* Cancel the deferred IAP state BEFORE the EP6 re-ACK below (2026-08-16
+     * review, finding 13): reset re-enables EP6 OUT, so a new packet can land
+     * immediately -- if a pre-reset command were still latched, the foreground
+     * would run it against a torn-down session, or the new packet would
+     * overwrite the shared DMA buffer under a length the foreground already
+     * holds. The registered hook (IAP_Reset) additionally disarms the
+     * mutation session and a not-yet-started EnterBootloader; ISR context,
+     * byte writes only. Residual window, accepted: a reset landing in the
+     * few microseconds the foreground is INSIDE the EP6 callback can let one
+     * fresh OUT garble the buffer mid-parse -- every mutation command
+     * copies and checksums its record, so that fails validation, not state. */
+    iap_pkt_pending = 0;
+    iap_pkt_len = 0;
+    if (usb_bus_reset_cb)
+        usb_bus_reset_cb();
 
     R8_UEP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
     R8_UEP1_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK | USB_HID_IN_TOG_MODE;
@@ -930,6 +950,11 @@ int USB_EP6InIdle(void)
 void USB_SetEP6OutCallback(usb_ep6_out_cb_t cb)
 {
     ep6_out_cb = cb;
+}
+
+void USB_SetBusResetCallback(usb_bus_reset_cb_t cb)
+{
+    usb_bus_reset_cb = cb;
 }
 
 void USB_PollEP6(void)

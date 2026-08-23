@@ -117,9 +117,7 @@ fn parse_odg2(base: u32, image: &[u8]) -> Result<Option<Odg2Identity>> {
         ),
     }
     if base != header_base {
-        bail!(
-            "ODG2 header base 0x{header_base:X} does not match the image's load base 0x{base:X}"
-        );
+        bail!("ODG2 header base 0x{header_base:X} does not match the image's load base 0x{base:X}");
     }
     if image.len() < MIN_APP_LEN {
         bail!(
@@ -433,7 +431,10 @@ mod tests {
     #[test]
     fn corrupt_checksum_byte_itself_is_rejected() {
         let err = parse_intel_hex(":02000000ABCD87\n:00000001FF\n").unwrap_err();
-        assert!(err.to_string().contains("bad record checksum"), "got: {err}");
+        assert!(
+            err.to_string().contains("bad record checksum"),
+            "got: {err}"
+        );
     }
 
     #[test]

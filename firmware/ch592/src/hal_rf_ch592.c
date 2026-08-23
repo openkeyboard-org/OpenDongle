@@ -26,6 +26,8 @@
  */
 #include "CONFIG.h"
 #include "hal_rf_ch592.h"
+#include "dongle_target.h"   /* RF_CRYPT_DIAG_PREV_SESSION (before rf_crypt.h) */
+#include "rf_crypt.h"        /* rf_crypt_in_aes / rf_crypt_bb_during_aes */
 
 /* Mirrors the rf_task.c values exactly (PROTOCOL.md RF PHY parameters). */
 #define HAL_RF_CH592_CRC_INIT  0x555555
@@ -120,6 +122,14 @@ void hal_rf_shut(void)
 __HIGH_CODE
 void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 {
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Bench: this callback preempts the TMOS task, so it can land inside
+     * rf_crypt_rx()'s CCM window (the executor sets the flag around the
+     * call). The vendor's IRQ path reads/clears AES_STA; correlate. */
+    if (rf_crypt_in_aes) {
+        rf_crypt_bb_during_aes++;
+    }
+#endif
     if (rxBuf) {
         rf_last_rx_frame = rxBuf;
     }

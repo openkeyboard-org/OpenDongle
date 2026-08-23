@@ -102,6 +102,47 @@ raw OBP client can therefore bless and boot an image whose ODG2 CRC is invalid �
 consistent with wrong-family protection also being host-side only (see
 `BOOT.md`).
 
+## Debugging with WCH OpenOCD
+
+`minichlink` handles flashing and device control, but its GDB and memory-read
+support is unreliable on CH5xx (a known-good SRAM address can read back as all
+zeros). For register and memory inspection use MounRiver's WCH OpenOCD (the
+`wlinke` driver over the `sdi` transport), e.g.
+`Mounriver/OpenOCD/OpenOCD/bin/openocd -f wch-riscv.cfg`.
+
+**You must supply the chip family on the command line.** WCH OpenOCD does not
+auto-detect it from the WCH-LinkE, so a bare attach fails with
+`WCH-Link failed to connect with riscvchip`. Pass `-c "chip_id <FAMILY>"` —
+`CH59x` for the CH592 (verified); the binary also recognizes `CH570`, `CH572`,
+`CH57x`, and `CH58x`. With more than one probe attached, select the probe by
+serial as well:
+
+```sh
+openocd -f wch-riscv.cfg \
+  -c "chip_id CH59x" \
+  -c "adapter serial <probe-serial>" \
+  -c init -c halt -c "reg pc" -c "mdb 0x40008000 8" -c resume -c exit
+```
+
+Two caveats, both from bench experience:
+
+- **Resume before attaching.** A core left halted by a prior session (its own
+  `shutdown`, or a `minichlink` op) makes the next attach report the same
+  `failed to connect with riscvchip`. Run `minichlink -e -l <serial>` immediately
+  before OpenOCD.
+- **You are usually looking at OpenBoot, not the live app.** A running
+  OpenDongle application holds/reconfigures the shared debug interface, so the
+  attach effectively resets the part; the PC and peripheral registers you read
+  reflect the post-attach state, not the running application (a hung app tends to
+  show a PC inside OpenBoot, `< 0x2000`). This is still useful for boot-time
+  faults — e.g. a PC parked in `ob_trap` means OpenBoot itself trapped, which is
+  the signature of a bootloader built with an unvalidated compiler. OpenBoot must
+  be built with its validated toolchain (MounRiver GCC12) via `OPENBOOT_TOOLCHAIN`,
+  NOT the application's GCC15; the `check-openboot-toolchain` gate enforces this,
+  and `OPENBOOT_ALLOW_UNVALIDATED_GCC=1` bypasses it at your own risk (GCC15 was
+  observed to produce a CH59x OpenBoot that traps at boot). To observe the live
+  application instead, instrument the firmware (a marker in retained SRAM).
+
 ## Dependencies
 
 The OpenWCH CH570/CH572 and CH592 SDKs are pinned Git submodules. Initialize

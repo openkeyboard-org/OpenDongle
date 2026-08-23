@@ -45,6 +45,11 @@
 /* Hook this into the EP6-OUT receive path during USB init. */
 void IAP_PacketHandler(const uint8_t *data, uint8_t len);
 
+/* Bus-reset cancellation: drop the armed mutation window, the error tally,
+ * and a not-yet-started EnterBootloader. Register via
+ * USB_SetBusResetCallback; ISR context, byte writes only. */
+void IAP_Reset(void);
+
 /* Call once per main-loop pass. Drives the EnterBootloader (0x85) reboot:
  * RF quiesce, EP6 reply drain (both with bounded waits), then IRQ-off and
  * openboot_request_update(). No-op until a reboot has been requested. */

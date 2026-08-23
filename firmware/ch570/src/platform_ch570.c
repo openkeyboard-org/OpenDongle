@@ -425,7 +425,10 @@ uint8_t dongle_nv_read(uint32_t off, void *out, uint32_t len)
 
 uint8_t dongle_nv_is_erased(uint32_t off, uint32_t len)
 {
-    uint32_t erased_buf[8];
+    /* Sized to a whole bond record (BOND_RECORD_MAX_NV) so bond_clear()/
+     * bond_save() verification, which pass sizeof(bond_record_t), are not
+     * rejected as "over the buffer". */
+    uint32_t erased_buf[BOND_RECORD_MAX_NV / 4u];
     uint8_t erased;
 
     if (!nv_range_ok(off, len) ||

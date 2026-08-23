@@ -306,5 +306,4 @@ mod tests {
         assert_eq!(crc32fast::hash(b""), 0x0000_0000);
         assert_eq!(crc32fast::hash(HANDSHAKE_PAYLOAD), 0xa85e_8a42);
     }
-
 }

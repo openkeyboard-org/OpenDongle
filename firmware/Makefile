@@ -34,7 +34,7 @@ PYTHON ?= /usr/bin/python3 -I
 	ch570-openboot ch592-openboot openboot-test \
 	ch570-bundle ch592-bundle bundles \
 	aes-hw-build aes-hw-validate \
-	check-deps test clean
+	check-deps test release clean
 
 all: ch570 ch592
 
@@ -155,6 +155,31 @@ check-deps:
 # - run it with `make openboot-test` when the submodule pin moves.)
 test:
 	$(PYTHON) -m unittest discover -s tests
+
+# The complete release build: what "this tree can ship" actually means, as one
+# target. `all` alone is NOT a release - it builds slot-A apps and factory
+# images but no .obb, and the .obb is the only update artifact OpenBoot
+# accepts for both slots (see the bundle comment above). A green `test` alone
+# is not a release either: it never links a chip. This target composes every
+# gate that runs without hardware:
+#   check-deps      pinned toolchain + SDK + OpenBoot revisions
+#   all             slot-A apps + factory images, both chips (includes size
+#                   checks and each chip's own check-deps)
+#   bundles         both slots + the .obb per chip
+#   test            host suite
+#   openboot-test   the bootloader's own host suite
+#   aes-hw-build    all six AES validation arms compile
+# then scans every packaged artifact for the compiled-in bench key - the
+# byte-level backstop behind the profile split's compile-time tripwire. What
+# it cannot cover: flashing and the hardware matrix, which need real parts.
+# Prerequisite order is not load-bearing (each is independent), so -j is fine.
+release: check-deps all bundles test openboot-test aes-hw-build
+	$(PYTHON) check_bench_key_absent.py --header ch592/src/dongle_target.h \
+	    'ch570/build/ch570-product-slot?/*.bin' \
+	    'ch592/build/ch592-product-slot?/*.bin' \
+	    'ch570/build/ch570-product.obb' \
+	    'ch592/build/ch592-product.obb'
+	@echo "release: all gates passed (hardware matrix still required before shipping)"
 
 # AES backend validation images, built but not run. Useful on its own: it is
 # what proves the ASM_F guard still fires, since that arm is EXPECTED to fail

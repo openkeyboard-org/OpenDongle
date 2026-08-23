@@ -13,7 +13,7 @@ mod hex;
 mod iap;
 mod status;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
@@ -91,9 +91,20 @@ struct Cli {
 
     /// The update image you intend to flash next. Checked against the
     /// device family (ODG2 header vs GetDevInfo) BEFORE the reboot, so a
-    /// wrong-family image is refused while the app is still running.
+    /// wrong-family image is refused while the app is still running. Read
+    /// host-side for that guard only -- it is never flashed; the artifact
+    /// OpenBoot flashes is the .obb bundle (see --bundle).
     #[arg(long, value_name = "FILE", requires = "enter_bootloader")]
     image: Option<PathBuf>,
+
+    /// The .obb update bundle to flash once the bootloader is up. Not read
+    /// by this tool: it only names the artifact in the printed `openboot
+    /// flash` next-step so that line can be copied and run as-is. A/B
+    /// updates need the bundle -- OpenBoot alternates its write target, and
+    /// a bare .bin only matches one slot by luck (firmware/BOOT.md,
+    /// "Updating: use the bundle").
+    #[arg(long, value_name = "FILE", requires = "enter_bootloader")]
+    bundle: Option<PathBuf>,
 
     /// With --enter-bootloader and no --image: reboot without the
     /// family guard (you take wrong-image risk into your own hands)
@@ -107,7 +118,70 @@ impl Cli {
     }
 }
 
+/// Single-quote a path for the printed hand-off line. The line exists to be
+/// copied into a shell, so an unquoted path containing a space (or any other
+/// shell metacharacter) would be split into the wrong arguments by whoever
+/// pastes it. POSIX single quotes are literal apart from `'` itself, which is
+/// escaped the usual `'\''` way.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/=:+,@".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The copy-and-run `openboot flash` hand-off line. Always names the .obb
+/// bundle -- never the family-guard `--image` .bin, which is host-side input
+/// that OpenBoot must not be handed: it is slot-A-based, and OpenBoot
+/// alternates its write target, so a bare .bin is only ever right for one
+/// slot by luck (firmware/BOOT.md, "Updating: use the bundle").
+fn flash_next_step(vid: u16, pid: u16, bundle: Option<&Path>, suffix: &str) -> String {
+    let artifact = match bundle {
+        Some(p) => shell_quote(&p.display().to_string()),
+        None => "<chip>-product.obb".to_string(),
+    };
+    format!("next: openboot --vid 0x{vid:04X} --pid 0x{pid:04X} flash --force {artifact}{suffix}")
+}
+
+/// `--image` takes the flat slot-A `.bin` (or `.hex`) the family guard reads;
+/// an `.obb` bundle is a different container that load_firmware would
+/// misparse as a flat image based at 0x2000 and then family-check garbage.
+fn image_arg_is_bundle(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("obb"))
+}
+
 fn run(cli: &Cli) -> Result<ExitCode> {
+    if let Some(ipath) = &cli.image {
+        if image_arg_is_bundle(ipath) {
+            return Err(anyhow!(
+                "--image {} is an .obb bundle; the family guard needs the flat \
+                 slot-A .bin (or .hex). Pass that as --image and the bundle as \
+                 --bundle -- the bundle is what OpenBoot flashes afterwards",
+                ipath.display()
+            ));
+        }
+    }
+
+    // The mirror of the guard above. --bundle is never read here; it is only
+    // interpolated into the copy-and-run `openboot flash` line, so a .bin
+    // passed here is printed as if it were flashable. Copying that line hands
+    // OpenBoot a slot-A-based flat image while it alternates its write target,
+    // which is right for one slot by luck and wrong for the other.
+    if let Some(bpath) = &cli.bundle {
+        if !image_arg_is_bundle(bpath) {
+            return Err(anyhow!(
+                "--bundle {} is not an .obb bundle; OpenBoot needs the bundle so \
+                 it can pick the variant for the slot it is actually writing. \
+                 Pass the flat slot-A .bin as --image instead",
+                bpath.display()
+            ));
+        }
+    }
+
     let api = HidApi::new()?;
 
     let dev = match IapDevice::open(&api, cli.vid, cli.pid, cli.interface, cli.hidraw.as_deref()) {
@@ -151,23 +225,18 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     }
                     // The flags are not optional: openboot defaults to its
                     // generic 1209:0001 and would not find this product. Name
-                    // the image when one was given, so the printed line can be
+                    // the bundle when one was given, so the printed line can be
                     // copied and run as-is rather than silently flashing a
                     // placeholder the user has to remember to substitute.
-                    match &cli.image {
-                        Some(path) => println!(
-                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
-                             {}  (family NOT verified)",
+                    println!(
+                        "{}",
+                        flash_next_step(
                             cli.vid,
                             cli.pid,
-                            path.display()
-                        ),
-                        None => println!(
-                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
-                             <app.bin>  (family NOT verified)",
-                            cli.vid, cli.pid
-                        ),
-                    }
+                            cli.bundle.as_deref(),
+                            "  (family NOT verified)"
+                        )
+                    );
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -279,7 +348,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // "mine arrived" from "someone else's was already here".
     let preexisting: std::collections::BTreeSet<String> = {
         let api = HidApi::new()?;
-        openboot_paths(&api, track_vid, track_pid).into_iter().collect()
+        openboot_paths(&api, track_vid, track_pid)
+            .into_iter()
+            .collect()
     };
     // Refuse rather than warn. Not because the follow-up flash could hit the
     // wrong unit - it could not; openboot narrows by HID usage page and then
@@ -358,18 +429,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
              {:04X} usage {:02X})",
             arrived[0], cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
         );
-        match &cli.image {
-            Some(p) => println!(
-                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force {}",
-                cli.vid,
-                cli.pid,
-                p.display()
-            ),
-            None => println!(
-                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force <app.bin>",
-                cli.vid, cli.pid
-            ),
-        }
+        println!(
+            "{}",
+            flash_next_step(cli.vid, cli.pid, cli.bundle.as_deref(), "")
+        );
         Ok(ExitCode::SUCCESS)
     } else if arrived.len() > 1 {
         eprintln!(
@@ -390,9 +453,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         eprintln!("         Refusing to report success: that is not the unit asked for.");
         Ok(ExitCode::from(2))
     } else if app_gone {
-        eprintln!(
-            "WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s"
-        );
+        eprintln!("WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s");
         Ok(ExitCode::from(2))
     } else {
         eprintln!("WARNING: device still present 10 s after EnterBootloader was accepted");
@@ -522,16 +583,75 @@ mod tests {
 
     #[test]
     fn enter_bootloader_cli_contract() {
-        // --image requires --enter-bootloader...
+        // --image and --bundle require --enter-bootloader...
         assert!(Cli::try_parse_from(["opendongle", "--image", "fw.bin"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--bundle", "fw.obb"]).is_err());
         // ...and --info conflicts with --enter-bootloader.
         assert!(Cli::try_parse_from(["opendongle", "--info", "--enter-bootloader"]).is_err());
         let full = Cli::try_parse_from([
-            "opendongle", "--enter-bootloader", "--image", "fw.bin",
+            "opendongle",
+            "--enter-bootloader",
+            "--image",
+            "fw.bin",
+            "--bundle",
+            "fw.obb",
         ])
         .unwrap();
         assert!(full.enter_bootloader);
         assert!(full.image.is_some());
+        assert!(full.bundle.is_some());
+    }
+
+    // The printed hand-off must name the .obb bundle -- BOOT.md's update flow
+    // flashes the bundle, and a raw slot-A .bin handed to `openboot flash`
+    // fails whenever slot B is the write target. Printing the family-guard
+    // --image path here is the exact defect this line guards against.
+    #[test]
+    fn flash_next_step_names_the_bundle_never_the_image() {
+        let with = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("ch592-product.obb")), "");
+        assert_eq!(
+            with,
+            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force ch592-product.obb"
+        );
+        let without = flash_next_step(0x0C45, 0xFEFE, None, "  (family NOT verified)");
+        assert_eq!(
+            without,
+            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force \
+             <chip>-product.obb  (family NOT verified)"
+        );
+        assert!(!without.contains(".bin"));
+    }
+
+    #[test]
+    fn obb_is_rejected_as_a_family_guard_image() {
+        assert!(image_arg_is_bundle(Path::new("ch592-product.obb")));
+        assert!(image_arg_is_bundle(Path::new("CH570.OBB")));
+        assert!(!image_arg_is_bundle(Path::new("slot-a.bin")));
+        assert!(!image_arg_is_bundle(Path::new("app.hex")));
+        assert!(!image_arg_is_bundle(Path::new("no-extension")));
+    }
+
+    // --bundle is only ever printed into a copy-and-run shell line, so both
+    // of these are about what a human ends up pasting.
+    #[test]
+    fn shell_quote_only_quotes_when_it_must() {
+        assert_eq!(shell_quote("ch592-product.obb"), "ch592-product.obb");
+        assert_eq!(
+            shell_quote("build/ch570-product.obb"),
+            "build/ch570-product.obb"
+        );
+        assert_eq!(shell_quote("my builds/a.obb"), "'my builds/a.obb'");
+        assert_eq!(shell_quote("it's.obb"), r"'it'\''s.obb'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn flash_next_step_quotes_a_path_with_spaces() {
+        let line = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("my builds/a.obb")), "");
+        assert!(
+            line.contains("'my builds/a.obb'"),
+            "unquoted path in: {line}"
+        );
     }
 
     // The dongle's bootloader shares the application's VID:PID, so these

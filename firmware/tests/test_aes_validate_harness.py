@@ -40,7 +40,12 @@ import read_aes_log as R  # noqa: E402
 
 VALIDATION = ROOT / "validation"
 INC = ROOT / "common" / "include"
+# rf_crypt.c includes dongle_target.h; -I{VALIDATION} supplies the neutral
+# validation shim, so this harness compiles rf_crypt in exactly the shape the
+# on-silicon validation arms build -- the shipping configuration, no bench
+# diagnostics. (test_rf_crypt.py covers the bench shape.)
 AES_SW = ROOT / "common" / "src" / "aes_sw.c"
+RF_CRYPT = ROOT / "common" / "src" / "rf_crypt.c"
 
 # Mirrors what read_aes_log's CLI builds; vectors 7-11 are contract properties
 # that all reduce to the FIPS-197 C.1 answer.
@@ -154,6 +159,9 @@ class HarnessRunsOnTheHost(unittest.TestCase):
             )),
             compile_one(d / "shim.c"),
             compile_one(AES_SW),
+            # aes_validate.c now also exercises the CCM mode (rf_crypt) on each
+            # arm, so the host harness links it too, over the same shim backend.
+            compile_one(RF_CRYPT),
         ]
 
         binary = d / "validate"

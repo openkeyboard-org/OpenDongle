@@ -1,0 +1,72 @@
+# Stack-watermark measurement
+
+Puts a number on the worst-case stack depth. Two decisions are gated on it:
+
+- **CH570 stack floor.** The encrypted image no longer fits under
+  `CH570_STACK_FLOOR = 0x800` (`ch570/link.ld`) — it is ~100 bytes over
+  after the bench-counter gating. The floor was selected without depth data;
+  the candidate change is `0x800 → 0x700` (+256 B, still ≥ the `0x640` the
+  cold-boot entropy window demands), taken **only if this measurement
+  passes**. Fallback if it fails: shrink `rf_crypt_fifo_buf` to 1 slot
+  (+22 B, costs stall-drops) and revisit moving `aes_f_sbox` to flash
+  (+256 B, ~+35 % per AES block) with the measured number in hand.
+- **CH592 true-stack budget** (2026-08-16 review, finding 18): 1,824 B
+  between `_susrstack` and `_eusrstack`, also never measured; M1 added
+  ~32 B to the deepest crypto frame.
+
+## Build
+
+The instrumented image gets its own build id (EXTRA_CFLAGS is hashed), so it
+can never pass for the standard bytes.
+
+```bash
+# CH570 -- the candidate configuration measured AS ITSELF: counters gated
+# (already in-tree) + the candidate floor via --defsym (PROVIDE yields to it;
+# link.ld is NOT edited until the measurement passes).
+make -C firmware/ch570 MRS_TOOLCHAIN=... OPENBOOT_TOOLCHAIN=... \
+     EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1 \
+     "EXTRA_LDFLAGS=-Wl,--defsym=CH570_STACK_FLOOR=0x700"
+
+# CH592 (either profile)
+make -C firmware/ch592 MRS_TOOLCHAIN=... OPENBOOT_TOOLCHAIN=... \
+     EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1
+```
+
+Mechanics (`common/include/stack_watermark.h`): main() paints free RAM with
+`0xC5C5C5C5` — on CH570 strictly as its **second** act, after
+`ch570_capture_boot_entropy()` reads the pristine power-on RAM the paint
+would destroy. On CH592 the paint runs before `CH59x_BLEInit`, whose arena
+overwrites the low span, so the scan lands at the true stack
+(`_susrstack.._eusrstack`) by construction.
+
+## Read
+
+IAP command `0x96` (unarmed, read-only, measurement builds only) returns
+`low_water(4) _end(4) _eusrstack(4)` LE:
+
+- `max_depth = _eusrstack − low_water`
+- `slack     = low_water − _end` (CH570; on CH592 read it against
+  `_susrstack` from the map)
+
+Cross-check with an offline SRAM dump (`minichlink` read of the same span,
+scanning for the first non-`C5` word from `_end` up). On the USB-less bench
+the dump is the only readout.
+
+## Exercise matrix (run all before reading)
+
+- cold boot; pairing from scratch
+- ≥ 1 h connected typing soak
+- encrypted verify soak with a provisioned key (CH592: product profile,
+  USB-provisioned; CH570: once it links)
+- EV10 re-keys; forced link loss + reacquire
+- bond-persist DataFlash write (the IRQ-masked deep path)
+- concurrent EP6 IAP traffic while connected
+- USB suspend/resume
+- a forced fault-handler pass
+
+## Acceptance (CH570 floor cut)
+
+`max_depth + 128 ≤ 0x700` → edit `ch570/link.ld` `CH570_STACK_FLOOR` to
+`0x700` permanently (that edit moves the build id; it batches with this
+campaign's matrix run and digest re-pin). Otherwise: fallbacks above, and
+keep the measured number with the record.
