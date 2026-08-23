@@ -51,16 +51,35 @@ otherwise. That does not re-introduce finding 8: with the flag set,
 `USB_PollEP6` re-ACKs unconditionally once it has run the command (verified in
 source). The patch was written and builds clean.
 
-**It is deliberately NOT landed here.** It is byte-changing (CH570 build id
-`0x132BF22D -> 0x87F41F8A`, slot A crc32 `0xD0BA5455 -> 0xD597CAD8`), so it
-invalidates the digests re-pinned above and reopens Gate 1, and it touches
-`common/` so both chips move. An attempt to A/B it on silicon was
-**inconclusive**: after `openboot flash`, the running app's reported build id and
-OpenBoot's `active` slot pointer disagreed, so which image executed during a
-block could not be confirmed — and the control image itself scored 5/5 in one
-block and 0/5 in another, i.e. the bench's own block-to-block variance swamps
-the effect being measured. Land this as its own matrix-gated change, with a
-trustworthy which-image-is-running check first.
+**It is deliberately NOT landed here**, and after a second attempt on CH592 the
+reason is now sharper than "the A/B was noisy".
+
+**The hazard is not host-reachable, so no A/B can settle it.** Tried on the
+CH592 dongle (2026-08-23) with a probe aimed at the actual failure rather than
+at end-to-end gates: `USB_PollEP6` runs `ep6_out_cb(EP6_Buf, iap_pkt_len)` and
+only *then* clears the flag and re-ACKs, so the window is "a second OUT arrives
+while the callback is still reading the buffer". `CMD_STATUS` returns in
+microseconds, so the window is invisible; `BondWrite` erases and programs flash
+for milliseconds with IRQs masked, which is as wide as that window ever gets.
+Pipelining a second OUT directly behind a valid `BondWrite`, **30/30 rounds
+returned `0x00 saved`** on the UN-fixed image, with the bond intact afterwards.
+
+That is explicable, not luck: once the ISR latches a packet it sets NAK, so the
+SIE *refuses* the next OUT and it never reaches `EP6_Buf`. Reaching the
+pre-fix `else` branch needs the SIE to have accepted a second packet in the
+microseconds *before* the NAK takes effect — a hardware race a host cannot
+drive. (An earlier CH570 attempt was worse than inconclusive: the running build
+id and OpenBoot's `active` slot pointer disagreed after `openboot flash`, so
+which image executed could not even be confirmed.)
+
+**So judge this fix on review, not on bench evidence.** The reasoning is sound
+and was independently confirmed against the source ordering above; it simply
+cannot be demonstrated or refuted here, which is characteristic of a race that
+shows up in the field rather than on a bench. It is byte-changing (CH570 build
+id `0x132BF22D -> 0x87F41F8A`, slot A crc32 `0xD0BA5455 -> 0xD597CAD8`) and
+touches `common/`, so both chips move and Gate 1 reopens. Land it batched with
+the other three held firmware findings (`stack_watermark.h:72`, `iap.c:76`,
+`rf_task.c:3861`) in one matrix-gated change rather than paying that cost twice.
 
 ## Gate 1 — full hardware matrix + digest re-pin (blocks merge)
 
