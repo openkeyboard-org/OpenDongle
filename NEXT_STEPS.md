@@ -32,60 +32,62 @@ orders, with the 24-trial experiment as the regression gate.
 
 ---
 
-## Open review finding NOT yet fixed: EP6 OUT flow control (byte-changing)
+## Batched review-finding fixes — LANDED 2026-08-23
 
-Both Copilot and CodeRabbit independently flagged `usb_device.c:684` as Major,
-and **they are right**. The `else` branch re-ACKs EP6 OUT for two different
-cases, and only one of them should:
+The four held byte-changing findings went in together, as one change with one
+matrix run and one digest re-pin (digests above are re-pinned to match):
 
-- *toggle mismatch, nothing latched* — re-ACK is correct. The unconditional NAK
-  this replaced left the endpoint dead forever (review finding 8), because the
-  only re-ACK sits behind `iap_pkt_pending` in `USB_PollEP6`.
-- *an OUT while `iap_pkt_pending` is still set* (a pipelining host) — re-ACKing
-  **defeats the one-slot flow control**: the next OUT can overwrite `EP6_Buf`
-  before `USB_PollEP6()` consumes it, while `iap_pkt_len` still describes the
-  earlier packet, so the command runs over mismatched data.
+1. **`usb_device.c` EP6 one-slot flow control.** An OUT arriving while
+   `iap_pkt_pending` is set now stays NAK'd instead of being re-ACK'd.
+   `USB_PollEP6` runs `ep6_out_cb(EP6_Buf, iap_pkt_len)` and only THEN clears
+   the flag and re-ACKs, so re-ACKing in the ISR let the SIE drop the next
+   packet into `EP6_Buf` while the callback was still reading it. This does not
+   re-introduce finding 8 (endpoint dead forever): that needed the flag CLEAR,
+   and `USB_PollEP6` re-ACKs unconditionally once it is set. Verified on
+   silicon — the pipelined wedge regression still passes.
+2. **`iap.c` committed-reboot latch.** `IAP_PacketHandler` gated only on
+   `iap_reboot_pending`, which `IAP_Service` reads only in `IAP_SVC_IDLE`; a bus
+   reset after that ran `IAP_Reset`, cleared the flag and re-opened the
+   dispatcher while RF was already quiescing, and every reply arms EP6 IN and
+   can disturb the `IAP_SVC_USB_DRAIN` idle test. A separate
+   `iap_reboot_committed` latch is set when the service leaves IDLE and is never
+   cleared by `IAP_Reset`.
+3. **`rf_task.c` IRQ-masked `rf_state` sample** in `RF_ApplyBondRecord`. The
+   sample is now taken inside the same mask that writes the crypto latches. The
+   security case: a promote landing after an unmasked sample left `connected`
+   stale, so a key-removal record took the `else` branch and cleared
+   `rf_crypt_bond_enc` on a now-live encrypted link — reverting it to the
+   plaintext dispatch and accepting forged HID. `rf_crypt_clear()` stays outside
+   the mask (CH570 zero-key schedule), matching `RF_TombstoneBond`.
+4. **`stack_watermark.h` per-chip scan floor** — already on this branch from
+   `57d35dd`; verified on CH592 silicon (floor `0x200060D0` == `_susrstack`).
 
-The fix is to split the branch — NAK when `iap_pkt_pending` is set, ACK
-otherwise. That does not re-introduce finding 8: with the flag set,
-`USB_PollEP6` re-ACKs unconditionally once it has run the command (verified in
-source). The patch was written and builds clean.
-
-**It is deliberately NOT landed here**, and after a second attempt on CH592 the
-reason is now sharper than "the A/B was noisy".
-
-**The hazard is not host-reachable, so no A/B can settle it.** Tried on the
-CH592 dongle (2026-08-23) with a probe aimed at the actual failure rather than
-at end-to-end gates: `USB_PollEP6` runs `ep6_out_cb(EP6_Buf, iap_pkt_len)` and
-only *then* clears the flag and re-ACKs, so the window is "a second OUT arrives
-while the callback is still reading the buffer". `CMD_STATUS` returns in
-microseconds, so the window is invisible; `BondWrite` erases and programs flash
-for milliseconds with IRQs masked, which is as wide as that window ever gets.
-Pipelining a second OUT directly behind a valid `BondWrite`, **30/30 rounds
-returned `0x00 saved`** on the UN-fixed image, with the bond intact afterwards.
-
-That is explicable, not luck: once the ISR latches a packet it sets NAK, so the
-SIE *refuses* the next OUT and it never reaches `EP6_Buf`. Reaching the
-pre-fix `else` branch needs the SIE to have accepted a second packet in the
-microseconds *before* the NAK takes effect — a hardware race a host cannot
-drive. (An earlier CH570 attempt was worse than inconclusive: the running build
-id and OpenBoot's `active` slot pointer disagreed after `openboot flash`, so
-which image executed could not even be confirmed.)
-
-**So judge this fix on review, not on bench evidence.** The reasoning is sound
-and was independently confirmed against the source ordering above; it simply
-cannot be demonstrated or refuted here, which is characteristic of a race that
-shows up in the field rather than on a bench. It is byte-changing (CH570 build
-id `0x132BF22D -> 0x87F41F8A`, slot A crc32 `0xD0BA5455 -> 0xD597CAD8`) and
-touches `common/`, so both chips move and Gate 1 reopens. Land it batched with
-the other three held firmware findings (`stack_watermark.h:72`, `iap.c:76`,
-`rf_task.c:3861`) in one matrix-gated change rather than paying that cost twice.
+**The EP6 one is landed on review, not on evidence, and that is deliberate.**
+The hazard is not host-reachable: `BondWrite` holds the callback for
+milliseconds with IRQs masked, which is as wide as the window gets, and
+pipelining a second OUT behind it gave 30/30 clean rounds on the UN-fixed image.
+Once the ISR latches, it NAKs, so the SIE refuses the next OUT; reaching the old
+`else` branch needs the SIE to accept a packet in the microseconds before that
+NAK lands — a race a host cannot drive. So no A/B can confirm or refute it, and
+the argument rests on the source ordering above.
 
 ## Gate 1 — full hardware matrix + digest re-pin (blocks merge)
 
 The byte-changing discipline (`TODO.md` preamble): every firmware /
 linker / build-id change must land with a complete matrix run and re-pinned
 digests.
+
+**Status 2026-08-23: digests re-pinned again for the batched fixes above, and
+CH570 is now BUILD-ONLY on the current pin.** The CH570 came off the bench
+before those fixes were built, so neither CH570 slot has been flashed or run
+against `0xADA09F5E`/`0x6F6F25B7`. That is a coverage regression against the
+2026-08-22 pin — re-flash and re-run a CH570 before shipping. CH592 slot B
+(`0xDC4DDAAD`) IS silicon-verified on the current pin: commit CRC, build id and
+image length all agree on the same slot, the production path gives G1 3/3 and
+G2 2/3 (the miss is the pre-existing link instability, not a regression), and
+the EP6 pipelined wedge regression still passes with the new NAK behaviour.
+
+Everything below this paragraph refers to the PREVIOUS (2026-08-22) pin.
 
 **Status 2026-08-22: digests ARE re-pinned (`firmware/RELEASE-NOTES.md`), the
 CH592 half of the matrix ran, and the CH570 *image* pin is now verified on

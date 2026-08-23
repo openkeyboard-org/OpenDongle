@@ -58,6 +58,18 @@ static uint8_t iap_err_count;
  * in the packet handler, so the status reply can still go out). */
 static uint8_t iap_reboot_pending;
 
+/* Set once IAP_Service has LEFT IDLE, i.e. the reboot can no longer be
+ * cancelled (RF quiesce has been requested and is one-way). IAP_Reset
+ * deliberately does NOT clear this.
+ *
+ * Why a second flag: the dispatcher gate below used iap_reboot_pending as its
+ * only guard, but IAP_Service reads that flag only in IAP_SVC_IDLE. Once it has
+ * advanced, a bus reset landing in that window ran IAP_Reset, cleared the flag,
+ * and re-opened the dispatcher while RF was already quiescing. iap_armed is 0
+ * by then so only read-only commands answer -- but every reply arms EP6 IN and
+ * can disturb the USB_EP6InIdle() test that IAP_SVC_USB_DRAIN waits on. */
+static uint8_t iap_reboot_committed;
+
 /* Bus-reset cancellation (USB_SetBusResetCallback; 2026-08-16 review,
  * finding 13): a reset tears down the host session, so an armed mutation
  * window, the error tally, and a NOT-yet-started EnterBootloader must not
@@ -581,7 +593,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
      * reply: USB_SendEP6 has no busy check, so answering would overwrite
      * the pending status-0 reply the host has not taken yet, and nothing
      * may cancel the reboot anyway (disarm clears only the session flag). */
-    if (iap_reboot_pending) {
+    if (iap_reboot_pending || iap_reboot_committed) {
         return;
     }
     if (rx_len < 3) {
@@ -667,6 +679,10 @@ void IAP_Service(void)
         if (!iap_reboot_pending) {
             return;
         }
+        /* Past this point the reboot is committed: RF quiesce is one-way, so
+         * completing it is the only sane exit. Latch that separately from
+         * iap_reboot_pending, which a bus reset may still clear. */
+        iap_reboot_committed = 1;
 #if DONGLE_HAS_RF
         RF_QuiesceRequest();
 #endif

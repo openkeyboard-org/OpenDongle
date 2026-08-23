@@ -3907,8 +3907,17 @@ void RF_TombstoneBond(void)
 uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
 {
     uint8_t deferred = 0u;
-    uint8_t connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
     uint8_t enc_now = bond_enc_active(rec) ? 1u : 0u;
+    /* Sampled LATE and under the same IRQ mask that writes the crypto latches
+     * -- never here, with interrupts enabled. The radio IRQ promotes to
+     * RF_STATE_CONNECTED inside rf_phy_event_sink, so a promote landing between
+     * an early sample and the decision below leaves `connected` stale for the
+     * whole crypto half. On a key-removal record that is exactly the failure
+     * the deferred path exists to prevent: the else branch would clear
+     * rf_crypt_bond_enc on a now-live encrypted link, reverting it to the
+     * plaintext dispatch and accepting forged HID. The same stale sample also
+     * drives the re-camp tail, which would post RF_EVT_START over a live link. */
+    uint8_t connected = 0u;
 
     /* Identity half, masked against the radio IRQ (it reads rf_bond_valid,
      * the MACs and the LEN-15 template; multi-byte writes must be atomic
@@ -3971,6 +3980,10 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
         rf_crypt_install_key(rec->link_key);
         {
             uint32_t irq = __risc_v_disable_irq();
+            /* After install_key, so a promote during that expensive call is
+             * still seen; inside the mask, so it cannot change before the
+             * latches below are written. */
+            connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
             rf_crypt_bond_enc = 1u;
             rf_crypt_pending_plain = 0u;
             rf_crypt_fifo_head = rf_crypt_fifo_tail;
@@ -3985,15 +3998,35 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
              * would keep sealing under a session the new key cannot verify. */
             hal_event_post(RF_EVT_CRYPT_SESSION);
         }
-    } else if (rf_crypt_bond_enc && connected) {
-        /* Key removal on a live encrypted link: fail closed (see contract). */
-        rf_crypt_clear();
-        rf_crypt_pending_plain = 1u;
-        deferred = 1u;
     } else {
+        /* Key removal. The live-link test and the latch writes must be one
+         * indivisible step: deciding "not connected" and then clearing
+         * rf_crypt_bond_enc is what would open a live link to forged plaintext.
+         * rf_crypt_clear() stays OUTSIDE the mask -- it runs the CH570 zero-key
+         * schedule, the same reason RF_TombstoneBond keeps it out. */
+        uint32_t irq = __risc_v_disable_irq();
+        connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+        if (rf_crypt_bond_enc && connected) {
+            /* Live encrypted link: fail closed (see contract). Leave
+             * rf_crypt_bond_enc SET so the still-live connection cannot revert
+             * to the plaintext dispatch; the key goes away below, so every
+             * frame now fails closed and the link goes dead, not open. */
+            rf_crypt_pending_plain = 1u;
+            deferred = 1u;
+        } else {
+            rf_crypt_bond_enc = 0u;
+            rf_crypt_pending_plain = 0u;
+        }
+        (void)__risc_v_enable_irq(irq);
         rf_crypt_clear();
-        rf_crypt_bond_enc = 0u;
-        rf_crypt_pending_plain = 0u;
+    }
+#else
+    {
+        /* Plaintext build: the re-camp tail below still must not act on a
+         * sample the radio IRQ can invalidate underneath it. */
+        uint32_t irq = __risc_v_disable_irq();
+        connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+        (void)__risc_v_enable_irq(irq);
     }
 #endif
 

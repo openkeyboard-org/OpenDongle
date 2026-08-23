@@ -667,19 +667,29 @@ void USB_IRQHandler(void)
                 /* Latched: NAK until USB_PollEP6 has run the command and
                  * re-ACK'd -- the flow control described above. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+            } else if (iap_pkt_pending) {
+                /* An OUT arrived while a prior command is still latched (a
+                 * pipelining host). Stay NAK'd: USB_PollEP6 runs
+                 * ep6_out_cb(EP6_Buf, iap_pkt_len) and only THEN clears the
+                 * flag and re-ACKs, so re-ACKing here lets the SIE drop the next
+                 * packet into EP6_Buf while the callback is still reading it --
+                 * a command executed over another command's bytes, with
+                 * iap_pkt_len still describing the earlier one.
+                 *
+                 * This does NOT re-introduce review finding 8 (endpoint dead
+                 * forever). That happened because the sole re-ACK sits behind
+                 * iap_pkt_pending in USB_PollEP6 and the old path NAK'd without
+                 * ever setting it. Here the flag IS set, so USB_PollEP6 is
+                 * guaranteed to re-ACK once it has consumed the command. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else {
-                /* NOT latched -- toggle mismatch (TOG_OK clear: the SIE already
-                 * ACKed a retransmission we must drop) or an OUT while a prior
-                 * command is still pending (a pipelining host). The old
-                 * unconditional NAK left the endpoint dead here FOREVER: the
-                 * only re-ACK lives behind iap_pkt_pending in USB_PollEP6, and
-                 * this path never set it -- no --info, no bond ops, no
-                 * --enter-bootloader until replug (TODO.md, review finding 8).
-                 * Keep the endpoint live instead; the dropped packet is the
-                 * host's to retry (IAP is strict request/response). The toggle
-                 * is evaluated from raw_st, the sample this dispatch already
-                 * took -- re-reading R8_USB_INT_ST here could see a LATER
-                 * event's flags. */
+                /* Toggle mismatch with nothing latched: TOG_OK clear means the
+                 * SIE already ACKed a retransmission we must drop. Keep the
+                 * endpoint live -- nothing else would re-ACK it, which is
+                 * exactly finding 8 -- and let the host retry; IAP is strict
+                 * request/response. The toggle is evaluated from raw_st, the
+                 * sample this dispatch already took: re-reading R8_USB_INT_ST
+                 * here could see a LATER event's flags. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
             }
             break;

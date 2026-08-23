@@ -167,30 +167,46 @@ What this does NOT yet provide, and should not be read as providing:
 
 ## Pinned build identity and image digests
 
-Re-pinned 2026-08-22, after the link-encryption batch (key preservation on
-re-pair, capability-advert scheduling, downgrade observability, the CH570
-stack-floor descriptor sweep). Produced by `make -C firmware release` with the
-pinned toolchains -- MounRiver GCC15 for the application, GCC12 for OpenBoot --
-which also runs the host suites, both slots, both bundles and the compiled-in
-bench-key byte scan.
+Re-pinned 2026-08-23, after the batched review-finding fixes: EP6 one-slot flow
+control (`usb_device.c`), the committed-reboot latch (`iap.c`), the IRQ-masked
+`rf_state` sample in `RF_ApplyBondRecord` (`rf_task.c`), and the per-chip stack
+watermark floor (`stack_watermark.h`, watermark builds only). Built with the
+pinned toolchains -- MounRiver GCC15 for the application, GCC12 for OpenBoot.
 
 | chip | slot | base | build id | image crc32 | bytes |
 |---|---|---|---|---|---|
-| CH570 | A | `0x00002000` | `0x132BF22D` | `0xD0BA5455` | 30924 |
-| CH570 | B | `0x0001E000` | `0x1914B9AA` | `0xA927252B` | 30924 |
-| CH592 | A | `0x00002000` | `0x44899EB2` | `0x20E39055` | 50308 |
-| CH592 | B | `0x00039000` | `0x560FB702` | `0x3C396A1F` | 50388 |
+| CH570 | A | `0x00002000` | `0xADA09F5E` | `0x1536E47D` | 31052 |
+| CH570 | B | `0x0001E000` | `0x6F6F25B7` | `0xF216757C` | 31052 |
+| CH592 | A | `0x00002000` | `0xAF1A784F` | `0x2D1DDC08` | 50368 |
+| CH592 | B | `0x00039000` | `0xDC4DDAAD` | `0x26567996` | 50448 |
+
+The previous pin (2026-08-22) was `0x132BF22D`/`0x1914B9AA` for CH570 and
+`0x44899EB2`/`0x560FB702` for CH592.
 
 The crc32 column is the value the `.obb` bundle records and the device reports
 back at COMMIT, so it can be checked end-to-end rather than trusted. Verified on
-silicon for CH592 slot A: the dongle flashed from this bundle answered
-`verify OK (device crc32 0x20E39055)` and then reported build id `44899EB2` over
-IAP `0x91`.
+silicon for **CH592 slot B**: the dongle flashed from this bundle answered
+`commit OK (len 50448, crc32 0x26567996)` and then reported build id `DC4DDAAD`
+with a 50448-byte image over IAP `0x91` — the commit CRC, the build id and the
+image length all agreeing on the same slot, which is the identity check an
+earlier attempt on CH570 could not get (there the running build id and
+OpenBoot's `active` slot pointer disagreed).
 
-**Hardware-matrix status for this pin — PARTIAL, and the gaps are structural.**
-The bench that produced it carries two CH592F boards (a USB dongle and a
-UART keyboard) and no CH572, so the CH572 legs of the matrix could not run at
-all. Two further legs are blocked by tooling rather than by scheduling:
+**Hardware-matrix status for this pin — PARTIAL, and one gap is new.**
+**CH570 is BUILD-ONLY on this pin**: the CH570 came off the bench before these
+fixes were built, so neither CH570 slot has been flashed or run. That is a
+regression in coverage against the 2026-08-22 pin, where CH570 slot A was
+silicon-verified — re-flash and re-run a CH570 before shipping.
+
+On CH592 slot B, validated after flashing: the production path (G1 capability
+on air 3/3, G2 live activation 2/3 — the one miss is the pre-existing link
+instability documented in `NEXT_STEPS.md`, not a regression), the EP6 pipelined
+wedge regression (finding 8) still PASSES with the new NAK behaviour, a
+BondWrite-plus-pipelined-OUT probe 10/10 clean, and an ordered-reply probe with
+40/40 replies correctly attributed. No fault recorded across ~18 boots.
+
+The bench that produced it carries a CH592F dongle and a CH592F UART keyboard
+and no CH572, so the CH572 legs of the matrix could not run at all. Two further legs are blocked by tooling rather than by scheduling:
 `aes-hw-validate` and the OpenBoot A/B power-cut bench both flash their target
 over SWD with minichlink, which cannot connect to ANY CH5xx part (it pre-selects
 `CHIP_CH32V10x` before the LinkE target-connect -- see
