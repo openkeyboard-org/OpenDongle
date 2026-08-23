@@ -154,15 +154,18 @@ def main():
     # adopt -- a bare A6 30 after a port-reset leaves it connected but without
     # the current session (fire-and-forget announce window already closed).
     # SOAK_ON_LIVE_LINK: soak whatever link is already up instead of forcing a
-    # reconnect first. Bonded RECONNECT is a narrow rendezvous on this bench --
-    # the dongle camps on a single RF_PROTO_RECONNECT_CAMP_CHANNEL while the
-    # keyboard hops -- so a keyboard power-cycle here leaves the keyboard
-    # looping 0x32 CONNECTED -> 0x33 DISC every ~3 s with the dongle stuck in
-    # conn=waiting-reconnect and ok frozen (measured 2026-08-23). Fresh PAIRING
-    # is reliable (12/12), so the usable recipe is: run ch570_validate.py to
-    # establish an encrypted link, then soak it with this flag set. The soak
-    # itself -- holding a session across EV10 rekeys with drop_mac 0 -- does not
-    # need a reconnect to be meaningful.
+    # reconnect first. Why this exists: a keyboard power-cycle alone does NOT
+    # bring the link back -- with no dongle reset the dongle's steady-state camp
+    # hears nothing at all (every counter frozen, plain_drop included). Arming
+    # the reconnect inside a dongle reboot DOES reconnect, but the resulting
+    # link is unstable: measured 2026-08-23, 3/3 cycles connected and verified
+    # frames (1574 / 18 / 217, drop_mac 0) yet 2/3 died after 3.6 s and 9.7 s.
+    # Note also that dongle status cannot be used to judge this: every bonded
+    # non-CONNECTED state reports as `waiting`, so 0.5 s polling misses the
+    # connected state entirely. See NEXT_STEPS.md for the mechanism.
+    #
+    # NOTE this flag cannot help over the probe CDC: opening the port
+    # DTR-resets the keyboard, which destroys the very link being attached to.
     if os.environ.get("CH570_SOAK_ON_LIVE_LINK"):
         kbd = Kbd(KBD_PORT)
         log("soaking the LIVE link (no power-cycle); settling 11 s")

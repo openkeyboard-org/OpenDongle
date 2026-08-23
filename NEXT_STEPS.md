@@ -91,17 +91,50 @@ the keyboard hops. Until that is solved OD-01 cannot be exercised on hardware,
 and the A1 key-preservation fix rests on `test_bond_key_preservation.py` plus
 code review alone.
 
-**The CH570 soak and reacquire legs did NOT run, and the reason is one shared
-root cause: bonded RECONNECT never completes on this bench.** Fresh pairing is
-reliable (12/12), but after a keyboard power-cycle the keyboard loops
-`0x35 HAS_BOND -> 0x21 KEYED_OK -> 0x32 CONNECTED -> 0x33 DISC` every ~3 s while
-the dongle sits in `conn=waiting-reconnect` with `ok` frozen; resetting the
-dongle into the keyboard's stream does not recover it either. Both legs are
-built on forcing link-loss and reacquiring, so neither can produce a result
-until that is understood. Plausibly the "natural-drop reconnect failure / silent
-phantom" the `RF_EnterPairing` comment already warns about (`rf_task.c:1866`),
-but that is a hypothesis, not a measurement — do not record it as a regression
-without evidence.
+**The CH570 soak and reacquire legs did NOT run. Root cause: a bonded reconnect
+establishes but the resulting link is UNSTABLE.** (An earlier revision of this
+file said reconnect "never completes" — that was wrong, and wrong for an
+instructive reason; see the sampling trap below.)
+
+Measured on CH570 build `132BF22D`, keyboard reconnect armed 9.5 s into the
+dongle's reboot so it lands in the boot window:
+
+| cycle | connected | link lifetime | frames verified | drop_mac |
+|---|---|---|---|---|
+| 1 | yes | held past the 60 s window | 1574 | 0 |
+| 2 | yes | 3.6 s | 18 | 0 |
+| 3 | yes | 9.7 s | 217 | 0 |
+
+So the reconnect handshake succeeds every time and the encrypted link genuinely
+carries traffic — it just dies after a few seconds two times in three, and never
+recovers afterwards. Separately, with **no** dongle reset (the steady-state
+`waiting` camp) there is no reconnect at all: every counter stays frozen,
+including `plain_drop`, so the dongle hears nothing rather than hearing and
+rejecting.
+
+**The sampling trap that produced the wrong conclusion:**
+`RF_GetConnectionStatus()` (`rf_task.c:4046`) reports *every* bonded
+non-CONNECTED state as `waiting`, and the first post-promote supervision
+deadline is ~4.4 ms (`:1018`), so polling status at 0.5 s cannot see the
+connected state at all. "Dongle stuck in waiting-reconnect" was an artifact of
+the sampling rate, not a state. The counters are also RAM and reset with the
+dongle, so a baseline taken before a reset makes a working link look dead.
+
+**Leading mechanism (Codex, from source):** fresh pair and bonded reconnect
+anchor connected-mode hop timing differently. The dongle sends the initial ACK
+on its current AA/channel (`:2825`) but seeds `rf_hop.last` only at the chained
+session burst ~50 ms later (`:2030`, `:2890`); a fresh pair has both ends anchor
+on that later burst, whereas on reconnect the keyboard has already entered
+CONNECTED on the *first* ACK (OpenController `rf_task.c:937`). Marginal
+alignment fits the observed all-or-nothing lifetimes. Channel and AA are ruled
+out: the keyboard reconnects on the stored session AA across {8,17,26} and the
+dongle camps on 8, and `0x32` is only emitted by `rf_enter_connected()` after a
+valid LEN-15 carrying the stored dongle MAC, so rendezvous provably happened.
+
+**Decisive next measurement:** one time-correlated on-air capture on channel 8
+plus the first data channel (28 for `type_tag 0x02`), decoding both AAs, looking
+for `kbd LEN10 -> dongle LEN15 -> ~50 ms -> LEN15 burst -> data-channel polls`
+and whether the keyboard answers those polls.
 
 Two further things that leg-hunting turned up:
 - `minichlink -kt/-k3` does **not** work on a CH5xx probe. The belief that those
