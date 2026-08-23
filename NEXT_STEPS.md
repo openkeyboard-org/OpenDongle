@@ -206,6 +206,34 @@ So the known mitigation is in place and the residual is a phase-precision
 problem, not the gross ~200 ms offset. Codex re-derived the same mechanism
 independently from source.
 
+**THE INSTABILITY IS NOT RECONNECT-SPECIFIC (2026-08-23, the owed comparison).**
+Fresh pair and bonded reconnect were finally measured the same way — both keyed,
+both timed from the keyboard's `0x32` to its `0x33`, 3 cycles each, 75 s window:
+
+| arm | connected | held past 75 s | deaths | frames verified |
+|---|---|---|---|---|
+| fresh pair | 3/3 | 1 | 3.5 s, 3.0 s | 2574, 0, 0 |
+| bonded reconnect | 3/3 | 1 | 3.2 s, 3.2 s | 2618, 0, 0 |
+
+The two arms are indistinguishable, and the behaviour is **bimodal**: a link
+either runs indefinitely carrying ~2600 verified frames, or dies in ~3 s having
+carried none. There is no middle.
+
+That matters because it **weakens the leading hypothesis**. The hop-anchor
+asymmetry predicts fresh pair is aligned and reconnect misaligned — but fresh
+pairs fail at the same rate and in the same shape, so whatever kills the link is
+common to both paths, not a property of the reconnect anchor. Chase the
+all-or-nothing acquisition instead: something at connect either locks or does
+not, and when it does not, nothing is ever verified.
+
+(Two harness bugs were found and fixed getting here, both of which had produced
+confident nonsense: `measure()` snapshotted the status list on entry and so
+missed a CONNECTED the caller had already pumped, reporting "no connect" for
+pairs that provably succeeded; and keying the keyboard *after* provisioning the
+dongle meant it could not verify the announce, so the fresh arm showed 0 frames
+throughout. That is the same ordering rule TODO.md now states — provision before
+the encrypted reconnect.)
+
 **Still the decisive measurement:** a time-correlated on-air capture on channel 8
 plus the first data channel (28 for `type_tag 0x02`), decoding both AAs, looking
 for `kbd LEN10 -> dongle LEN15 -> ~50 ms -> LEN15 burst -> data-channel polls`
@@ -268,10 +296,20 @@ connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
 - [ ] Per-type HID slots (CH570): concurrent mouse **and** keyboard traffic to
       exercise the mouse-delta-accumulation / no-cross-type-clobber path (only
       keyboard F13 delivery was exercised).
-- [ ] Full-matrix stack re-measure both chips incl. a forced fault-handler pass
-      (`firmware/bench/STACK-WATERMARK.md` matrix) — this session's readings
-      cover the crypto/reconnect paths only. Won't change the `0x700` decision;
-      confirms it.
+- [x] **CH570 stack re-measure — DONE 2026-08-23, confirms `0x700`.** Built with
+      `EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1`, flashed over OpenBoot, and
+      sampled across every path this bench can reach: idle **400 B**, then a
+      steady **548 B** after the full production crypto path (pair, provision,
+      live activation, encrypted HID) and unchanged at 548 B through two
+      forced-outage reacquire cycles and two dongle-reset boot-window/fresh-pair
+      cycles. Peak 548 B against the `0x700` = 1792 B floor is **1244 B spare,
+      3.3x headroom**, reproducing the original reading that the P0 #4 cut was
+      based on. The pinned image was restored and re-verified afterwards
+      (slot A `0xD0BA5455`, slot B `0xA927252B`).
+- [ ] Still outstanding on the stack matrix: the **forced fault-handler pass**
+      (no safe way to provoke a fault from the bench was found), and the whole
+      **CH592** half — that chip's floor and BLE-arena scan question
+      (`stack_watermark.h:72`, still an open review thread) need its own run.
 - [ ] Factory flash + bond-clear-and-verify on both chips (manufacturing
       identity: a factory image does not clear a CH592 DataFlash bond).
 - [ ] **Re-pin digests**: refresh `firmware/RELEASE-NOTES.md` build ids and
