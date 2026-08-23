@@ -131,10 +131,55 @@ out: the keyboard reconnects on the stored session AA across {8,17,26} and the
 dongle camps on 8, and `0x32` is only emitted by `rf_enter_connected()` after a
 valid LEN-15 carrying the stored dongle MAC, so rendezvous provably happened.
 
-**Decisive next measurement:** one time-correlated on-air capture on channel 8
+**Instrumented follow-up (2026-08-23).** No on-air capture was possible — a
+sniffer needs a third radio and both CH5xx on this bench are participants. (The
+`Dongle-Sniffer` tree has listen-only CH582F/CH592F firmware that builds clean,
+35648 B, if a spare board ever appears.) Instead the CH570 was flashed with the
+bench diag counters enabled (`EXTRA_CFLAGS=-DRF_CRYPT_DIAG_PREV_SESSION=1`),
+which required `EXTRA_LDFLAGS=-Wl,--defsym=CH570_STACK_FLOOR=0x640` — those
+counters do not fit under the shipped `0x700` floor, exactly as the comment at
+`rf_task.c:1505` warns. **The pinned product image has since been restored and
+re-attested (`crc32 0xD0BA5455`, build `132BF22D`).**
+
+During a healthy reconnect the counters were unambiguous:
+
+```
+ok=314  enc_shape=314  conn_rx=9072  fifo=0  flush=0  mac=0  plain=0
+len_max=22 tag=0xA1
+```
+
+- `enc_shape == ok` with `mac/fifo/flush/plain` all zero, and `len_max` reaching
+  the full 22/0xA1 HID shape: **every frame that arrives verifies.** Nothing is
+  lost in the sink, the FIFO, the mint flush, or the crypto path — so the loss
+  is on air, not in software.
+- The **keyboard drops first** (`0x33`) while the dongle is still verifying
+  frames, so the dongle->keyboard direction fails first.
+- After the drop **every** counter freezes, `conn_rx` included: the dongle
+  leaves connected state entirely and never re-establishes.
+
+**Two things that complicate the reconnect-specific story, and are why this is
+not yet a diagnosis:** fresh pairing is not 100% either (G2 ~4/5 on the product
+image, 2/3 on the instrumented one), so some of this may be baseline link
+flakiness rather than a reconnect defect; and an attempt to measure fresh-pair
+link lifetime for comparison was invalid (the harness used `_arm_pair()`, which
+omits the `A6 52` unpair, so the keyboard tried to reconnect on a stale bond and
+no pair completed). **A clean fresh-pair vs reconnect lifetime comparison is
+still owed.**
+
+**Prior art — this class of defect is already documented in-tree.**
+`rf_task.c:2131` records that a promote-time hop re-anchor "defeats the burst#1
+anchor ... fresh-pair tolerates the offset but bonded reconnect ... produces a
+fixed hop-phase offset -> deaf connected poll -> rx=0 (bench + codex
+2026-07-07)", and CH570 already compiles that re-anchor out
+(`RF_TASK_EXECUTOR_TMOS 0`), keeping the burst#1 anchor with a 13-tick backdate.
+So the known mitigation is in place and the residual is a phase-precision
+problem, not the gross ~200 ms offset. Codex re-derived the same mechanism
+independently from source.
+
+**Still the decisive measurement:** a time-correlated on-air capture on channel 8
 plus the first data channel (28 for `type_tag 0x02`), decoding both AAs, looking
 for `kbd LEN10 -> dongle LEN15 -> ~50 ms -> LEN15 burst -> data-channel polls`
-and whether the keyboard answers those polls.
+and whether the keyboard answers those polls. That needs the third radio.
 
 Two further things that leg-hunting turned up:
 - `minichlink -kt/-k3` does **not** work on a CH5xx probe. The belief that those
