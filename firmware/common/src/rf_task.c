@@ -1520,7 +1520,11 @@ _Static_assert((uint64_t)RF_CRYPT_SILENCE_MAX_TICKS * HAL_TICKS_PER_PROTO_TICK
  * and IRQ-masks internally, so it is safe in all three. */
 static volatile uint32_t rf_crypt_last_auth_tsys;
 static volatile uint8_t  rf_crypt_silence_armed;
-static uint32_t          rf_crypt_silence_deadline_tsys;
+/* Volatile: written in task context by rf_crypt_silence_set_deadline() and read
+ * by the guard in rf_send_poll(), which is the TMR ISR on CH570. It sits beside
+ * two volatile siblings and was the one field that was not -- a stale cached
+ * read here would compare the idle time against the wrong deadline. */
+static volatile uint32_t rf_crypt_silence_deadline_tsys;
 /* Set by the silence guard, honored by the RF_EVT_TIMEOUT handler to FORCE a
  * reacquire even though unauthenticated traffic keeps supervision's RX stamp
  * fresh (otherwise the timeout handler would just re-arm and never release). */
