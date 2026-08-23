@@ -102,6 +102,99 @@ static inline void rf_crypt_beacon_accept_latches(uint8_t bond_valid,
     }
 }
 
+/* --------------------------------------------- authenticated-liveness guard
+ *
+ * How long an active encrypted bond may go with nothing authenticating before
+ * the dongle releases it. Two pure inlines so the policy and the arithmetic are
+ * host-testable (tests/test_rf_crypt_silence_guard.py); the caller owns the
+ * "armed" state and the clock.
+ *
+ * This replaced a fixed 64-RECEPTION budget that released 7 of 7 healthy keyed
+ * links on the bench (2026-08-23). A reception count is the wrong unit: it was
+ * spent by the keyboard's own bare poll acks (~975/s) but refilled only by an
+ * authenticated frame, which the keyboard schedules against its OWN reception
+ * count -- and it made the deadline depend on how fast the peer, or an
+ * attacker, transmitted. See the commentary in rf_task.c.
+ */
+
+/* Must track OpenController's KBD_CRYPT_KEEPALIVE_POLLS. The keyboard puts an
+ * authenticated frame on air every this-many receptions; the dongle's deadline
+ * is derived from it, so the two cannot be reasoned about separately. */
+#define RF_CRYPT_KEEPALIVE_POLLS      32u
+/* Consecutive missed keepalives tolerated before releasing.
+ *
+ * 15 was chosen against the ~37% per-frame shortfall measured on the bench
+ * (unexplained; tracked separately): treating misses as independent puts the
+ * false-release rate at 0.37^15. That independence is an ASSUMPTION and very
+ * likely optimistic -- RF loss and executor stalls are usually burst
+ * correlated -- so the number is a starting point justified by soak evidence,
+ * not by that arithmetic. Raise it if a soak ever shows a false release; the
+ * only cost is a longer bound on an attacker-held key-down. */
+#define RF_CRYPT_SILENCE_KEEPALIVES   15u
+/* Protocol ticks are 1/32000 s. The floor keeps a fast link from inheriting a
+ * deadline barely above the keepalive; the ceiling is what actually bounds an
+ * attacker-held key-down, and is the reason this is not simply proportional. */
+#define RF_CRYPT_SILENCE_MIN_TICKS 16000u   /* 500 ms */
+#define RF_CRYPT_SILENCE_MAX_TICKS 96000u   /* 3 s   */
+
+/* Deadline in protocol ticks for a given connection interval.
+ *
+ * It MUST scale with the interval. A fixed 500 ms is ~15 keepalives at the
+ * stock interval of 28 (875 us/poll) but under TWO at the interval of 300 that
+ * bond_record_semantic_valid() still accepts -- which is precisely the original
+ * defect, just at a slower cadence.
+ *
+ * DOMAIN: intervals the bond validator admits, 1..300. Across that range the
+ * ceiling still leaves >= 10 keepalives of headroom. The cap makes headroom
+ * fall with interval, so far ABOVE the validated range (past ~750) it would
+ * drop under four keepalives; that is acceptable only because
+ * bond_record_semantic_valid() is the sole source of this argument. Widen the
+ * validator and this needs revisiting. */
+static inline uint32_t rf_crypt_silence_deadline_ticks(uint16_t conn_interval)
+{
+    uint32_t d = (uint32_t)conn_interval * RF_CRYPT_KEEPALIVE_POLLS
+                 * RF_CRYPT_SILENCE_KEEPALIVES;
+
+    if (d < RF_CRYPT_SILENCE_MIN_TICKS) {
+        d = RF_CRYPT_SILENCE_MIN_TICKS;
+    } else if (d > RF_CRYPT_SILENCE_MAX_TICKS) {
+        d = RF_CRYPT_SILENCE_MAX_TICKS;
+    }
+    return d;
+}
+
+/* Has the deadline passed? Pure arithmetic -- the caller decides whether the
+ * guard is armed at all, because a zero timestamp is a legitimate clock value
+ * and must not double as a sentinel for security state.
+ *
+ *   - the subtraction is deliberately 2^32-modular, so it stays correct across
+ *     a clock wrap; the same idiom the supervision lapse check uses.
+ *   - now < stamp happens for real: the radio IRQ sink can refresh the stamp
+ *     between the caller's stamp load and its clock read. That must read as
+ *     "just authenticated", NOT underflow to ~2^32 and force-release a healthy
+ *     link. Callers load the stamp first to narrow the window; this rejects the
+ *     case outright rather than relying on caller discipline alone. */
+static inline int rf_crypt_silence_expired(uint32_t now_tsys,
+                                           uint32_t stamp_tsys,
+                                           uint32_t deadline_tsys)
+{
+    uint32_t idle = now_tsys - stamp_tsys;
+
+    /* Treat anything past the half-range as a stamp from the future rather than
+     * a very idle link. That disambiguation is a CHOICE, not a proof: with
+     * 32-bit modular timestamps the two cases are genuinely indistinguishable
+     * (stamp=1, now=0x80000001 is a real half-wrap and reads as fresh here).
+     * It is sound only because the caller evaluates this every connection
+     * interval -- milliseconds -- so a live link can never accumulate half a
+     * wrap unobserved, while the IRQ-sink preemption it does catch is a
+     * routine, every-connection event. A caller that polled it rarely would
+     * need a wider counter instead. */
+    if (idle >= 0x80000000u) {
+        return 0;
+    }
+    return idle >= deadline_tsys;
+}
+
 typedef enum {
     RF_CRYPT_OK = 0,
     RF_CRYPT_DROP_SHAPE,      /* not a well-formed encrypted frame */
@@ -228,6 +321,20 @@ extern uint32_t rf_crypt_last_mac_ctr;
  *                          receiver nondeterminism (independent of the wire). */
 extern uint32_t rf_crypt_mac_same_ok;
 extern uint32_t rf_crypt_same_differs;
+
+/* Authenticated-HID silence-guard releases, and how long (ms, saturating at
+ * 0xFFFF) the link had gone unauthenticated when the last one tripped. The
+ * guard and a supervision lapse both leave CONNECTED through
+ * rf_enter_stock_reacquire(), which freezes every other counter at the same
+ * instant -- so without these a post-mortem cannot attribute the teardown.
+ * guard_fires unchanged across a death exonerates the guard; incremented
+ * convicts it. */
+/* Connected receptions rejected for CRC error or type mismatch. These exit the
+ * sink before conn_rx/enc_shape are counted, so without this counter a frame
+ * that arrived CORRUPT and one that never arrived look identical. */
+extern uint32_t rf_crypt_crc_err;
+extern uint16_t rf_crypt_guard_fires;
+extern uint16_t rf_crypt_guard_at_fire;
 
 /* BB/LLE interrupts that landed while rf_crypt_rx() was inside its CCM
  * computation (flag set by the executor around the call, counted by the RF

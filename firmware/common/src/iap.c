@@ -42,6 +42,8 @@
 #define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
 #define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
                                   * (DONGLE_STACK_WATERMARK) */
+#define CMD_RX_SHAPE    0x97    /* read-only; bench builds only -- receptions
+                                 * rejected before any other counter sees them */
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -478,12 +480,32 @@ static void handle_crypt_diag(void)
  * diagnostic counters that no longer fit in the full 0x94 report. Read-only,
  * served unarmed (counts and already-public frame bytes; the tag proves
  * nothing without the key, which never leaves the device). */
+/* CMD 0x97: receptions the sink discards BEFORE conn_rx/enc_shape are counted.
+ *
+ * Everything else in 0x94 describes frames that survived CRC and type checks.
+ * A frame that arrives corrupt -- or that is still on air when this receiver
+ * shuts RX for its next poll -- exits at the rsr!=0 branch and appears in NO
+ * counter at all, so it is indistinguishable from a frame the keyboard never
+ * sent. That blind spot is why the keyed link's ~10% HID loss could not be
+ * attributed. Read-only, served unarmed (a single counter). */
+static void handle_rx_shape(void)
+{
+    uint8_t resp[2u + 4u] = {0};
+
+    resp[0] = CMD_RX_SHAPE;
+    resp[1] = 4u;
+    put_le32(&resp[2], rf_crypt_crc_err);
+    USB_SendEP6(resp, sizeof(resp));
+}
+
 static void handle_crypt_last_fail(void)
 {
     /* [ack][len] latched(1) fail_len(1) session(4) counter(4) expect1(8)
      * expect2(8) frame(22) same_differs(4) bb_during_aes(4) kat_run(1)
-     * kat_fail(1) = 57-byte payload. */
-    uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u] = {0};
+     * kat_fail(1) guard_fires(2) guard_at_fire(2) = 62-byte payload, 64 on the
+     * wire -- the full EP6 report, so nothing more fits here. */
+    uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u
+                 + 2u + 2u] = {0};
     uint8_t i;
 
     resp[0] = 0x95u;
@@ -503,6 +525,8 @@ static void handle_crypt_last_fail(void)
     put_le32(&resp[54], rf_crypt_bb_during_aes);
     resp[58] = rf_crypt_kat_run;
     resp[59] = rf_crypt_kat_fail;
+    put_le16(&resp[60], rf_crypt_guard_fires);
+    put_le16(&resp[62], rf_crypt_guard_at_fire);
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif
@@ -634,6 +658,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_CRYPT_DIAG:  handle_crypt_diag(); break;
 #if RF_CRYPT_DIAG_PREV_SESSION
     case CMD_CRYPT_LAST_FAIL: handle_crypt_last_fail(); break;
+    case CMD_RX_SHAPE:    handle_rx_shape(); break;
 #endif
 #endif
 #if DONGLE_STACK_WATERMARK

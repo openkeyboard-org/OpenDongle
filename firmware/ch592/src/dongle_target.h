@@ -99,7 +99,15 @@
  *    unreachable provision_link_key.py. The keyboard is keyed with the SAME
  *    bytes over its 0xAE bench command:
  *      4f70656e4b626421a55ac33c69960ff0 */
+/* Overridable: the periodic frame is 124 bytes busy-waited out of the same
+ * cooperative main loop that arms this receiver's post-poll RX. On a bench
+ * measuring RESPONSE TIMING that is not a passive observer -- with it on, an
+ * otherwise-healthy keyed link delivered ~0% of HID transitions while the same
+ * keyboard against a product-profile dongle delivered ~50%. Build with
+ * EXTRA_CFLAGS=-DDONGLE_UART_DIAG=0 for any timing measurement. */
+#ifndef DONGLE_UART_DIAG
 #define DONGLE_UART_DIAG 1
+#endif
 #define DONGLE_CRYPT_BENCH_FORCE_KEY 1
 #define DONGLE_CRYPT_BENCH_KEY_BYTES \
     { 0x4F,0x70,0x65,0x6E,0x4B,0x62,0x64,0x21, \

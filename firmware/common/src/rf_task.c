@@ -825,6 +825,10 @@ static void rf_start_rx(void);
 static void rf_rearm_rx(void);
 static void rf_configure(uint32_t access_addr);
 static void rf_send_poll(void);
+#if DONGLE_RF_CRYPT
+/* Task-context: recompute the silence deadline from rf_conn_interval. */
+static void rf_crypt_silence_set_deadline(void);
+#endif
 static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
 static void rf_request_bond_persist(void);
@@ -1214,6 +1218,9 @@ static void rf_enter_stock_reacquire(void)
     rf_access_addr = rf_bond_aa;
     rf_conn_interval = rf_active_conn_interval();
     rf_conn_timeout = rf_active_conn_timeout();
+#if DONGLE_RF_CRYPT
+    rf_crypt_silence_set_deadline();
+#endif
     rf_data_ch_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
     rf_pair_prep_idx = rf_proto_pair_scan_seed(rf_pair_ack15[4]);
     rf_channel = rf_pair_channels[rf_pair_prep_idx];
@@ -1463,21 +1470,110 @@ uint32_t rf_crypt_announce_retry;   /* product telemetry (CMD_CRYPT_DIAG) */
 static uint8_t rf_crypt_announce_retry_budget = RF_CRYPT_ANNOUNCE_RETRIES;
 #endif
 
-/* Authenticated-HID silence guard. The sink counts EVERY connected RX on an
- * active encrypted bond (garbage, plaintext-downgrade, polls, all of it); the
- * task resets it whenever a frame verifies. rf_send_poll, once the count crosses
- * the bound, posts RF_EVT_TIMEOUT -- the existing link-loss path, which releases
- * the keyboard and re-enters reacquire in task context -- so an attacker who
- * keeps supervision alive with unauthenticated traffic cannot hold a
- * previously-forwarded key-down stuck. Frame-count based, so no chip-specific
- * tick constant; ~64 poll slots is roughly 56 ms at the connected cadence.
- * Volatile: incremented in the IRQ sink, read/reset in task and (CH570) ISR. */
-#define RF_CRYPT_SILENCE_FRAMES 64u
-static volatile uint16_t rf_crypt_frames_since_ok;
+/* Authenticated-HID silence guard: an active encrypted bond that goes this long
+ * with nothing verifying is released. rf_send_poll posts RF_EVT_TIMEOUT -- the
+ * existing link-loss path, which releases the keyboard and re-enters reacquire
+ * in task context -- so an attacker who keeps supervision alive with
+ * unauthenticated traffic cannot hold a previously-forwarded key-down stuck.
+ * Genuine silence (no frames at all) still reaches supervision first: its lapse
+ * is ~23 ms against this deadline's 500 ms floor, so the guard only ever
+ * decides the case supervision cannot see -- traffic arriving that never
+ * authenticates.
+ *
+ * This was a FRAME count (64 receptions, "roughly 56 ms at the connected
+ * cadence") and that was wrong in kind, not merely in size. The count was
+ * incremented by every connected RX -- overwhelmingly the keyboard's own bare
+ * 1-byte poll acks, measured at ~975/s -- but satisfied only by an
+ * authenticated frame, which the keyboard schedules against ITS OWN reception
+ * count (KBD_CRYPT_KEEPALIVE_POLLS, ~33 ms). Two different clocks sharing one
+ * budget: the real deadline was ~65 ms against a ~33 ms keepalive, so any two
+ * missed keepalives crossed it. On the bench that released 7 of 7 healthy keyed
+ * links (2026-08-23) -- every one with enc_shape == ok exactly, no drops, no
+ * FIFO loss and a single session mint, i.e. nothing wrong but this guard.
+ *
+ * Worse, a reception count is attacker-rate-dependent in the wrong direction: a
+ * faster flood spent the budget SOONER, so the mechanism meant to bound an
+ * attacker instead handed them the teardown. A deadline in time is independent
+ * of how fast anyone transmits, which is the property this needs.
+ *
+ * The deadline itself is derived per connection interval by
+ * rf_crypt_silence_deadline_ticks() (rf_crypt.h), which is where the policy and
+ * its headroom argument live. It is floored at 500 ms and capped at 3 s: the
+ * floor keeps a fast link from inheriting a deadline barely above the
+ * keepalive, and the cap is what actually bounds an attacker-held key-down.
+ * Deliberately NOT tightened further -- a thin margin is what was wrong. */
+/* The 2^32-modular delta is only unambiguous while the deadline stays far
+ * inside half the counter's range; at the 3 s ceiling this is ~1.8e8 (CH592) /
+ * ~3.0e8 (CH570) against 2^31, so the margin is ~7x. An edit that pushed the
+ * ceiling into tens of seconds would silently read stale deltas as fresh. */
+_Static_assert((uint64_t)RF_CRYPT_SILENCE_MAX_TICKS * HAL_TICKS_PER_PROTO_TICK
+                   < 0x40000000u,
+               "silence deadline must stay well inside the 2^32 wrap window");
+/* Tsys stamp of the last frame that authenticated, the deadline it is measured
+ * against (derived from the connection interval at each promote), and whether
+ * the guard is armed at all. `armed` is a separate byte on purpose: zero is a
+ * legitimate hal_now() value once every 2^32 ticks, so it must not double as a
+ * "stand down" sentinel for what is security state.
+ *
+ * Volatile: written in task context and the radio IRQ sink, read in task and
+ * (CH570) TMR ISR context. hal_now() is already called from the radio IRQ sink
+ * and IRQ-masks internally, so it is safe in all three. */
+static volatile uint32_t rf_crypt_last_auth_tsys;
+static volatile uint8_t  rf_crypt_silence_armed;
+static uint32_t          rf_crypt_silence_deadline_tsys;
 /* Set by the silence guard, honored by the RF_EVT_TIMEOUT handler to FORCE a
  * reacquire even though unauthenticated traffic keeps supervision's RX stamp
  * fresh (otherwise the timeout handler would just re-arm and never release). */
 static volatile uint8_t  rf_crypt_force_release;
+
+/* Recompute the deadline for the current connection interval. TASK CONTEXT
+ * ONLY -- it is deliberately separate from arming because it carries a
+ * multiply and two clamps, and the arm sites include the __HIGH_CODE
+ * radio-IRQ sink. Called wherever rf_conn_interval is established. */
+static void rf_crypt_silence_set_deadline(void)
+{
+    uint16_t ivl = rf_conn_interval ? rf_conn_interval
+                                    : (uint16_t)RF_TMR0_DEFAULT_INTERVAL;
+
+    rf_crypt_silence_deadline_tsys =
+        rf_crypt_silence_deadline_ticks(ivl) * HAL_TICKS_PER_PROTO_TICK;
+}
+
+/* Arm (or re-arm) the guard from NOW.
+ *
+ * Three stores and a hal_now(), no call into flash: two callers are the
+ * promote-to-CONNECTED sites inside the __HIGH_CODE radio-IRQ sink, and the
+ * promote is the moment the poll grid is set up. An earlier revision put the
+ * deadline arithmetic here and made it noinline to keep it out of SRAM -- which
+ * bought an XIP flash call inside the radio IRQ at exactly that moment, and
+ * measurably degraded the link (5 of 6 links died with the guard never firing).
+ * Keep the deadline computation in rf_crypt_silence_set_deadline() and keep
+ * this cheap enough to inline.
+ *
+ * Clearing rf_crypt_force_release matters: the guard gates on it to avoid
+ * re-posting every poll, so a latch whose RF_EVT_TIMEOUT was cancelled rather
+ * than dispatched (the EV10-entry sites cancel explicitly) would otherwise
+ * disarm the guard for good -- the same unbounded-stuck-key class this change
+ * exists to close. Every arm site is a state change, so this is always right. */
+static inline void rf_crypt_arm_silence(void)
+{
+    rf_crypt_last_auth_tsys = hal_now();
+    rf_crypt_silence_armed = 1u;
+    rf_crypt_force_release = 0u;
+}
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* Bench only. The guard and a genuine supervision lapse both end in
+ * rf_enter_stock_reacquire(), and leaving CONNECTED freezes every exported
+ * counter at the same instant -- so post-mortem telemetry cannot say WHICH tore
+ * the link down. These two make the guard self-reporting: a link that dies with
+ * rf_crypt_guard_fires unchanged was NOT released by the guard, and one that
+ * dies as it increments was. rf_crypt_guard_at_fire keeps how long the link had
+ * gone unauthenticated when it tripped, in milliseconds -- saturating at 0xFFFF,
+ * which no healthy link can reach. */
+uint32_t rf_crypt_crc_err;   /* connected receptions that failed CRC/type */
+uint16_t rf_crypt_guard_fires;
+uint16_t rf_crypt_guard_at_fire;
+#endif
 /* Why frames were dropped, indexed by rf_crypt_status_t. A single total says a
  * peer is being rejected but not whether its tag failed, its counter looked
  * replayed, or its shape was wrong -- which are entirely different bugs on the
@@ -1646,7 +1742,22 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     switch (sta) {
     case RX_MODE_RX_DATA:
         if (rsr != 0) {
-            /* CRC error or type mismatch - restart RX */
+            /* CRC error or type mismatch - restart RX.
+             *
+             * This exits BEFORE conn_rx and enc_shape are counted, so until
+             * now a frame that arrived corrupt was indistinguishable from one
+             * that never arrived at all -- the exact blind spot that made the
+             * keyed link's ~10% HID loss unattributable. A 22-byte encrypted
+             * frame has roughly 3x the airtime of a 1-byte poll ack, and one
+             * that starts late in the slot can still be in the air when this
+             * receiver shuts RX for its next poll; either way it lands here.
+             * Counted only while CONNECTED: pairing-channel noise is a
+             * different population and would swamp the signal. */
+#if RF_CRYPT_DIAG_PREV_SESSION
+            if (rf_state == RF_STATE_CONNECTED) {
+                rf_crypt_crc_err++;
+            }
+#endif
             hal_event_post(RF_EVT_RX_RESTART);
             break;
         }
@@ -1849,13 +1960,11 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
 
 #if DONGLE_RF_CRYPT
-            /* Authenticated-liveness counter: every connected RX on an active
-             * encrypted bond -- verified HID, garbage, downgrade, or poll --
-             * counts here; rf_send_poll releases the keyboard once it crosses the
-             * bound without a verifying frame resetting it (see the guard). */
-            if (rf_crypt_bond_enc && rf_crypt_frames_since_ok < 0xFFFFu) {
-                rf_crypt_frames_since_ok++;
-            }
+            /* Authenticated liveness is a DEADLINE now, not a reception count,
+             * so nothing is accumulated here: arriving frames no longer spend a
+             * budget, and only rf_crypt_rx() verifying one refreshes the stamp
+             * (see RF_CRYPT_SILENCE_MS). That also takes an increment off the
+             * radio IRQ path. */
 #if RF_CRYPT_DIAG_PREV_SESSION
             if (rf_crypt_bond_enc) {
                 /* Record the shape BEFORE any classification, so a frame the
@@ -2151,6 +2260,14 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* On an encrypted bond, mint a fresh per-session nonce (in task
                  * context via RF_EVT_CRYPT_SESSION) and start announcing it. */
                 if (rf_crypt_bond_enc) {
+                    /* Arm the silence deadline HERE, not just in the mint
+                     * handler. The mint is an event: rf_send_poll runs every
+                     * 875 us and would otherwise evaluate the guard against the
+                     * PREVIOUS session's stamp -- seconds old after a reacquire
+                     * -- and force-release on the first poll of every
+                     * reconnect. The old reception counter hid this window
+                     * because it needed 64 arrivals to trip. */
+                    rf_crypt_arm_silence();
                     hal_event_post(RF_EVT_CRYPT_SESSION);
                 }
 #endif
@@ -2278,6 +2395,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #if DONGLE_RF_CRYPT
             /* EV10 re-key: same peer/key, fresh per-session nonce. */
             if (rf_crypt_bond_enc) {
+                /* Same reason as the fresh-pair promote: arm the deadline at
+                 * the state change, not when the mint event is dispatched. */
+                rf_crypt_arm_silence();
                 hal_event_post(RF_EVT_CRYPT_SESSION);
             }
 #endif
@@ -2717,7 +2837,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             }
 #endif
             rf_crypt_fifo_head = rf_crypt_fifo_tail;
-            rf_crypt_frames_since_ok = 0u;
+            /* A fresh session is a fresh reference point: the keyboard cannot
+             * authenticate anything until it adopts this announce, so start the
+             * deadline here rather than penalising it for the handover. */
+            rf_crypt_silence_set_deadline();
+            rf_crypt_arm_silence();
             rf_crypt_new_session(rf_crypt_gen_session_id());
             if (rf_crypt_build_session_frame(rf_poll_buf[0], rf_crypt_session_tx)
                     == RF_CRYPT_OK) {
@@ -2763,7 +2887,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 
             if (st == RF_CRYPT_OK) {
                 rf_crypt_ok_count++;
-                rf_crypt_frames_since_ok = 0u;   /* authenticated liveness */
+                rf_crypt_last_auth_tsys = hal_now();  /* authenticated liveness */
                 rf_crypt_announce_count = 0u;    /* keyboard has the session nonce */
                 if (rf_hid_callback) {
                     rf_hid_callback(otag, obody, on);
@@ -2917,7 +3041,16 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * session down and emit keys-up. */
         if (rf_crypt_force_release) {
             rf_crypt_force_release = 0u;
-            if (rf_state == RF_STATE_CONNECTED && !rf_supervision_ev10_active) {
+            /* Re-check the deadline here, not just in the ISR that posted it: a
+             * frame can finish verifying between the post and this dispatch,
+             * and tearing down a link that has just authenticated is exactly
+             * the false release this whole change exists to stop. An attacker
+             * cannot satisfy the re-check -- only a frame that authenticates
+             * moves the stamp. */
+            if (rf_state == RF_STATE_CONNECTED && !rf_supervision_ev10_active
+                && rf_crypt_silence_armed
+                && rf_crypt_silence_expired(hal_now(), rf_crypt_last_auth_tsys,
+                                            rf_crypt_silence_deadline_tsys)) {
                 rf_enter_stock_reacquire();
                 return events ^ RF_EVT_TIMEOUT;
             }
@@ -3201,15 +3334,40 @@ static void rf_send_poll(void)
 
 #if DONGLE_RF_CRYPT
     /* Authenticated-HID silence guard. rf_send_poll is the TMR ISR on CH570, so
-     * do only IRQ-safe work here: if an active encrypted bond has seen a run of
-     * connected frames with none verifying (a jammer keeping supervision alive
-     * with unauthenticated traffic), post RF_EVT_TIMEOUT -- the existing
+     * do only IRQ-safe work here: if an active encrypted bond has gone
+     * RF_CRYPT_SILENCE_MS with nothing verifying (a jammer keeping supervision
+     * alive with unauthenticated traffic), post RF_EVT_TIMEOUT -- the existing
      * link-loss path releases the keyboard and re-enters reacquire in task
      * context. Genuine silence (no frames) is already handled by supervision. */
-    if (rf_crypt_bond_enc && rf_crypt_frames_since_ok >= RF_CRYPT_SILENCE_FRAMES) {
-        rf_crypt_frames_since_ok = 0u;
-        rf_crypt_force_release = 1u;   /* make the timeout handler force reacquire */
-        hal_event_post(RF_EVT_TIMEOUT);
+    /* Deliberately NOT gated on !rf_crypt_force_release. Suppressing the re-post
+     * while a release is in flight looks like an obvious optimisation and is a
+     * trap: RF_EVT_TIMEOUT shares its slot with EV10 and
+     * rf_arm_connected_supervision() cancels it, which on CH592 drains an
+     * already-posted event. Lose it once inside a connected epoch and the latch
+     * stays set with no arm site reachable to clear it -- unauthenticated
+     * traffic then holds the link open forever, the exact unbounded-stuck-key
+     * failure this guard exists to prevent. Re-posting every poll until the
+     * handler runs is idempotent (a set bit and a set byte) and self-limiting,
+     * because only a frame that authenticates moves the stamp. */
+    if (rf_crypt_bond_enc && rf_crypt_silence_armed) {
+        /* Load the stamp BEFORE the clock. The radio IRQ sink can preempt here
+         * and refresh the stamp between the two loads; clock-first would then
+         * manufacture stamp > now. rf_crypt_silence_expired() rejects that case
+         * outright, but loading in this order keeps it from arising at all --
+         * the same argument as the supervision lapse check in RF_ProcessEvent. */
+        uint32_t stamp = rf_crypt_last_auth_tsys;
+        uint32_t now = hal_now();
+        if (rf_crypt_silence_expired(now, stamp,
+                                     rf_crypt_silence_deadline_tsys)) {
+#if RF_CRYPT_DIAG_PREV_SESSION
+            uint32_t idle_ms = (now - stamp) / (1000u * HAL_TICKS_PER_US);
+            rf_crypt_guard_at_fire =
+                (idle_ms > 0xFFFFu) ? 0xFFFFu : (uint16_t)idle_ms;
+            rf_crypt_guard_fires++;
+#endif
+            rf_crypt_force_release = 1u; /* make the timeout handler force reacquire */
+            hal_event_post(RF_EVT_TIMEOUT);
+        }
     }
 #endif
 
@@ -3868,7 +4026,12 @@ void RF_TombstoneBond(void)
     rf_crypt_peer_capable = 0u;
     rf_crypt_announce_count = 0u;
     rf_crypt_fifo_head = rf_crypt_fifo_tail;
-    rf_crypt_frames_since_ok = 0u;
+    /* Stay ARMED. bond_enc deliberately stays set here (see above) while the
+     * key is destroyed, so every frame now fails closed -- which means nothing
+     * can ever refresh the stamp again and the guard is what ends the link.
+     * Standing it down instead would let an attacker keep supervision fresh on
+     * a dead link indefinitely. */
+    rf_crypt_arm_silence();
     rf_crypt_force_release = 0u;
     rf_crypt_clear();
 #endif
@@ -3987,7 +4150,7 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
             rf_crypt_bond_enc = 1u;
             rf_crypt_pending_plain = 0u;
             rf_crypt_fifo_head = rf_crypt_fifo_tail;
-            rf_crypt_frames_since_ok = 0u;
+            rf_crypt_arm_silence();
             rf_crypt_announce_count = 0u;
             rf_crypt_force_release = 0u;
             (void)__risc_v_enable_irq(irq);
@@ -4013,6 +4176,12 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
              * frame now fails closed and the link goes dead, not open. */
             rf_crypt_pending_plain = 1u;
             deferred = 1u;
+            /* Same argument as RF_TombstoneBond: bond_enc stays set with the
+             * key gone, so nothing can refresh the stamp and the guard is the
+             * only thing that ends this link. Re-arm from NOW so the deadline
+             * is measured from the downgrade, not from whenever the last frame
+             * happened to verify. */
+            rf_crypt_arm_silence();
         } else {
             rf_crypt_bond_enc = 0u;
             rf_crypt_pending_plain = 0u;
