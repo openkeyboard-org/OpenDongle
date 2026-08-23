@@ -77,12 +77,19 @@ The byte-changing discipline (`TODO.md` preamble): every firmware /
 linker / build-id change must land with a complete matrix run and re-pinned
 digests.
 
-**Status 2026-08-23: digests re-pinned again for the batched fixes above, and
-CH570 is now BUILD-ONLY on the current pin.** The CH570 came off the bench
-before those fixes were built, so neither CH570 slot has been flashed or run
-against `0xADA09F5E`/`0x6F6F25B7`. That is a coverage regression against the
-2026-08-22 pin — re-flash and re-run a CH570 before shipping. CH592 slot B
-(`0xDC4DDAAD`) IS silicon-verified on the current pin: commit CRC, build id and
+**Status 2026-08-23: digests re-pinned for the batched fixes above, and BOTH
+chips are silicon-verified on the current pin.** CH570 has both slots flashed
+and identity-checked (`0x1536E47D` / `0xF216757C`, builds `ADA09F5E`/`6F6F25B7`,
+31052 B): production path G1 4/5, G2 3/5 — matching its pre-batch baseline —
+plus EP6 pipelined PASS, ordered-reply 40/40, BondWrite+OUT 10/10 clean.
+
+Flash BOTH CH570 slots: OpenBoot's COMMIT reported OK without moving the
+active-slot pointer on this unit, so it kept booting the other slot even across
+a real power cycle. `openboot bless` on the write slot does move it. Writing the
+pin into both slots is currently the only way to guarantee which image runs —
+without it a validator run that cycles `--enter-bootloader` silently lands on
+whatever the other slot holds, which is what made the earlier CH570 A/B
+unreadable. CH592 slot B (`0xDC4DDAAD`) is silicon-verified on the current pin: commit CRC, build id and
 image length all agree on the same slot, the production path gives G1 3/3 and
 G2 2/3 (the miss is the pre-existing link instability, not a regression), and
 the EP6 pipelined wedge regression still passes with the new NAK behaviour.

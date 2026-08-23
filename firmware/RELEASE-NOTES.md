@@ -192,11 +192,23 @@ image length all agreeing on the same slot, which is the identity check an
 earlier attempt on CH570 could not get (there the running build id and
 OpenBoot's `active` slot pointer disagreed).
 
-**Hardware-matrix status for this pin — PARTIAL, and one gap is new.**
-**CH570 is BUILD-ONLY on this pin**: the CH570 came off the bench before these
-fixes were built, so neither CH570 slot has been flashed or run. That is a
-regression in coverage against the 2026-08-22 pin, where CH570 slot A was
-silicon-verified — re-flash and re-run a CH570 before shipping.
+**Hardware-matrix status for this pin — BOTH CHIPS silicon-verified.**
+
+CH570 (both slots flashed and identity-checked; `commit OK` crc32 `0x1536E47D`
+for slot A and `0xF216757C` for slot B, running builds `ADA09F5E`/`6F6F25B7`
+with 31052-byte images): production path G1 4/5, G2 3/5 — matching the
+pre-batch CH570 baseline, so no regression — with the EP6 pipelined wedge
+regression PASS, an ordered-reply probe 40/40 correctly attributed, and a
+BondWrite-plus-pipelined-OUT probe 10/10 clean against a valid keyed bond.
+
+**Flash BOTH CH570 slots.** On this unit OpenBoot's `flash` COMMIT reported OK
+without moving the active-slot pointer, so the device kept booting the *other*
+slot — across a real power cycle, not just a soft reboot. `openboot bless` on
+the write slot does move it, and blessing a slot whose contents do not match is
+correctly refused. Until that is understood, writing the same pin into both
+slots is the only way to guarantee which image runs; a validator run that cycles
+`--enter-bootloader` will otherwise silently land on whatever the other slot
+holds. This is what made an earlier CH570 A/B attempt unreadable.
 
 On CH592 slot B, validated after flashing: the production path (G1 capability
 on air 3/3, G2 live activation 2/3 — the one miss is the pre-existing link
