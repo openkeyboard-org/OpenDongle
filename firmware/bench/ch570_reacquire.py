@@ -92,8 +92,13 @@ def main():
         log(f"=== cycle {cyc}: power OFF keyboard (force link loss) ===")
         kbd_power("off")
         time.sleep(7.0)                       # dongle reacquire-watchdog window
+        # One call, one USB round trip. Calling crypt_diag() twice inside the
+        # f-string evaluates the condition and the value separately, so a
+        # dictionary followed by a None crashes the outage log line with a
+        # TypeError -- and each call is its own 1 s-timeout transaction.
+        outage = dg.crypt_diag()
         log(f"  during outage: dongle {dg.status_line()} "
-            f"(ok held at {dg.crypt_diag()['ok'] if dg.crypt_diag() else '?'})")
+            f"(ok held at {outage['ok'] if outage else '?'})")
         log("  power ON keyboard; settling 11 s")
         kbd_power("on")
         time.sleep(11.0)

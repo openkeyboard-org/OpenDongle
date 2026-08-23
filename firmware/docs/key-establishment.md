@@ -87,7 +87,7 @@ two repos yields a working (at worst plaintext) link.
 | Constraint | Where verified |
 |---|---|
 | Keyboard MCU is CH592F (60 MHz QingKe V4F, 448 KB flash, 26 KB SRAM), same shared HW-AES/BLEB stale-abort hazard as the CH592 dongle | `OpenController/firmware/Makefile:5` |
-| CCM wire: enc HID LEN {16,19,22} tags {0xA3,0xA8,0xA1}; plaintext LEN set {1,3,4,7,10,15}; nonce = `sid(4 LE)||dir(1)||ctr(4 LE)||0^4`; dir 0x01 up / 0x02 down reserved; announce (0xA5, LEN 14); cap advert (0xA6, LEN 3) | `common/include/rf_crypt.h:37-65` |
+| CCM wire: enc HID LEN {16,19,22} tags {0xA3,0xA8,0xA1}; plaintext LEN set {1,3,4,7,10,15}; nonce = `sid(4 LE)\|\|dir(1)\|\|ctr(4 LE)\|\|0^4`; dir 0x01 up / 0x02 down reserved; announce (0xA5, LEN 14); cap advert (0xA6, LEN 3) | `common/include/rf_crypt.h:37-65` |
 | Dongle CH570 TX DMA is 17 B => **max 15 B TX payload**; RX DMA accepts **32 B** payload | `ch570/src/hal_rf_ch570.c:32,46,126` |
 | Keyboard TX buffer 22 B (`KBD_CRYPT_MAX_FRAME`), RX cap 70 B (`RF_RX_MAX_LEN`) | `OpenController/src/rf_task.c:86,218` |
 | AES costs (measured on silicon): CH592 HW 871 cyc/block, 838 key schedule; CH570 ASM_A (production default) 1,672 / 7,647 with 116 B stack spare, ASM_F 3,960 / 7,405 with 524 B spare; poll slot = 87,500 cyc @100 MHz; hal_aes is forward-only, NOT reentrant, treat as not constant-time | `common/include/hal_aes.h:49-129`, `ch570/src/hal_aes_ch570_impl.h` |
@@ -236,7 +236,8 @@ LED RELAY (sealed)  dg->kb                                   LEN 13  (new LEN)
   mark; plaintext LEN-3 relay refused on suite-2 bonds
 
 ENCRYPTED HID   up                                           LEN {16,19,22}
-  unchanged wire format; key becomes SK, counter restarts at 1 per session
+  unchanged wire format; key becomes SK, counter monotonic per KEY (§9.2) --
+  it does NOT restart per session, because a `sid` can recur
 ```
 
 Collision audit: LEN 11 and 13 are brand-new lengths; (0xAA,14) shares LEN with
@@ -361,7 +362,7 @@ any state ──state timeout 250 ms / total 1.5 s / peer ABORT / Z==0 /
 Keyboard (initiator-side mirror):
 
 ```
-KX_IDLE ──promoted ∧ sent v2 advert ∧ (hint bit7 ∨ nothing yet)──► KX_WAIT
+KX_IDLE ──promoted ∧ sent v2 advert──► KX_WAIT   (then await DG PUB f0 below)
 KX_WAIT       500 ms for DG PUB f0
    ├─rx────► KX_COLLECT: buffer D_pub; response slots cycle KB PUB f0..f3
    └─timeout─► legacy path: stock/old dongle — plaintext per policy §8
@@ -393,8 +394,17 @@ pauses <= ~250 ms).
   valid announce within 250 ms -> falls back to K_ann(LK_old), links up,
   schedules a re-KX (KX_PENDING). First verified encrypted exchange under either
   key promotes that key and erases the other. **No deadlock, and no reachable
-  state where both ends are keyless.** Power loss at any point degenerates to
-  one of these recoverable states.
+  state where both ends are keyless.**
+
+> **UNRESOLVED RELEASE GATE — do not read the line above as a power-loss
+> guarantee.** An earlier revision ended this list with "power loss at any point
+> degenerates to one of these recoverable states". That claim is not yet
+> supported: §0 still carries **F3** (persist-before-announce vs old-key
+> retention ordering) as an *open decision*, and the recovery argument above
+> assumes an ordering F3 has not fixed. Before this can be asserted, F3 must
+> define the required commit ordering and a full-reconnect proof must exist for
+> a power cut between commit and announce. Until then, treat power-loss
+> recovery as unproven and gate the release on it.
 
 ### 5.5 Per-chip budgets
 
@@ -840,7 +850,7 @@ the bench.
 | Stage | Content | Repos / order | Why order-independent |
 |---|---|---|---|
 | **L0** | Shared constants (tags 0xA7/0xA9/0xAA/0xAB, LEN 11/13/14, CAP v2, KDF labels, transcript layout), tolerant unknown-(tag,LEN) parsing audit, host oracles `cmac_ref.py`/`kdf_ref.py`/`kex_ref.py` + one cross-repo vector file pinned in both CIs | both, any order | no behavior change |
-| **L1 (CH592)** | `aes_cmac.c` + `rf_kdf.c` (shared verbatim, like `rf_crypt.c` today) + entropy pool + CMAC boot KAT + SRAM-capture hooks; per-session SK, `epoch||seq` sids, CH592 epoch journal (0x75100), SESSION_REQ/announce v2 (new dongle uplink control-frame classifier + empty-body MAC-verify verb, see §19 open item), sealed LED, EV10 provisional-apply — **all gated on the SUITE2 flag** | both, any order | dormant without the flag; wire unchanged for unflagged bonds. **Lands the nonce-reuse fix before and independent of X25519.** CH570 excluded here — its RAM baseline is negative (see next row). |
+| **L1 (CH592)** | `aes_cmac.c` + `rf_kdf.c` (shared verbatim, like `rf_crypt.c` today) + entropy pool + CMAC boot KAT + SRAM-capture hooks; per-session SK, `epoch\|\|seq` sids, CH592 epoch journal (0x75100), SESSION_REQ/announce v2 (new dongle uplink control-frame classifier + empty-body MAC-verify verb, see §19 open item), sealed LED, EV10 provisional-apply — **all gated on the SUITE2 flag** | both, any order | dormant without the flag; wire unchanged for unflagged bonds. **Lands the nonce-reuse fix before and independent of X25519.** CH570 excluded here — its RAM baseline is negative (see next row). |
 | **L1b (CH570)** | Same content on CH570, gated on the CH570 stack-floor reclamation (§14) AND the spare-page (0x3B000) journal relocation (§9.3) | dongle only | the CH570 encrypted image is already ~128 B over the 0x800 floor (`bench/STACK-WATERMARK.md`); L1 on CH570 is NOT the +40 B additive change the draft claimed — it depends on the same campaign as L4 and forces a second CH570 build-id/matrix event. |
 | **L2** | X25519 vendored + KAT, KX FSMs + frames, flags-set-at-confirm (incl. moving ENC_CAPABLE persist to confirm), keyboard KBD3 dual-slot record, `DONGLE_KX=1` on CH592 dongle. (No pair-ACK type_tag hint — cut, §4; the DG PUB is the only KX signal. Optional `type_tag & 0x7F` masking hardening lands here.) | dongle-first preferred; either order safe | kb-first: no DG PUB => KX_WAIT times out to legacy. dongle-first: v1 advert => KX never offered. **Bench flag day here:** bench pairs update together and re-provision (documented in README-link-encryption.md). |
 | **L3** | REKEY_REQ live rekey + `CMD_KX_REKEY` + `rekey_recommended`; optional `CMD_KEY_FPR` fingerprint audit; SAS host-tool mode if wanted | both | suite-2-gated, additive |

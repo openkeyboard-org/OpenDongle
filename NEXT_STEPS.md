@@ -32,6 +32,36 @@ orders, with the 24-trial experiment as the regression gate.
 
 ---
 
+## Open review finding NOT yet fixed: EP6 OUT flow control (byte-changing)
+
+Both Copilot and CodeRabbit independently flagged `usb_device.c:684` as Major,
+and **they are right**. The `else` branch re-ACKs EP6 OUT for two different
+cases, and only one of them should:
+
+- *toggle mismatch, nothing latched* — re-ACK is correct. The unconditional NAK
+  this replaced left the endpoint dead forever (review finding 8), because the
+  only re-ACK sits behind `iap_pkt_pending` in `USB_PollEP6`.
+- *an OUT while `iap_pkt_pending` is still set* (a pipelining host) — re-ACKing
+  **defeats the one-slot flow control**: the next OUT can overwrite `EP6_Buf`
+  before `USB_PollEP6()` consumes it, while `iap_pkt_len` still describes the
+  earlier packet, so the command runs over mismatched data.
+
+The fix is to split the branch — NAK when `iap_pkt_pending` is set, ACK
+otherwise. That does not re-introduce finding 8: with the flag set,
+`USB_PollEP6` re-ACKs unconditionally once it has run the command (verified in
+source). The patch was written and builds clean.
+
+**It is deliberately NOT landed here.** It is byte-changing (CH570 build id
+`0x132BF22D -> 0x87F41F8A`, slot A crc32 `0xD0BA5455 -> 0xD597CAD8`), so it
+invalidates the digests re-pinned above and reopens Gate 1, and it touches
+`common/` so both chips move. An attempt to A/B it on silicon was
+**inconclusive**: after `openboot flash`, the running app's reported build id and
+OpenBoot's `active` slot pointer disagreed, so which image executed during a
+block could not be confirmed — and the control image itself scored 5/5 in one
+block and 0/5 in another, i.e. the bench's own block-to-block variance swamps
+the effect being measured. Land this as its own matrix-gated change, with a
+trustworthy which-image-is-running check first.
+
 ## Gate 1 — full hardware matrix + digest re-pin (blocks merge)
 
 The byte-changing discipline (`TODO.md` preamble): every firmware /
@@ -208,7 +238,7 @@ connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
       `0x91` reported build id `44899EB2`).
 - [x] Production path on the pinned images: capability negotiated on air,
       `BondWrite -> 0x00` live activation with no reset, `ok 0->143`,
-      `drop_mac 0`, F13 delivered host-side, boot KAT ok.
+      `drop_mac 0`, F13 delivered host-side, boot KAT OK.
 - [x] P1 regression gates on the pinned images: same-peer re-pair preserves the
       key (0 destroyed / 6 kept, was 8/8 destroyed); capability negotiation in
       the documented pairing order (was 0/10).
@@ -273,7 +303,7 @@ approved for implementation**. Two decisions are open in its §0:
 Also flagged as real scope when implementation starts (Appendix A #9–#12):
 SESSION_REQ needs a **new** dongle uplink control-frame classifier + empty-body
 MAC-verify verb (not additive); state KDF-vs-direct-CMAC domain separation
-normatively; EV10 provisional-apply must snapshot+restore session/counter; fix
+normatively; EV10 provisional-apply must snapshot and restore session/counter; fix
 the §5.4 dual-`K_ann` verify wording.
 
 ## Deferred / lower priority (`TODO.md`)

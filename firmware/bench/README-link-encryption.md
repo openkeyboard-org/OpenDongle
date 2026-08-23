@@ -148,9 +148,12 @@ target byte-scans every packaged artifact for the key bytes):
 
 Flashing goes over SWD (`ch592-factory-flash` above; the bond it erases is
 re-created by pairing). The receiver has no UART RX path — it only transmits —
-so it is restarted for the pairing/mint dance by power-cycling its probe rails
-(`minichlink -kt` / `-k3`). The full sequence is automated in OpenController
-`firmware/bench/bench_run.py --fresh`.
+so it is restarted for the pairing/mint dance by power-cycling its probe rails.
+Use `bench/linke_power.py`, NOT `minichlink -kt`/`-k3`: those were believed to
+skip target init and so work on a CH5xx probe, but they return rc=223
+(`WCH-LinkE invalid response failed (-1), command: 81 0d 01 02`) because the
+probe is still asked for connect status first. The full sequence is automated in
+OpenController `firmware/bench/bench_run.py --fresh`.
 
 IAP `0x95` (`CMD_CRYPT_LAST_FAIL`) exposes the same failure latch over USB for
 when a receiver with USB returns.
@@ -166,7 +169,11 @@ raw USB against a live CH592: family `0x01` fails, family `0x0b` (CH59x) returns
 
 Consequences and workarounds:
 
-- `make flash-factory` and any probe power-cycle path are affected. A locally
+- `make flash-factory` and any **minichlink-based** probe power-cycle path
+  are affected -- including `-kt`/`-k3`, which were long believed to skip
+  target init and so survive this, but return rc=223 on a CH5xx probe
+  (measured 2026-08-23). `bench/linke_power.py` drives the rail over USB
+  instead and works. The OpenOCD path below is NOT affected. A locally
   patched minichlink with a family-sweep fallback works; it is not upstream.
 - **WCH OpenOCD works** but must be told the family:
   `openocd -f wch-riscv.cfg -c "adapter serial <PROBE>" -c "chip_id CH59x"`.

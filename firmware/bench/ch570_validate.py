@@ -41,13 +41,17 @@ PROVISION = os.path.join(HERE, "provision_link_key.py")
 
 VID, PID = 0x0C45, 0xFEFE
 
-# Despite the ch570_* name this validator is chip-generic (it finds the dongle by
-# USB identity, not family), so the family is a parameter and defaults to the
-# CH592 currently on the bench.
 # Which dongle this run is allowed to drive, and therefore which 0x94 layout to
 # expect. family: 0x70 = CH570, 0x92 = CH592 (DONGLE_CHIP_FAMILY_ID).
-# profile: 1 = product, 2 = bench (DONGLE_BUILD_PROFILE). Override per run.
-WANT_FAMILY = int(os.environ.get("DONGLE_FAMILY", "0x92"), 0)
+# profile: 1 = product, 2 = bench (DONGLE_BUILD_PROFILE). Override per run:
+#   DONGLE_FAMILY=0x92 python3 ch570_validate.py     # CH592 receiver
+#
+# Despite the ch570_* name the validator is chip-generic (it finds the dongle by
+# USB identity, not family), but the DEFAULT matches the filename. It used to
+# default to CH592, which meant a plain run against the CH570 this tool is named
+# for died at require() before any gate executed -- with a message about the
+# wrong family rather than about the default. Least surprise wins.
+WANT_FAMILY = int(os.environ.get("DONGLE_FAMILY", "0x70"), 0)
 WANT_PROFILE = int(os.environ.get("DONGLE_PROFILE", "1"), 0)
 OPENDONGLE_CLI = os.environ.get(
     "OPENDONGLE_CLI",
@@ -98,7 +102,15 @@ class Kbd:
                 pkt = self.buf[i:i + 3]
                 if (sum(pkt[:-1]) & 0xFF) == pkt[-1]:
                     self.status.append((time.time() - t0, pkt[1]))
-                self.buf = self.buf[:i] + self.buf[i + 3:]
+                    self.buf = self.buf[:i] + self.buf[i + 3:]
+                else:
+                    # Checksum failed, so this 0x5B was not a frame start.
+                    # Consuming all three bytes would eat the two after it and
+                    # swallow a real frame that begins inside them; a lost
+                    # status byte makes wait() time out and main() turn that
+                    # into a spurious ABORT. Drop only the false start and let
+                    # the parser re-lock on the next byte.
+                    self.buf = self.buf[:i] + self.buf[i + 1:]
                 changed = True
         if len(self.buf) > 256:
             self.buf = self.buf[-256:]
@@ -237,7 +249,10 @@ class Iap:
 
     def status_line(self):
         r = self.txn(0x91)
-        if not r or r[0] != 0x91:
+        # The connection byte sits at wire index 4, so a short reply would
+        # IndexError here (or read whatever a truncated read left behind).
+        # Require the payload length too, not just the ack byte.
+        if not r or r[0] != 0x91 or r[1] < 3 or len(r) < 5:
             return "unknown"
         conn = {0: "unavailable", 1: "pairing", 2: "waiting-reconnect",
                 3: "connected"}.get(r[4], "?")
@@ -274,16 +289,24 @@ def _reopen_iap(timeout=40.0):
     deadline = time.time() + timeout
     dev = None
     while time.time() < deadline:
+        cand = None
         try:
             cand = Iap()                     # raises SystemExit while absent
             if cand.handshake():
                 dev = cand
                 break
             cand.close()
-        except KeyboardInterrupt:
-            raise
-        except BaseException:
-            pass                          # absent/settling: keep waiting
+        except (SystemExit, OSError):
+            # Absent or still settling: keep waiting. Deliberately NOT
+            # BaseException -- that swallows KeyboardInterrupt and makes Ctrl-C
+            # useless until the deadline. Close the candidate so a handshake
+            # that raises after a successful open does not leak the fd for the
+            # rest of the loop.
+            if cand is not None:
+                try:
+                    cand.close()
+                except OSError:
+                    pass
         time.sleep(1.0)
     if dev is None:
         raise SystemExit("dongle did not come back after reset")
@@ -444,7 +467,12 @@ def main():
     dg.close()                                  # free the hidraw for the tool
     log("provisioning dongle over USB IAP (verify + live-activate, no reset)...")
     ok_prov = provision_dongle()
-    dg = Iap(); dg.handshake(); dg.arm()        # reopen
+    # Reopen through the same helper the reset path uses, so the identity is
+    # re-asserted and a failed handshake aborts instead of being discarded:
+    # find_hidraw() binds the FIRST VID:PID match, and the provisioning tool
+    # held the node in between, so the rebind is not guaranteed to be the same
+    # device on a multi-dongle bench.
+    dg = _reopen_iap()
     valid, flags = dg.bond_flags()
     keyed_bond = valid and (flags & FLAG_ENC_KEY) and (flags & FLAG_ENC_CAPABLE)
     if not ok_prov or not keyed_bond:
