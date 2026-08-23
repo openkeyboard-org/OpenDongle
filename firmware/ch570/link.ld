@@ -198,9 +198,19 @@ SECTIONS
 
     PROVIDE(_end = _enoinit);
     PROVIDE(end = .);
-    /* Keep the production stack floor above the 1,600-byte cold-boot entropy
-     * window (_end+64 through _end+1599). */
-    PROVIDE(CH570_STACK_FLOOR = 0x800);
+    /* Stack floor: the minimum free-stack space the build guarantees between
+     * the statics (_end) and the stack top. Not an allocation -- the stack has
+     * the whole _end..top gap; this fails the link if static data ever grows
+     * enough to threaten it, and it stays above the 1,600-byte cold-boot
+     * entropy window (_end+64 .. _end+1599).
+     *
+     * 0x700, down from 0x800: with link encryption compiled in the statics no
+     * longer leave 0x800 free (they leave ~1,920 B, so 0x800 fails by ~128 B).
+     * 0x700 links with ~128 B of static-growth headroom and reserves >3x the
+     * measured worst-case stack depth -- 548 B, from the on-silicon
+     * stack-watermark run 2026-08-18 (CH570 receiver, pair + USB provision +
+     * encrypted soak; bench/STACK-WATERMARK.md). */
+    PROVIDE(CH570_STACK_FLOOR = 0x700);
     ASSERT(CH570_STACK_FLOOR >= 0x640,
            "CH570 stack floor is smaller than boot-entropy read window")
     ASSERT((ORIGIN(RAM) + LENGTH(RAM) - _end) >= CH570_STACK_FLOOR,

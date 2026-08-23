@@ -6,149 +6,30 @@ validation. Anything here that touches a firmware source, a linker script, or
 `dongle_image_id.py` / `finalize_image.py` changes the compiled build id, so it
 should land together with a re-run of the hardware matrix and re-pinned digests.
 
-## Defect: EP6 OUT can be left NAKed, wedging the vendor HID interface
+## Fixed in source, awaiting the next hardware matrix
 
-**Where:** `firmware/common/src/usb_device.c`, the `UIS_TOKEN_OUT | 6` case
-(the unconditional NAK immediately after the packet-latching `if`).
+The five defect entries this file used to carry in full are fixed on the
+`em-m2-robustness` / `em-ccm-bench-verify` branches (their analyses live in
+the fixing commits and in `docs/reviews/2026-08-16-review.md`):
 
-**What is wrong.** The handler latches an incoming IAP packet only when both
-conditions hold:
+- **EP6 OUT permanent NAK** — the ISR now re-ACKs when nothing was latched
+  and evaluates the toggle from the already-taken status sample.
+- **CH570 26-bit one-shot truncation** — `st_rearm()` clamps to
+  `ST_MAX_DELTA` and re-arms to the absolute deadline; the invariant is
+  `st_armed_delta` == the value written to `R32_TMR_CNT_END`.
+- **Suspend replay of mouse/consumer** — the suspend gate NAKs EP2/EP3 with
+  the same T_RES-only mask as EP1.
+- **CLEAR_FEATURE(ENDPOINT_HALT) direction** — wIndex bit 7 is decoded; EP6
+  OUT resets its own half; nonexistent pairs STALL.
+- **CH570 bond-persist teardown-before-validate** — the semantic check is
+  hoisted above the radio teardown, so an invalid record returns before any
+  radio state changes.
 
-```c
-if ((R8_USB_INT_ST & RB_UIS_TOG_OK) && !iap_pkt_pending) {
-    ...
-    iap_pkt_pending = 1;
-}
-R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;   /* unconditional */
-```
-
-The NAK is outside the guard, but the only place that re-ACKs EP6 OUT is
-`USB_PollEP6()`, which runs its body only when `iap_pkt_pending` is set. So when
-the guard fails — a toggle mismatch (`TOG_OK` clear), or an OUT arriving while a
-previous command is still pending — the packet is dropped, the flag is never
-set, nothing re-ACKs, and **EP6 OUT stays NAKed until the device is power
-cycled.**
-
-**Impact.** The vendor HID maintenance interface stops responding: no
-`--info`, no bond operations, no `--enter-bootloader`. The RF link and the
-keyboard/mouse HID interfaces are unaffected, nothing is corrupted, and a replug
-clears it. It is a wedge, not a brick.
-
-**Reachability.** A conforming host cannot trigger it. The IAP protocol is
-strict request/response, so the host waits for the EP6 IN reply before sending
-the next OUT, which is why the hardware campaign never hit it. It needs a USB
-error causing a toggle mismatch, or a host that pipelines requests.
-
-**Fix sketch.** Re-ACK when nothing was latched, and evaluate the toggle from
-the same interrupt-status sample already taken rather than re-reading the
-register:
-
-- if the packet was latched → leave EP6 OUT NAKed (current, correct behaviour —
-  it is the flow-control that keeps the host from overrunning the deferred
-  command);
-- if it was not latched → restore `UEP_R_RES_ACK` so the endpoint stays live.
-
-**Before merging the fix:** it changes firmware bytes on both chips, so re-run
-the update and maintenance cases on hardware and re-pin the artifact digests.
-Worth adding a regression check that drives two OUTs back-to-back without
-reading the reply in between.
-
-*Found by CodeRabbit during the import review; confirmed by reading the code.
-Six other findings from the same pass alleged defects that the source does not
-have — the dispositions, with the evidence for each, are in the review comments
-on [#3](https://github.com/openkeyboard-org/OpenDongle/pull/3).*
-
-## Defect: CH570 one-shot arms wider than 26 bits are silently truncated
-
-**Where:** `firmware/ch570/src/main.c`, `st_rearm()` — `R32_TMR_CNT_END = d`
-with no clamp. Reached with an oversized `d` from
-`firmware/common/src/rf_task.c`, the EV10 reacquire watchdog.
-
-**What is wrong.** The CH570 SDK documents the register plainly:
-
-```c
-#define R32_TMR_CNT_END (*((PUINT32V)0x4000240C)) // RW, TMR end count value, only low 26 bit
-```
-
-The scheduler writes a full 32-bit tick delta into it. At the CH570's fixed
-100 MHz, 26 bits caps a single hardware arm at 67,108,863 ticks — **671 ms**.
-The reacquire watchdog is `RF_SUPERVISION_STOCK_WATCHDOG_TMOS` (0x0d48 = 3400
-TMOS units) × `HAL_TMOS_UNIT_TICKS` (62,500) = **212,500,000 ticks, 2.125 s**.
-The hardware keeps the low 26 bits, 11,173,408 ticks, and fires after about
-**112 ms** — a factor of 19 early.
-
-It gets worse than an early fire. `st_armed_delta` keeps the *untruncated*
-212,500,000, and the expiry path advances `st_epoch` by that amount, so the
-software clock jumps roughly 2.01 s ahead of real time in one step. Every other
-soft timer with a deadline inside that span is then past due and dispatches in
-the same pass.
-
-**Reachability.** Confirmed, not theoretical. `rf_send_keys_up_on_link_loss()`
-cancels `HAL_TMR_SLOT_CONNECTED_POLL` first, and that cancel runs
-`st_periodic_exit_locked()`, which clears `st_periodic_slot_p1`. So the guard at
-the top of `st_rearm()` — the one that makes arms bookkeeping-only while a
-periodic grid owns the timer — is *not* in force by the time the watchdog is
-armed a few lines later. The write reaches the register.
-
-**Scope: CH570 only.** CH592 routes the same call through
-`hal_tmos_units_from_tsys()`, which divides back to 3400 TMOS units and arms a
-TMOS software timer. No 26-bit register is involved. The 300 ms boot window
-(480 TMOS units = 30,000,000 ticks) fits on both chips, which is consistent with
-the boot window behaving correctly in the hardware campaign while this stayed
-hidden.
-
-**Fix sketch.** Clamp the hardware arm to the register's maximum and advance the
-epoch by *what was actually programmed*, re-arming until the absolute deadline
-is reached. `st_armed_delta` must always equal the value written to
-`R32_TMR_CNT_END`, never the requested delta — that invariant is what the
-current code breaks.
-
-**Before merging the fix:** it changes firmware bytes on CH570, so re-run the
-hardware matrix and re-pin the digests. Worth adding a bench case that forces a
-link loss on CH570 and measures the reacquire watchdog against a wall clock.
-
-*Found by codex during the import review; confirmed by reading the SDK register
-definition, the tick constants, and the cancel-then-arm ordering in
-`rf_send_keys_up_on_link_loss()`.*
-
-## Defect: suspend NAKs only EP1, so a queued mouse or consumer report survives into resume
-
-**Where:** `firmware/common/src/usb_device.c`, `USB_SuspendResume()` — the
-suspend branch touches `R8_UEP1_CTRL` and nothing else.
-
-**What is wrong.** The whole point of the suspend gate, stated in the file's own
-comment, is that "a key that arrives over RF during host sleep can't be
-delivered as a stale report the instant the host resumes". EP1 gets that
-treatment. EP2 (mouse) and EP3 (composite consumer/media) do not: if
-`USB_SendMouse()` or `USB_SendComposite()` armed the endpoint just before SOF
-stopped, it stays `T_RES = ACK` across the entire suspend and the SIE hands the
-buffered report to the host on the first IN token after resume.
-
-**Impact, and why it is worse than one stale report.** RF-sourced HID reports
-are change-driven: a press and its matching release are separate reports. The
-press can be sitting armed when suspend begins, while the release that would
-have cancelled it arrives *during* suspend and is correctly dropped by the
-`usb_hid_in_ready()` gate. So the host can resume, receive the press, and never
-receive the release — a stuck button or a held media key rather than a single
-spurious event. It resolves on the next real report from that device, so it is
-a glitch, not a wedge.
-
-**Scope.** EP1 is already handled. EP5 is inert — nothing in the firmware ever
-writes `UEP_T_RES_ACK` to `R8_UEP5_CTRL`, so including it would be harmless but
-pointless. EP6 is the IAP endpoint and is deliberately outside the HID suspend
-policy.
-
-**Fix sketch.** Extend the suspend branch to EP2 and EP3, masking only
-`MASK_UEP_T_RES` exactly as the existing EP1 line does — that preserves the data
-toggle, which must not be disturbed. (CodeRabbit's report suggested this masking
-as a correction; the EP1 line already does it. The gap is the missing endpoints,
-not the mask.)
-
-**Before merging the fix:** it changes firmware bytes on both chips. Re-run the
-hardware matrix and add a bench case that queues a mouse or consumer report and
-then forces a host suspend/resume.
-
-*Found by CodeRabbit; confirmed by reading the suspend handler.*
+Also fixed en route (the M1 batch): the single-slot CH570 HID buffer became
+per-type slots with mouse-delta accumulation, the pre-verify sink counters
+moved behind the bench profile, and BondWrite gained readback verification
+plus live activation. All of it still needs the hardware matrix re-run and
+digest re-pin the preamble demands before any of these branches ship.
 
 ## Hazard: the IN handlers fight the hardware toggle, and the obvious fix is not safe
 
@@ -185,24 +66,6 @@ the bench, rather than removing five lines because they look dead.
 carry the manual XOR, but their bus-reset handler re-arms the endpoints
 *without* `AUTO_TOG`, so in vendor code the two disciplines never coexist. This
 firmware re-applies `AUTO_TOG` on every bus reset, so here they do.
-
-## Defect: CLEAR_FEATURE(ENDPOINT_HALT) ignores the direction bit
-
-**Where:** `firmware/common/src/usb_device.c`, the `CLEAR_FEATURE` handler —
-`wIndex` is masked with `0x0F`, discarding bit 7.
-
-The switch therefore always clears the **IN** half of the named endpoint. EP6 is
-bidirectional — `R8_UEP567_MOD` enables both TX and RX and the descriptor
-declares OUT endpoint `0x06` — so a host clearing a halt on EP6 **OUT** resets
-the IN half instead: wrong endpoint direction reset, and the OUT half left as it
-was.
-
-**Reachability is low.** No in-box HID class driver issues this request against
-this device, and the maintenance path reaches EP6 through hidraw rather than a
-class driver. It needs a host that deliberately halts and clears an endpoint.
-
-**Fix:** decode bit 7 of `wIndex` and act on the matching half. Changes firmware
-bytes, so it lands with a re-validation.
 
 ## Hygiene: EP0 accepts malformed control transfers instead of stalling
 
@@ -294,61 +157,6 @@ hardware matrix and re-pin the digests.
 *Filed by CodeRabbit with the wrong mechanism and the wrong remedy; the real
 route was found by adversarial review and then reproduced independently.*
 
-## Defect: an invalid bond record can leave the CH570 radio shut down
-
-**Where:** `firmware/common/src/rf_task.c`, the bond-persist path — the
-`#if !RF_TASK_EXECUTOR_TMOS` teardown block sits *above* the
-`bond_record_semantic_valid()` check that can return early.
-
-**What is wrong.** On the not-currently-connected path the block cancels all
-four timer slots (`PAIR_ACK`, `EV10_REKEY`, `BOOT_WINDOW`, `CONNECTED_POLL`) and
-calls `hal_rf_shut()`. Only *after* that does the record get validated:
-
-```c
-#if !RF_TASK_EXECUTOR_TMOS
-    if (!was_connected) {
-        hal_timer_cancel(...);      /* all four slots */
-        hal_rf_shut();
-    }
-#endif
-    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
-        return;                      /* radio still shut, timers still cancelled */
-    }
-    /* hal_rf_init(), rf_state = RF_STATE_PAIRING, rf_start_rx(),
-       rf_arm_retry_if_failed() all live BELOW this point */
-```
-
-The restoring half never runs. The dongle is left with the radio powered down,
-no timers, no re-camp and no re-arm driver — **deaf until replug or reset**.
-`rf_bond_persist_pending` was cleared earlier, so nothing retries. This directly
-contradicts the comment a few lines below it, which promises that leaving
-`rf_bond_persisted = 0` "keeps the session usable this boot".
-
-**Scope: CH570 only.** The block is inside `#if !RF_TASK_EXECUTOR_TMOS`, and the
-macro is 0 in `ch570/src/dongle_target.h` and 1 in `ch592/src/dongle_target.h`,
-so the code does not exist in the CH592 build.
-
-**Reachability: currently none — this is latent.** `want` is built by
-`rf_commit_bond_ram()` from values that cannot fail the check today: the session
-AA comes from `rf_generate_session_aa()` (never 0, `0xFFFFFFFF`, or the pair AA),
-the interval and timeout come from our own compiled pair-ACK template, and the
-peer MAC has already been screened by `rf_accept_peer_mac()` against exactly the
-zero / all-FF / own-MAC cases `bond_record_semantic_valid()` rejects. The check
-is defence in depth that should not fire. The ordering is still wrong, and the
-consequence if it ever does fire is severe enough that it should not stay wrong.
-
-**Fix sketch.** Hoist the `bond_record_semantic_valid()` check above the
-`#if !RF_TASK_EXECUTOR_TMOS` teardown so an invalid record returns before any
-radio state changes. The sibling `if (save_rc != 0) return;` is already correctly
-placed after the restore, so this is the only site with the problem.
-
-**Before merging the fix:** it changes CH570 firmware bytes, so re-run the
-hardware matrix and re-pin the digests.
-
-*Found by CodeRabbit during the import review; the ordering was confirmed by
-reading the code, and the reachability analysis is what downgraded it from
-"bricks the radio" to "latent".*
-
 ## Deferred review findings
 
 Real improvements that were not taken during the import because each one changes
@@ -410,9 +218,9 @@ the build id for no functional gain, or expands scope beyond the import:
   test.** The wording appears twice — in `rf_task.c` at the call site and again
   in `rf_protocol.h` — and it was true where the code came from: the covering
   test lives in the private reverse-engineering tree and was not part of this
-  import. `make test` discovers only `test_build_identity.py` and
-  `test_compose_factory.py`, and a whole-tree grep for `hop_step` finds only the
-  definition and its single call site. Two options, and the second is better:
+  import. The host suite has since grown to fifteen-plus modules (including
+  `test_rf_crypt.py` and `test_rf_negotiation.py`), but a whole-tree grep for
+  `hop_step` still finds only the definition and its single call site. Two options, and the second is better:
   drop the clause, or port a host test for `rf_proto_hop_step()`. Porting it is
   worth real effort — the adversarial review above turned up a reachable
   overflow in exactly this function, and a table-driven test pinning the stock

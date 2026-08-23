@@ -47,6 +47,7 @@ CMD_BOND_READ = 0x88
 ACK_HANDSHAKE = 0xA5
 ACK_GETDEVINFO = 0x04
 ACK_BOND_READ = 0x88
+ACK_OK = 0x0F           # send_status4 reply ack (status is at index 2)
 HANDSHAKE_PAYLOAD = b"WCH@HFD"
 
 BOND_MAGIC = 0x444E4F42    # 'BOND'
@@ -187,14 +188,15 @@ class Iap:
 
     def bond_write(self, rec: bytes):
         r = self.xfer(CMD_BOND_WRITE, bytes(rec))
-        if not r:
-            raise SystemExit("BondWrite got no reply")
-        status = r[1] if r[0] == 0x0F else r[-1]
-        for idx in (1, 2, 3):
-            if idx < len(r) and r[idx] in WRITE_STATUS:
-                status = r[idx]
-                break
-        return status
+        if not r or r[0] != ACK_OK or len(r) < 3:
+            raise SystemExit(f"BondWrite got no/short reply: {r.hex() if r else None}")
+        # send_status4 reply is [0x0F][len=1][status][pad] -- the status is at
+        # index 2. The old code scanned from index 1 (the length byte, always
+        # 0x01), which collides with WRITE_STATUS[0x01] ("NV erase failed") and
+        # so misreported EVERY success as an erase failure. Never caught because
+        # the CH592 bench used the compiled-in force key, not this tool -- the
+        # CH570 bench (no force key) is the first to exercise it.
+        return r[2]
 
 
 def checksum(rec: bytes) -> int:

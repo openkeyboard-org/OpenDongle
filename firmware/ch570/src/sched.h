@@ -25,6 +25,15 @@
 #define ST_SLOT_EVT_DELAY_0 4u
 #define ST_SLOT_EVT_DELAY_1 5u
 #define ST_MIN_DELTA    20u     /* arm floor (avoid 0 / past CNT_END) */
+/* Arm ceiling: R32_TMR_CNT_END holds ONLY the low 26 bits (SDK: "only low 26
+ * bit"), 67,108,863 ticks = 671 ms @100 MHz. A wider write is silently
+ * truncated by the hardware while the software bookkeeping keeps the full
+ * value -- the EV10 reacquire watchdog (2.125 s) fired ~19x early at ~112 ms
+ * AND the epoch then jumped ~2.01 s in one step, dispatching every other
+ * pending slot (TODO.md; 2026-08-16 review, finding 5). st_rearm clamps to
+ * this and re-arms until the absolute deadline is reached; the invariant is
+ * st_armed_delta == the value actually written to R32_TMR_CNT_END. */
+#define ST_MAX_DELTA    0x03FFFFFFu
 
 typedef void (*st_cb_t)(uint8_t slot);
 

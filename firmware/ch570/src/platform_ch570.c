@@ -133,7 +133,7 @@ static void ch570_fault_boot(uint8_t reset_status)
 #define CH570_ENTROPY_SKIP 64u     /* margin over any early heap word above _end */
 #define CH570_ENTROPY_LEN  1536u   /* bytes of power-on RAM to hash */
 /* The read window [_end+SKIP, _end+SKIP+LEN) must stay within the RAM the linker
- * guarantees free above _end. The 0x800 floor keeps this window below RAM top.
+ * guarantees free above _end. The 0x700 floor keeps this window below RAM top.
  * Keep both assertions in sync if the window changes. */
 _Static_assert(CH570_ENTROPY_SKIP + CH570_ENTROPY_LEN <= 0x640u,
     "boot-entropy read must fit the minimum linker-guaranteed stack-floor gap");

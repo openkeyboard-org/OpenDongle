@@ -71,11 +71,26 @@ REPO = Path(__file__).resolve().parents[2]
 OPENBOOT = REPO / "third_party" / "openboot"
 HARNESS = OPENBOOT / "firmware" / "tests" / "bench" / "ab_bench.py"
 
-# W4: only these probes may ever be driven. CF148F065446 (CH570) is deliberately
-# absent -- that path reaches a paired production dongle.
+# W4: only these probes may ever be driven. CEBD8F0653EF is deliberately absent
+# -- that path reaches the paired OpenController KEYBOARD, and every scenario
+# here whole-chip-erases its target.
+#
+# Corrected 2026-08-22: this table predated two bench re-cablings and had the two
+# roles inverted, so a run would have erased the keyboard and recorded the PASS
+# as CH592-dongle A/B evidence. Current roles, corroborated by NEXT_STEPS.md:107,
+# bench/README-link-encryption.md:48 and bench/ch570_{validate,soak,reacquire}.py:
+# CF148F065446 = the CH592 dongle under test, CEBD8F0653EF = the keyboard.
+# C2228F064754 (ch572) has left the bench entirely.
 ALLOWED_PROBES = {
-    "C2228F064754": "ch572 bench part",
-    "CEBD8F0653EF": "ch592 bench part",
+    "CF148F065446": "ch592 bench part (dongle under test)",
+}
+
+# Upstream's CHIPS table (a pinned submodule, never edited: a dirty worktree
+# fails check_dependencies.py --expect-revision) hardcodes the serials of a bench
+# that no longer exists. Map its chip names onto THIS bench's probes; a name with
+# no entry here is dropped by the allow-list below.
+SERIAL_REMAP = {
+    "ch592": "CF148F065446",
 }
 
 
@@ -335,8 +350,12 @@ def main() -> int:
         patch_run_for_dry_run(module)
         stub_factory_for_dry_run(module)
 
-    # W3/W4: rewrite the bench-local CHIPS table for THIS bench.
+    # W3/W4: rewrite the bench-local CHIPS table for THIS bench. The serial must
+    # be remapped BEFORE the allow-list check: cfg["serial"] is what reaches
+    # minichlink's -l, so filtering on upstream's stale serial would drop every
+    # chip and exit "no allowed probes present".
     for name, cfg in list(module.CHIPS.items()):
+        cfg["serial"] = SERIAL_REMAP.get(name, cfg["serial"])
         if cfg["serial"] not in ALLOWED_PROBES:
             del module.CHIPS[name]
             continue

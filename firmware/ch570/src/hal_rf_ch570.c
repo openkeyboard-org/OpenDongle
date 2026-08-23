@@ -149,7 +149,7 @@ uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
  * -> rf_arm_post_poll_rx() (rf_task.c) calls it SYNCHRONOUSLY from the
  * __HIGH_CODE radio-IRQ sink on every connected-poll TX_FINISH (~1143/s), and
  * the EV10 pair-prep path calls it too. It is deliberately left flash-resident
- * (NOT __HIGH_CODE) to respect the 2 KB stack-floor / flash budget -- promoting
+ * (NOT __HIGH_CODE) to respect the CH570_STACK_FLOOR / flash budget -- promoting
  * it would change codegen. A future flash-wait-state change could narrow the
  * reply-capture margin, so start any TX->RX timing-regression hunt here. */
 uint8_t hal_rf_start_rx_primed(uint8_t channel, uint16_t timeout,

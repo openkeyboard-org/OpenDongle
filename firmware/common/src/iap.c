@@ -383,12 +383,12 @@ extern uint32_t rf_crypt_announce_retry;  /* rf_task.c: announce-seal rebuilds  
 extern uint8_t  rf_crypt_boot_kat_run;
 extern uint8_t  rf_crypt_boot_kat_fail;
 #endif
+extern uint32_t rf_crypt_plain_drop;   /* both profiles: see rf_task.c */
 #if RF_CRYPT_DIAG_PREV_SESSION
 extern uint32_t rf_crypt_conn_rx;
 extern uint32_t rf_crypt_enc_shape;
 extern uint32_t rf_crypt_fifo_full;
 extern uint32_t rf_crypt_flush_drop;
-extern uint32_t rf_crypt_plain_drop;
 extern uint8_t  rf_crypt_len_max;
 extern uint8_t  rf_crypt_len_max_tag;
 #endif
@@ -434,11 +434,11 @@ static void handle_crypt_diag(void)
      * engine (CH570); the pre-verify sink forensics are bench-profile
      * scaffolding (rf_task.c). The two layouts are told apart by their length
      * and by the status profile byte. Additive appends only. */
-    uint8_t resp[2u + 4u + 24u + 4u + 4u + 1u + 1u] = {0};
+    uint8_t resp[2u + 4u + 24u + 4u + 4u + 1u + 1u + 4u] = {0};
     uint8_t i;
 
     resp[0] = ACK_CRYPT_DIAG;
-    resp[1] = 4u + 24u + 4u + 4u + 1u + 1u;
+    resp[1] = 4u + 24u + 4u + 4u + 1u + 1u + 4u;
     put_le32(&resp[2], rf_crypt_ok_count);
     for (i = 0; i < 6u; i++) {
         put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
@@ -451,6 +451,12 @@ static void handle_crypt_diag(void)
     resp[38] = rf_crypt_boot_kat_run;
     resp[39] = rf_crypt_boot_kat_fail;
 #endif
+    /* Appended 2026-08-22: a refused plaintext downgrade on an active encrypted
+     * bond. The slot is UNCONDITIONAL (like the two above, which read zero on a
+     * chip without the hardware engine) so the payload length stays a reliable
+     * layout discriminator on every chip and profile. 42 B payload; the 62 B
+     * ceiling leaves room for five more u32 before a selector is needed. */
+    put_le32(&resp[40], rf_crypt_plain_drop);
     USB_SendEP6(resp, sizeof(resp));
 #endif
 }
@@ -563,7 +569,7 @@ static void handle_stack_watermark(void)
     resp[0] = CMD_STACK_WATERMARK;
     resp[1] = 12u;
     put_le32(&resp[2], stack_watermark_low());
-    put_le32(&resp[6], (uint32_t)(uintptr_t)&_end);
+    put_le32(&resp[6], stack_watermark_floor());   /* true stack floor per chip */
     put_le32(&resp[10], (uint32_t)(uintptr_t)&_eusrstack);
     USB_SendEP6(resp, sizeof(resp));
 }
