@@ -87,6 +87,47 @@ def session_aa(rec):
     return None if rec is None else struct.unpack_from("<I", rec, 8)[0]
 
 
+def dongle_linked(timeout=20.0, hold=4.0):
+    """Did the dongle actually take the re-pair, and does the link STAY up?
+
+    This is the precondition detector, and getting it right matters: the
+    obvious choice -- "did the stored session AA change?" -- is WRONG here.
+    rf_generate_session_aa() is only called on the "no bond yet" boot branch
+    (rf_task.c:3411); a bonded boot loads rec.session_aa (:3426), so a same-peer
+    re-pair accepted during the boot window re-persists with the SAME AA. An
+    unchanged AA therefore proves nothing.
+
+    What does distinguish them: the keyboard's bond was just cleared (A6 52), so
+    it has nothing to reconnect with -- any connection it sustains can only come
+    from a fresh pair the dongle accepted. A refused re-pair shows up as the
+    keyboard reporting 0x32 CONNECTED and then dropping ~3 s later while the
+    dongle sits in conn=waiting-reconnect, so require the link to still be up
+    after `hold` seconds.
+    """
+    end = time.time() + timeout
+    seen = False
+    while time.time() < end:
+        d = iap(tries=1)
+        if d:
+            try:
+                if "connected" in d.status_line():
+                    seen = True
+                    break
+            finally:
+                d.close()
+        time.sleep(0.5)
+    if not seen:
+        return False
+    time.sleep(hold)
+    d = iap(tries=2)
+    if not d:
+        return False
+    try:
+        return "connected" in d.status_line()
+    finally:
+        d.close()
+
+
 def reset_dongle():
     subprocess.run([OPENDONGLE, "--enter-bootloader", "--force"],
                    capture_output=True, timeout=30)
@@ -149,32 +190,24 @@ def main():
             continue
         # The experiment: same-peer re-pair into the boot window with the bond
         # NOT cleared. Pre-fix this re-persisted a keyless record over the key.
-        before = record()
         got, _ = pair_into_boot_window(k, clear_first=False)
-        time.sleep(2.0)
-        after = record()
+        linked = dongle_linked()
         f = flags()
-        # PRECONDITION CHECK. A fresh pair mints a new session AA, so an
-        # unchanged AA means the dongle never accepted the pair and never
-        # re-persisted -- the key-preservation path was not entered at all and
-        # "key kept" would be vacuous. Measured 2026-08-22: a dongle holding a
-        # valid bond stays in conn=waiting-reconnect and refuses a same-peer
-        # fresh pair even when the keyboard re-arms across the whole reboot, so
-        # every trial lands here. Without this check the run reported 8/8 FIXED
-        # while measuring nothing.
-        if before is not None and after is not None \
-                and session_aa(before) == session_aa(after):
-            log(f"  trial {i + 1:2d}: PRECONDITION NOT MET -- session AA "
-                f"unchanged (0x{session_aa(after):08X}); the dongle never "
-                f"accepted the re-pair, so nothing was re-persisted "
-                f"(connected={got})")
+        # PRECONDITION: the dongle must actually have taken the re-pair. Without
+        # this the run scores trials where nothing was re-persisted and reports
+        # a vacuous pass. See dongle_linked() for why the session AA -- the
+        # obvious detector -- cannot be used here.
+        if not linked:
+            log(f"  trial {i + 1:2d}: PRECONDITION NOT MET -- the dongle never "
+                f"took the re-pair (no sustained link; kbd CONNECTED={got} is "
+                f"spurious and drops within ~3 s)")
             bad += 1
         elif f is None:
             log(f"  trial {i + 1:2d}: no bond after re-pair (connected={got})")
             bad += 1
         elif f == 0x03:
             log(f"  trial {i + 1:2d}: 0x03 -> 0x{f:02X}  key KEPT "
-                f"(AA re-minted, connected={got})")
+                f"(dongle took the re-pair and the link held)")
             kept += 1
         else:
             log(f"  trial {i + 1:2d}: 0x03 -> 0x{f:02X}  *** KEY DESTROYED *** "
@@ -189,9 +222,9 @@ def main():
         print(f"\n  >>> OD-01 STILL REPRODUCES: {wiped} same-peer re-pairs "
               f"re-persisted a keyless bond over a provisioned key.")
     elif kept:
-        print(f"\n  >>> OD-01 key preserved across {kept}/{kept} same-peer re-pairs\n      that the dongle actually accepted (session AA re-minted each time).")
+        print(f"\n  >>> OD-01 key preserved across {kept}/{kept} same-peer re-pairs\n      the dongle actually took (sustained link each time).")
     else:
-        print("\n  >>> INCONCLUSIVE: no trial met the precondition. The dongle\n      never accepted a same-peer fresh pair, so the key-preservation\n      path was never entered and this run proves nothing either way.")
+        print("\n  >>> INCONCLUSIVE: no trial met the precondition. The dongle never\n      took a same-peer re-pair, so the key-preservation path was never\n      entered and this run proves nothing either way.")
     k.ser.close()
     return 0
 

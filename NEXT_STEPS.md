@@ -72,14 +72,24 @@ arm): Arm A (documented order) **12/12**, Arm B (control) **12/12**, against a
 plan's gate was A >= 11/12 and B 12/12.
 
 **OD-01 acceptance is NOT established, and an earlier 8/8 "pass" was vacuous.**
-The session AA never changed across the re-pair, and a real fresh pair always
-mints a new one; dongle-side tracing showed it sits in `conn=waiting-reconnect`
-and refuses a same-peer fresh pair while it holds a valid bond, even with the
-keyboard re-arming every 4 s across the whole reboot. The harness now gates on
-the session AA and reports INCONCLUSIVE. **Open question:** how to make a bonded
-dongle accept a same-peer fresh pair — without that, OD-01 cannot be exercised
-on hardware and the A1 key-preservation fix rests on the host test
-(`test_bond_key_preservation.py`) plus code review alone.
+Across 22 reboots — including runs blanketing the whole boot window with a
+continuously re-armed fresh-pair broadcast — the dongle stayed in
+`conn=waiting-reconnect` and never took the re-pair, so the key-preservation
+path was never entered. The keyboard's `0x32 CONNECTED` in those runs is
+spurious and drops ~3 s later; since its bond was just cleared it has nothing to
+reconnect with, so a *sustained* link is the detector the harness now uses.
+
+Do not reach for "did the session AA change?" instead: `rf_generate_session_aa()`
+runs only on the *no bond yet* boot branch (`rf_task.c:3411`), a bonded boot
+loads `rec.session_aa` (`:3426`), so an accepted same-peer re-pair keeps the same
+AA. An interim revision of these notes argued from an unchanged AA; that was
+wrong.
+
+**Open question:** how to force the rendezvous — the window is 10 x 300 ms with
+only ODD steps on the pair AA (~1.5 s) and the dongle camps on one channel while
+the keyboard hops. Until that is solved OD-01 cannot be exercised on hardware,
+and the A1 key-preservation fix rests on `test_bond_key_preservation.py` plus
+code review alone.
 
 What is still not covered: no CH572 on this bench at all; the CH570
 soak/reacquire legs; and two legs blocked by tooling — `aes-hw-validate` and the

@@ -237,17 +237,32 @@ met. Capability now latches regardless of pairing order, which is what the
 advert-lead change was for.
 
 **OD-01 acceptance — NOT ESTABLISHED (precondition unreachable).** Be careful
-with this one. A first pass reported 8/8 "key kept" and that result was
-**vacuous**: the session AA in the bond record was identical before and after
-every re-pair, and a genuine fresh pair always mints a new AA. Dongle-side
-tracing showed why — a dongle that already holds a valid bond sits in
-`conn=waiting-reconnect` and never accepts a same-peer fresh pair, even with the
-keyboard re-arming its broadcast every 4 s across the entire reboot. The
-keyboard's `0x32 CONNECTED` in those runs is spurious; it drops ~3 s later. So
-the key-preservation path was never entered and nothing was measured either way.
-`bench/od01_experiment.py` now checks the session AA and reports INCONCLUSIVE
-rather than a pass. Reproducing OD-01 needs a way to make a bonded dongle accept
-a same-peer fresh pair, which this bench has not found.
+with this one, in both directions. A first pass reported 8/8 "key kept"; that
+was **vacuous**, because the dongle never took the re-pair at all, so the
+key-preservation path was never entered.
+
+The sound evidence is dongle-side: across 22 reboots — including runs that
+blanketed the entire boot window with a continuously re-armed fresh-pair
+broadcast — the dongle stayed in `conn=waiting-reconnect` and never established
+a link. The keyboard's `0x32 CONNECTED` in those runs is spurious and drops
+~3 s later. Since the keyboard's bond was just cleared (`A6 52`) it has nothing
+to reconnect with, so a **sustained** link is the detector: no sustained link
+means no fresh pair was accepted and nothing was re-persisted.
+
+Do **not** use "did the stored session AA change?" as that detector, however
+natural it looks. `rf_generate_session_aa()` is only called on the *no bond yet*
+boot branch (`rf_task.c:3411`); a bonded boot loads `rec.session_aa` (`:3426`),
+so a same-peer re-pair accepted during the boot window re-persists with the
+**same** AA. An interim version of this file drew a conclusion from an unchanged
+AA — that reasoning was wrong, even though the verdict it reached happens to
+survive the corrected test.
+
+Why the window is so hard to hit: it is 10 x 300 ms with only the ODD steps on
+the pair AA (~1.5 s of opportunity), and the dongle camps on a single
+`RF_PROTO_RECONNECT_CAMP_CHANNEL` while the keyboard hops. Reproducing OD-01
+needs a way to force that rendezvous; this bench has not found one, so the A1
+key-preservation fix currently rests on `test_bond_key_preservation.py` and code
+review rather than on hardware.
 
 Still not covered on CH570: the six AES/CCM arms, the A/B power-cut acceptance,
 the encrypted soak and reacquire legs, and anything on CH572.
