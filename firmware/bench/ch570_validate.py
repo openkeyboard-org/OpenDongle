@@ -402,13 +402,18 @@ def main():
     log(f"dongle rebooting; holding {REBOOT_LEAD:.1f}s, then arming the "
         f"keyboard so its window overlaps the dongle's boot")
     time.sleep(REBOOT_LEAD)
+    # Mark BEFORE arming, not after the reopen. The mark exists to exclude the
+    # CONNECTED the keyboard emits while reconnecting to the OLD bond during the
+    # 11 s settle far above; arming is already long past that, so bounding the
+    # arming is sufficient and safe. Bounding the REOPEN is not: _reopen_iap()
+    # takes as long as the dongle needs to re-enumerate, and on a chip that
+    # reboots faster than CH570 the pair completes inside that gap -- the
+    # keyboard's CONNECTED then lands BEFORE the mark and is filtered out, so a
+    # successful pair reports "keyboard never reported CONNECTED" while the
+    # dongle plainly says conn=connected with a valid bond. Measured on CH592.
+    pair_since = time.time() - t0
     _arm_pair(kbd)
     dg = _reopen_iap()
-    # Everything before this instant belongs to the previous bond: the keyboard
-    # reconnects to the old bond during the settle above and reports CONNECTED
-    # for it. Scope the wait to after the reset or that stale CONNECTED makes
-    # any run look like it paired.
-    pair_since = time.time() - t0
     log(f"dongle back up ({dg.status_line()}), bond {dg.bond_flags()}; "
         f"waiting for a FRESH pair")
 

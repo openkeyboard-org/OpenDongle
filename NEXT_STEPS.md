@@ -234,6 +234,35 @@ dongle meant it could not verify the announce, so the fresh arm showed 0 frames
 throughout. That is the same ordering rule TODO.md now states — provision before
 the encrypted reconnect.)
 
+**AND IT IS NOT CH570-SPECIFIC EITHER (2026-08-23, CH592F dongle on the bench).**
+The same experiment on the CH592 dongle (pinned image `44899EB2`), which takes
+the OTHER hop-anchor branch (`RF_TASK_EXECUTOR_TMOS 1`):
+
+| chip | arm | held past 75 s | deaths | frames |
+|---|---|---|---|---|
+| CH570 | fresh | 1/3 | 3.5 s, 3.0 s | 2574, 0, 0 |
+| CH570 | reconnect | 1/3 | 3.2 s, 3.2 s | 2618, 0, 0 |
+| CH592 | fresh | 2/3 | 37.5 s | 0, 1069, 2608 |
+| CH592 | reconnect | 2/3 | 2.4 s | 2510, 0, 2617 |
+
+CH592 holds more links than CH570 (4/6 vs 2/6) but **still drops them**, at
+2.4 s and 37.5 s. At n=3 per arm that difference is not meaningful; what IS
+meaningful is that deaths occur on both chips and both pairing paths. Combined
+with the fresh-vs-reconnect equivalence above, that leaves the hop-anchor
+asymmetry explaining neither axis of the data — it is chip-specific and
+path-specific, and the failure is neither.
+
+A third mode showed up here too: CH592 fresh cycle 1 stayed connected for the
+whole 75 s window and carried **zero** verified frames. So "up" and "carrying
+traffic" are separable.
+
+**Caveat on the zero-frame counts, stated so nobody over-reads the table.**
+Half these links (6/12) carried no verified frames, but `ch570_validate.py` --
+which sequences the pair/key/provision steps more carefully -- passes G2 at
+roughly 80-100% on both chips. So an unknown part of that 50% is this
+lifetime harness's own ordering rather than the firmware. The DEATHS are the
+robust datum; the zero-frame rate is not yet a defect rate.
+
 **Still the decisive measurement:** a time-correlated on-air capture on channel 8
 plus the first data channel (28 for `type_tag 0x02`), decoding both AAs, looking
 for `kbd LEN10 -> dongle LEN15 -> ~50 ms -> LEN15 burst -> data-channel polls`
