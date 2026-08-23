@@ -335,10 +335,29 @@ connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
       3.3x headroom**, reproducing the original reading that the P0 #4 cut was
       based on. The pinned image was restored and re-verified afterwards
       (slot A `0xD0BA5455`, slot B `0xA927252B`).
-- [ ] Still outstanding on the stack matrix: the **forced fault-handler pass**
-      (no safe way to provoke a fault from the bench was found), and the whole
-      **CH592** half — that chip's floor and BLE-arena scan question
-      (`stack_watermark.h:72`, still an open review thread) need its own run.
+- [x] **CH592 stack re-measure — DONE 2026-08-23, and it settles the BLE-arena
+      review thread.** Same method on the CH592F dongle: idle **384 B**, peak
+      **516 B** after the full production crypto path, and 412-476 B across two
+      forced-outage reacquire cycles and two reset boot-window cycles. Peak 516 B
+      of the **1824 B** stack region is **1308 B spare, 3.5x headroom** —
+      reproducing the historical CH592 figure. Pinned image restored and
+      re-verified (slot A `0x20E39055`/50308, slot B `0x3C396A1F`/50388, device
+      reporting build `44899EB2`).
+
+      On the open `stack_watermark.h:72` thread (PR #26): **the finding is
+      correct for that branch, and is already fixed on the stacked #27.** #26's
+      copy scans from `_end` unconditionally; `57d35dd` on `em-m2-robustness`
+      made the floor per-chip (`_susrstack` on CH592, `_end` on CH570) and
+      switched `handle_stack_watermark()` to report `stack_watermark_floor()`.
+      Verified on silicon today: the device reported floor `0x200060D0`, exactly
+      `_susrstack = _rf_arena_end` from the link map, giving the correct 1824 B
+      stack span. Scanning from `_end` (`0x20004718`) would have spanned
+      **8408 B**, wrongly including **6584 B** of RF arena, heap and fault
+      record — so the reported depth really would have been bogus, as the review
+      said. Both hunks live inside `#if DONGLE_STACK_WATERMARK`, which product
+      builds leave off, so this is byte-neutral either way.
+- [ ] Still outstanding on the stack matrix: the **forced fault-handler pass** —
+      no safe way to provoke a fault from the bench was found on either chip.
 - [ ] Factory flash + bond-clear-and-verify on both chips (manufacturing
       identity: a factory image does not clear a CH592 DataFlash bond).
 - [ ] **Re-pin digests**: refresh `firmware/RELEASE-NOTES.md` build ids and
