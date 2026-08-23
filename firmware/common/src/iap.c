@@ -464,7 +464,10 @@ static void handle_crypt_last_fail(void)
 {
     /* [ack][len] latched(1) fail_len(1) session(4) counter(4) expect1(8)
      * expect2(8) frame(22) same_differs(4) bb_during_aes(4) kat_run(1)
-     * kat_fail(1) = 57-byte payload. */
+     * kat_fail(1) = 58-byte payload, which is what resp[1] reports since it
+     * is derived from sizeof(resp) - 2. (The comment said 57; the code was
+     * right. Host parsers key off this comment, so an off-by-one here is an
+     * off-by-one in every reader that trusts it.) */
     uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u] = {0};
     uint8_t i;
 

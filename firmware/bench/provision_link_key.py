@@ -42,6 +42,7 @@ REPORT_SIZE = 65          # 1 report-ID byte + 64-byte payload
 
 CMD_HANDSHAKE = 0x5A
 CMD_GETDEVINFO = 0x84
+ACK_OK = 0x0F          # send_status4()'s ack byte (iap.c)
 CMD_BOND_WRITE = 0x87
 CMD_BOND_READ = 0x88
 ACK_HANDSHAKE = 0xA5
@@ -186,15 +187,37 @@ class Iap:
         return bytearray(r[3:3 + BOND_SIZE]), status
 
     def bond_write(self, rec: bytes):
+        """Status byte from BondWrite, parsed at its FIXED position.
+
+        Every BondWrite path in the firmware answers via send_status4(), which
+        sends exactly {ACK_OK, 0x01, status, 0x00} (iap.c). So the status is at
+        index 2 and nowhere else.
+
+        The previous version seeded `status` from r[1] -- the LENGTH byte --
+        and then scanned indices 1..3 for the first value that happened to be a
+        known status code. Both halves are unsound: the length byte 0x01 is
+        itself a valid status ("NV erase failed"), and the trailing pad 0x00 is
+        the SUCCESS code, so a malformed or short reply could be reported as a
+        successful write. Require the ack and the length instead.
+        """
         r = self.xfer(CMD_BOND_WRITE, bytes(rec))
         if not r:
             raise SystemExit("BondWrite got no reply")
-        status = r[1] if r[0] == 0x0F else r[-1]
-        for idx in (1, 2, 3):
-            if idx < len(r) and r[idx] in WRITE_STATUS:
-                status = r[idx]
-                break
-        return status
+        if len(r) < 3 or r[0] != ACK_OK or r[1] != 0x01:
+            raise SystemExit(
+                f"BondWrite: malformed reply (want ack 0x{ACK_OK:02X} len 0x01, "
+                f"got {r[:4].hex(' ')}); refusing to guess a status")
+        return r[2]
+
+    def disarm(self):
+        """Drop the mutation session. GetDevInfo(0) is the disarm, mirroring
+        tools/src/iap.rs op_disarm. Best-effort: this runs on the way out, so a
+        failure here must not mask the error that is actually being reported.
+        """
+        try:
+            self.xfer(CMD_GETDEVINFO, struct.pack("<I", 0))
+        except OSError:
+            pass
 
 
 def checksum(rec: bytes) -> int:
@@ -302,6 +325,13 @@ def main() -> int:
             print("Give the SAME key to the keyboard, or the link authenticates nothing:")
             print(f"  A6-style bench frame 0xAE — see OpenController firmware/bench")
     finally:
+        # Drop the mutation session before letting go of the device. arm()
+        # opens it and every exit path used to just close the fd -- --show
+        # returns early, so a read-only invocation left the dongle armed for
+        # BondWrite until something else disarmed or reset it. Disarm first,
+        # then close; disarm() is best-effort so it cannot mask a real error
+        # on the way out. tools/src/flows.rs follows the same protocol.
+        dev.disarm()
         dev.close()
     return 0
 

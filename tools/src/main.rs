@@ -118,6 +118,21 @@ impl Cli {
     }
 }
 
+/// Single-quote a path for the printed hand-off line. The line exists to be
+/// copied into a shell, so an unquoted path containing a space (or any other
+/// shell metacharacter) would be split into the wrong arguments by whoever
+/// pastes it. POSIX single quotes are literal apart from `'` itself, which is
+/// escaped the usual `'\''` way.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/=:+,@".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// The copy-and-run `openboot flash` hand-off line. Always names the .obb
 /// bundle -- never the family-guard `--image` .bin, which is host-side input
 /// that OpenBoot must not be handed: it is slot-A-based, and OpenBoot
@@ -125,7 +140,7 @@ impl Cli {
 /// slot by luck (firmware/BOOT.md, "Updating: use the bundle").
 fn flash_next_step(vid: u16, pid: u16, bundle: Option<&Path>, suffix: &str) -> String {
     let artifact = match bundle {
-        Some(p) => p.display().to_string(),
+        Some(p) => shell_quote(&p.display().to_string()),
         None => "<chip>-product.obb".to_string(),
     };
     format!("next: openboot --vid 0x{vid:04X} --pid 0x{pid:04X} flash --force {artifact}{suffix}")
@@ -147,6 +162,22 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                  slot-A .bin (or .hex). Pass that as --image and the bundle as \
                  --bundle -- the bundle is what OpenBoot flashes afterwards",
                 ipath.display()
+            ));
+        }
+    }
+
+    // The mirror of the guard above. --bundle is never read here; it is only
+    // interpolated into the copy-and-run `openboot flash` line, so a .bin
+    // passed here is printed as if it were flashable. Copying that line hands
+    // OpenBoot a slot-A-based flat image while it alternates its write target,
+    // which is right for one slot by luck and wrong for the other.
+    if let Some(bpath) = &cli.bundle {
+        if !image_arg_is_bundle(bpath) {
+            return Err(anyhow!(
+                "--bundle {} is not an .obb bundle; OpenBoot needs the bundle so \
+                 it can pick the variant for the slot it is actually writing. \
+                 Pass the flat slot-A .bin as --image instead",
+                bpath.display()
             ));
         }
     }
@@ -598,6 +629,29 @@ mod tests {
         assert!(!image_arg_is_bundle(Path::new("slot-a.bin")));
         assert!(!image_arg_is_bundle(Path::new("app.hex")));
         assert!(!image_arg_is_bundle(Path::new("no-extension")));
+    }
+
+    // --bundle is only ever printed into a copy-and-run shell line, so both
+    // of these are about what a human ends up pasting.
+    #[test]
+    fn shell_quote_only_quotes_when_it_must() {
+        assert_eq!(shell_quote("ch592-product.obb"), "ch592-product.obb");
+        assert_eq!(
+            shell_quote("build/ch570-product.obb"),
+            "build/ch570-product.obb"
+        );
+        assert_eq!(shell_quote("my builds/a.obb"), "'my builds/a.obb'");
+        assert_eq!(shell_quote("it's.obb"), r"'it'\''s.obb'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn flash_next_step_quotes_a_path_with_spaces() {
+        let line = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("my builds/a.obb")), "");
+        assert!(
+            line.contains("'my builds/a.obb'"),
+            "unquoted path in: {line}"
+        );
     }
 
     // The dongle's bootloader shares the application's VID:PID, so these

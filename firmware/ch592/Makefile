@@ -315,7 +315,12 @@ CFLAGS += -DDONGLE_BUILD_PROFILE=$(BUILD_PROFILE_NUM) -DDONGLE_BUILD_ID=0x$(BUIL
 # explicit, greppable override; the .obb bundle is a release artifact with no
 # bench use, so it has none.
 check-profile:
-	@test "$(PROFILE)" = product || test -n "$(ALLOW_BENCH_FACTORY)" || { \
+#	The opt-out tests for the EXACT value 1, not merely a non-empty string:
+#	ALLOW_BENCH_FACTORY=0 arriving from a script or a stale environment reads
+#	as "no" to a human and would otherwise satisfy `test -n`, silently
+#	packaging a bench image that carries the compiled-in key. Same rule as the
+#	ALLOW_BONDED_FLASH guard below.
+	@test "$(PROFILE)" = product || test "$(strip $(ALLOW_BENCH_FACTORY))" = "1" || { \
 	  echo "refusing to package the '$(PROFILE)' profile: it carries the" >&2; \
 	  echo "compiled-in bench key and UART telemetry (dongle_target.h)." >&2; \
 	  echo "For the bench rig only: make PROFILE=bench ALLOW_BENCH_FACTORY=1 factory" >&2; \
