@@ -335,9 +335,18 @@ connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
       leg only needs porting onto the USB OpenBoot path.
 - [ ] Suspend/resume replay bench case: queue a mouse or consumer report, force
       a host suspend/resume, confirm no stale/stuck report (M2 EP2/EP3 fix).
-- [ ] EP6 pipelined-OUT + bus-reset-mid-IAP on **CH592** as well
-      (`firmware/bench/usb_robustness_test.py` — done on CH570). The reset leg
-      needs `USBDEVFS_RESET`, i.e. root, which this session did not have.
+- [x] **EP6 pipelined-OUT + bus-reset-mid-IAP on CH592 — DONE 2026-08-23, both
+      legs PASS** (`firmware/bench/usb_robustness_test.py`, pinned image
+      `44899EB2`). Pipelined (finding 8): the endpoint still answers handshake +
+      status after 8 unread OUTs. Reset (finding 13): the armed mutation session
+      is disarmed by the bus reset, and the device answers again after re-arming.
+      The reset leg needed root for `USBDEVFS_RESET`. Device clean afterwards —
+      bond valid, `flags 0x03`, encryption active, checksum valid, no fault.
+
+      Note what the reset PASS does *not* cover: the held `iap.c:76` finding is
+      about `IAP_Reset` re-opening the command dispatcher after the **reboot**
+      sequence is committed, which is the reboot state machine rather than the
+      bus-reset path. That thread stays open.
 - [ ] CH570 26-bit clamp: wall-clock the reacquire watchdog against ~2.125 s
       (qualitatively confirmed via forced reconnect; the plan wants a measured
       wall-clock case).
