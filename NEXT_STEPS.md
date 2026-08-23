@@ -291,6 +291,36 @@ roughly 80-100% on both chips. So an unknown part of that 50% is this
 lifetime harness's own ordering rather than the firmware. The DEATHS are the
 robust datum; the zero-frame rate is not yet a defect rate.
 
+**ISOLATED 2026-08-23: the instability appears only when encryption is ACTIVE.**
+Same firmware, same bench session, same harness, same metric (keyboard `0x32` to
+`0x33`); the ONLY difference is whether the link is keyed:
+
+| arm | held past 75 s | deaths |
+|---|---|---|
+| **inert** — crypto compiled in, never keyed | **12/12** | none |
+| **keyed** — same binary, encryption live | **4/12** | 34.7, 25.4, 15.0, 18.6, 24.3, 31.1, 9.0, 14.2 s |
+
+**Fisher exact two-sided p = 0.00135.**
+
+This is a stronger control than the plaintext-build comparison that was planned,
+and supersedes it: it toggles the feature at RUNTIME on one binary, so build
+differences, code size and timing shifts are all held constant. A
+`DONGLE_RF_CRYPT=0` build would have confounded exactly those.
+
+What it means for shipping: the deaths are **not** a pre-existing radio issue.
+The plain RF link is rock solid — 12/12, zero deaths. They appear when the
+encrypted path is switched on, so this is a defect these branches introduce for
+anyone who actually uses the feature. It does not affect a plaintext bond, which
+is the default, but "encryption is negotiated, never required" means a keyed
+bond is the whole point of the feature.
+
+That also kills a third hypothesis. Deaths were already shown to be neither
+path-specific (fresh == reconnect) nor chip-specific (CH570 and CH592 both), and
+now they are not RF-layer either: the same radio, same pairing, same firmware is
+stable until a key is installed. Look in the encrypted RX/session path — the
+session mint/announce and the force-release/silence guards are the obvious
+candidates, since those are what a keyed bond switches on.
+
 **Still the decisive measurement:** a time-correlated on-air capture on channel 8
 plus the first data channel (28 for `type_tag 0x02`), decoding both AAs, looking
 for `kbd LEN10 -> dongle LEN15 -> ~50 ms -> LEN15 burst -> data-channel polls`
