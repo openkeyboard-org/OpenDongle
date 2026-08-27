@@ -14,6 +14,7 @@ Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from V
 | `lib/OpenDongle.kicad_sym` | Project-owned CH592D and four-pin PCB USB symbols |
 | `lib/OpenDongle.pretty/` | Project-owned USB edge connector and WCH antenna footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
+| `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
 Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` paths, so the project resolves every symbol and footprint from this directory and does not depend on global KiCad configuration. Nothing needs to be added to your global symbol or footprint library tables.
 
@@ -74,6 +75,27 @@ The single ERC warning is expected and understood:
 ```
 
 This is the PB15 boot strap sitting on the GND net, described above. It is not a defect. Fitting the pull-down resistor proposed under [Known issues](#known-issues-and-next-revision) removes PB15 from the GND net and clears the warning.
+
+## Fabrication outputs
+
+`fab/` holds the exported outputs: the schematic as PDF, and the gerber/NC
+drill set under `fab/gerbers/`. The KiCad sources remain the design of
+record — regenerate the exports with KiCad 10 whenever the schematic or
+layout changes:
+
+```sh
+kicad-cli sch export pdf -o fab/OpenDongle-CH592-schematic.pdf OpenDongle-CH592.kicad_sch
+kicad-cli pcb export gerbers -o fab/gerbers/ \
+    -l F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts \
+    --no-protel-ext --check-zones OpenDongle-CH592.kicad_pcb
+kicad-cli pcb export drill -o fab/gerbers/ --excellon-separate-th \
+    --generate-map --map-format gerberx2 OpenDongle-CH592.kicad_pcb
+```
+
+Anyone ordering from these files must still pass the stackup and antenna
+requirements below to the fabricator; the gerbers alone do not carry them.
+(JLC-oriented assembly outputs from the Fabrication Toolkit plugin go to
+`production/`, which stays untracked.)
 
 ## Fabrication requirements
 

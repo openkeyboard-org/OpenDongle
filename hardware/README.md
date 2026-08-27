@@ -11,6 +11,8 @@ OpenDongle is a compact USB Type-A 2.4 GHz wireless receiver. This directory con
 
 Both implementations share the same concept: a PCB-edge USB Type-A connector, a WCH-derived 2.4 GHz PCB antenna on 0.8 mm FR-4, and a two-layer board small enough to sit inside a standard nano-receiver shell. They differ in the MCU and therefore in the power and decoupling arrangement.
 
+Each implementation directory also commits its exported outputs under `fab/`: the schematic as PDF and the gerber/NC drill set. The KiCad sources are the design of record; each README gives the `kicad-cli` commands that regenerate the exports.
+
 See each implementation's README for detailed electrical, fabrication, assembly, and licensing information.
 
 ## Shared fabrication constraints
