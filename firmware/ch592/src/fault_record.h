@@ -1,3 +1,9 @@
+/*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef CH592_FAULT_RECORD_H
 #define CH592_FAULT_RECORD_H
 

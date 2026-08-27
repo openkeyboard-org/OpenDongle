@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Timing HAL seam — the RF deadline scheduler.
  *
  * The shared RF task schedules all of its time-based work through this seam so

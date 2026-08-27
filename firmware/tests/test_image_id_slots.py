@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Slot-awareness of the ODG2 image-identity validator.
 
 Under OpenBoot's A/B slots an application is linked once per slot, so "the app

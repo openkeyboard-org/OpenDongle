@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * IAP (In-Application Programming) command handler.
  *
  * Implements the minimum subset of the vendor's McuProgramIAP_* protocol

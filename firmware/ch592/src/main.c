@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Target: WCH CH592F (QingKe RISC-V4F, 60MHz)
  *
  * Build requirements (verified 2026-05-17 via ch592f-irq-test/wch-rfphy-rebuild):

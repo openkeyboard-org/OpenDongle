@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- software AES-128 forward cipher.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Encrypt-only AES-128 per FIPS-197, used by the CH570 hal_aes backend because
  * that silicon has no hardware AES engine (see hal_aes.h for the measurement).

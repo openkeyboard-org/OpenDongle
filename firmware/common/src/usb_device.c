@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * USB HID Composite Device Driver (shared CH592 / CH582 / CH570)
  *
  * 5-interface HID device: boot keyboard, boot mouse, composite

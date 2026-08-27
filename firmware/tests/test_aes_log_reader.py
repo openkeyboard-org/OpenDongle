@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """The AES validation log reader, exercised without a device.
 
 The reader is the piece that decides whether a hardware run passed. Until now

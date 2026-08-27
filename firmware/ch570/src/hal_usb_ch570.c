@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH570 (CH57x) USB pin/PHY HAL.
  *
  * CH570 shares PA0/PA1 between USB and two-wire debug. USB-capable images must

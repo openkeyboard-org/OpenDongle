@@ -9,6 +9,7 @@
  *
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * 2.4G RF Receiver Task
  *
  * Reverse-engineered protocol parameters from stock firmware.

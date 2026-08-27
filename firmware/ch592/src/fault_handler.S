@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * N23 controlled fatal-fault policy for CH592.
  *
  * Both handler bodies remain flash-resident, free of software sp/gp references,

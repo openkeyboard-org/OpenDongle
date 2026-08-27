@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Pin the wrapper contract in `validation/openboot_ab_bench.py`.
 
 This wrapper exists to add bench-local safety to OpenBoot's pinned A/B harness

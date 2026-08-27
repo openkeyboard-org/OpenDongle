@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle — CH570 hal_dispatch backing.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Deferred events are a volatile pending bitmask drained by RF_TaskPump()
  * once per main-loop pass (hal_dispatch.h contract: coalescing bitmask,

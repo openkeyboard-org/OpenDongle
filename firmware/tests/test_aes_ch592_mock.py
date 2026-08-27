@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """The CH592 hardware AES backend's failure path, which hardware cannot reach.
 
 `hal_aes_encrypt_block()` on CH592 starts a hardware engine and polls it. If the

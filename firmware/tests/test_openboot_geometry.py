@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """OpenBoot A/B slot wiring: the values this build shares with the bootloader.
 
 Replaces test_compose_factory.py. Factory composition moved into OpenBoot when

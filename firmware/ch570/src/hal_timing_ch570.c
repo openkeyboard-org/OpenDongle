@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- CH570 timing HAL.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Implements hal_timing.h directly over the CH570 HSE-TMR software-deadline mux
  * (sched.h `st_*`, implemented in main.c). This is the convergence target: the
