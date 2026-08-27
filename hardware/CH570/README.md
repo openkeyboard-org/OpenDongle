@@ -12,6 +12,7 @@ OpenDongle CH570 is a compact USB Type-A 2.4 GHz receiver built around the WCH C
 | `lib/OpenDongle.kicad_sym` | Project-owned CH570Q and four-pin PCB USB symbols |
 | `lib/OpenDongle.pretty/` | Project-owned USB edge connector and WCH antenna footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
+| `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
 Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` paths, so the project resolves every symbol and footprint from this directory and does not depend on global KiCad configuration. Nothing needs to be added to your global symbol or footprint library tables.
 
@@ -37,6 +38,27 @@ This design passes both checks cleanly with KiCad 10:
 kicad-cli sch erc --severity-all OpenDongle-CH570.kicad_sch     # 0 errors, 0 warnings
 kicad-cli pcb drc --severity-all --schematic-parity OpenDongle-CH570.kicad_pcb   # 0 violations, 0 parity issues
 ```
+
+## Fabrication outputs
+
+`fab/` holds the exported outputs: the schematic as PDF, and the gerber/NC
+drill set under `fab/gerbers/`. The KiCad sources remain the design of
+record — regenerate the exports with KiCad 10 whenever the schematic or
+layout changes:
+
+```sh
+kicad-cli sch export pdf -o fab/OpenDongle-CH570-schematic.pdf OpenDongle-CH570.kicad_sch
+kicad-cli pcb export gerbers -o fab/gerbers/ \
+    -l F.Cu,B.Cu,F.Paste,B.Paste,F.Silkscreen,B.Silkscreen,F.Mask,B.Mask,Edge.Cuts \
+    --no-protel-ext --check-zones OpenDongle-CH570.kicad_pcb
+kicad-cli pcb export drill -o fab/gerbers/ --excellon-separate-th \
+    --generate-map --map-format gerberx2 OpenDongle-CH570.kicad_pcb
+```
+
+Anyone ordering from these files must still pass the stackup and antenna
+requirements below to the fabricator; the gerbers alone do not carry them.
+(JLC-oriented assembly outputs from the Fabrication Toolkit plugin go to
+`production/`, which stays untracked.)
 
 ## Fabrication requirements
 
