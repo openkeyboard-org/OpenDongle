@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Shared RF-task public API + event vocabulary (CH59x-family shape; P5).
  *
  * This is the merged rf_task.c's contract, shared by all three chips (CH592,

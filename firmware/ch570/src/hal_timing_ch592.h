@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * Family-name forwarding header (CH570 unified rf_task build): the shared
  * common/src/rf_task.c does `#include "hal_timing_ch592.h"` for the CH59x
  * task-dispatch shim's side entries. On CH570 those entries are thin stubs

@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- CH592 AES HAL (hardware backend).
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Implements hal_aes.h over the CH592's undocumented hardware AES-128 engine.
  *

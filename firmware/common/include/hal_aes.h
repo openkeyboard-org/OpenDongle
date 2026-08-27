@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * AES-128 block-cipher HAL seam.
  *
  * One seam, two backends, identical output. CH592 has a hardware AES-128 engine

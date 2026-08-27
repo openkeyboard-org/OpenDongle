@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH592 timing-HAL seam (hal_timing.h implementation) — task-dispatch shim.
  *
  * Unlike CH570's true HSE-TMR IRQ mux, CH59x cannot issue RF calls from a timer

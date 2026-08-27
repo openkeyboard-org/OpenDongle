@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH592 RF-PHY HAL seam — private declarations.
  *
  * CH59x implements hal_rf.h over the LIBCH59xBLE radio (RF_Config /

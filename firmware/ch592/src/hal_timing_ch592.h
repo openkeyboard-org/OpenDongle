@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH592 timing-HAL seam — private declarations.
  *
  * CH59x implements hal_timing.h as a TASK-DISPATCH SHIM (see the relaxed

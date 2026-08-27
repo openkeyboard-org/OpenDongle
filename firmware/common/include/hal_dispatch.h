@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Dispatch HAL seam — deferred-event posting for the shared RF task.
  *
  * The RF task defers non-timing-critical work out of IRQ context (bond

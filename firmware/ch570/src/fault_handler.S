@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * N23 controlled fatal-fault policy for CH570.
  *
  * Both handlers are strong, flash-resident, call-free, non-returning, and use

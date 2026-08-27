@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Shared 2.4 GHz protocol facts (Convergence phase A).
  *
  * Single source of truth for the on-air protocol constants and the

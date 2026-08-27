@@ -1,3 +1,9 @@
+/*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef USB_DESCRIPTORS_H
 #define USB_DESCRIPTORS_H
 

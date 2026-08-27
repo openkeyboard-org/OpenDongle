@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * BB_IRQHandler trampoline for the CH59x BLE library.
  *
  * The CH59x SDK's ble_task_scheduler.S only provides a strong override for

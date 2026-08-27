@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- CH570 RF PHY HAL.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Implements hal_rf.h directly over the CH570 RFIP radio
  * (RFRole_BasicInit / RFIP_SetRx / RFIP_StartTx). This is the PHY seam: the

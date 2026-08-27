@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- CH592 RF PHY HAL.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Implements hal_rf.h over the LIBCH59xBLE radio (RF_Config / RF_SetChannel /
  * RF_Rx / RF_Tx / RF_Shut). This is the PHY seam: rf_task drives the radio

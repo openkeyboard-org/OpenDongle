@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * USB pin/PHY HAL seam.
  *
  * The shared USB device driver (fw-common/src/usb_device.c) is chip-agnostic

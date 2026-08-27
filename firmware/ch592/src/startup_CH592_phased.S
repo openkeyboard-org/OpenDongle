@@ -1,6 +1,12 @@
 /*
- * Phased CH592F startup — fork of vendor startup_CH592.S with SRAM
- * markers at each reset phase. Sentinel byte at 0x20005800 advances
+ * Phased CH592F startup — fork of WCH's vendor startup_CH592.S with SRAM
+ * markers at each reset phase.
+ *
+ * Copyright 2021 Nanjing Qinheng Microelectronics Co. LTD (WCH)
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Sentinel byte at 0x20005800 advances
  * through 0xC0 .. 0xC5 as reset progresses and STOPS there. A value below 0xC5
  * pinpoints a wedge earlier in startup; 0xC5 means startup reached the main
  * handoff (not proof main ran). Read without depending on GDB
@@ -21,7 +27,7 @@
  *          reached the main handoff, NOT proof main() ran)
  *
  * This remains a narrow fork of
- * ~/Development/Personal/ch592/EVT/EXAM/SRC/Startup/startup_CH592.S: the
+ * third_party/openwch/ch592/EVT/EXAM/SRC/Startup/startup_CH592.S: the
  * marker stores and the early N23 NMI/HardFault vector install are the only
  * deliberate sequencing additions.
  */
