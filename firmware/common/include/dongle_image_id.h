@@ -1,8 +1,10 @@
-/* OpenDongle v2 application image identity and integrity header. */
+/*
+ * OpenDongle v2 application image identity and integrity header.
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
  * SPDX-License-Identifier: Apache-2.0
- *
+ */
+
 #ifndef DONGLE_IMAGE_ID_H
 #define DONGLE_IMAGE_ID_H
 
