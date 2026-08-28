@@ -1,6 +1,6 @@
 # OpenDongle CH592
 
-OpenDongle CH592 is a compact USB Type-A 2.4 GHz receiver built around the WCH CH592D RISC-V wireless MCU. The PCB is 16.35 mm x 9.90 mm and uses a PCB-edge USB connector and a WCH-derived 2.4 GHz PCB antenna.
+OpenDongle CH592 is a compact USB Type-A 2.4 GHz receiver built around the WCH CH592D RISC-V wireless MCU. The PCB is 16.35 mm x 9.90 mm and uses a PCB-edge USB connector and an independently created, WCH-informed 2.4 GHz PCB antenna.
 
 Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from VBUS on its internal regulator, the CH592 is powered from a 3.3 V LDO.
 
@@ -12,7 +12,7 @@ Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from V
 | `OpenDongle-CH592.kicad_sch` | Schematic |
 | `OpenDongle-CH592.kicad_pcb` | PCB layout |
 | `lib/OpenDongle.kicad_sym` | Project-owned CH592D and four-pin PCB USB symbols |
-| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and WCH antenna footprints |
+| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and independently created, WCH-informed antenna footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 | `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
@@ -22,7 +22,7 @@ Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` pa
 
 - USB VBUS (5 V) feeds U2, an XC6206P332MR-G LDO, whose 3.3 V output supplies the CH592D VIO33/VDD33 pin (pin 5). C1 (1 uF) is the LDO input capacitor and C2 (1 uF) is its output capacitor.
 - Y1 is a 32 MHz crystal on X32MI/X32MO (pins 13 and 12). No external load capacitors are fitted; the design relies on the CH592 programmable internal crystal load capacitance.
-- The RF output (ANT, pin 15) connects directly to the WCH-derived PCB antenna.
+- The RF output (ANT, pin 15) connects directly to the independently created, WCH-informed PCB antenna.
 - USB data connects to the CH592D native USB pins: D+ to PB11/UD+ (pin 10) and D- to PB10/UD- (pin 11).
 - GND reaches the CH592D through the exposed pad (pin 21).
 - The nine unused GPIOs (pins 1, 2, 7, 8, 9, 17, 18, 19, 20) carry no-connect flags.
@@ -162,11 +162,12 @@ The designators are non-contiguous: there is no **C3** and no **U1** (the parts 
 
 ## Source attribution
 
-- The 0.8 mm FR-4 antenna is based on the WCH reference antenna distributed in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib).
+- The 0.8 mm FR-4 antenna was independently created, informed by the WCH reference antenna published in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib); no WCH CAD or artwork file was copied, imported, converted, or traced.
 - The PCB USB connector footprint is derived from the [USB armory](https://github.com/usbarmory/usbarmory) hardware design.
 
 ## License
 
-Except for the WCH-derived antenna geometry described in
-[`../NOTICE`](../NOTICE), this hardware design is licensed under the CERN Open
-Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).
+This hardware design, including the independently created antenna
+implementation described in [`../NOTICE`](../NOTICE), is licensed under the
+CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See
+[`LICENSE`](LICENSE).

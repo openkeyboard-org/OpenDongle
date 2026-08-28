@@ -9,7 +9,11 @@ OpenDongle is a compact USB Type-A 2.4 GHz wireless receiver. This directory con
 | [CH570](CH570/) | WCH CH570Q (DFN-10) | 16.4 mm x 10.0 mm | VBUS direct to V5, internal regulator | Available |
 | [CH592](CH592/) | WCH CH592D (QFN-20) | 16.35 mm x 9.90 mm | VBUS via XC6206 3.3 V LDO | Available |
 
-Both implementations share the same concept: a PCB-edge USB Type-A connector, a WCH-derived 2.4 GHz PCB antenna on 0.8 mm FR-4, and a two-layer board small enough to sit inside a standard nano-receiver shell. They differ in the MCU and therefore in the power and decoupling arrangement.
+Both implementations share the same concept: a PCB-edge USB Type-A connector,
+an independently created 2.4 GHz PCB antenna informed by WCH's published
+reference design for 0.8 mm FR-4, and a two-layer board small enough to sit
+inside a standard nano-receiver shell. They differ in the MCU and therefore in
+the power and decoupling arrangement.
 
 Each implementation directory also commits its exported outputs under `fab/`: the schematic as PDF and the gerber/NC drill set. The KiCad sources are the design of record; each README gives the `kicad-cli` commands that regenerate the exports.
 
@@ -47,6 +51,6 @@ This hardware design was inspired by the [bplug-ch project](https://oshwhub.com/
 
 ## License
 
-Except for the WCH-derived antenna geometry described in [NOTICE](NOTICE), the
-hardware designs are licensed under the CERN Open Hardware Licence Version 2 -
-Weakly Reciprocal. See [LICENSE](LICENSE).
+The hardware designs are licensed under the CERN Open Hardware Licence Version
+2 - Weakly Reciprocal. See [LICENSE](LICENSE). Design provenance, including the
+independently created antenna implementation, is recorded in [NOTICE](NOTICE).

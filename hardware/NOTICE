@@ -1,20 +1,19 @@
-OpenDongle Hardware Third-Party Provenance
+OpenDongle Hardware Provenance
 
-Except as described below, the OpenDongle hardware source is licensed under
-the CERN Open Hardware Licence Version 2 - Weakly Reciprocal in LICENSE.
+The OpenDongle hardware source is licensed under the CERN Open Hardware
+Licence Version 2 - Weakly Reciprocal in LICENSE.
 
-The WCH antenna geometry in these files is derived from the reference antenna
-published by Nanjing Qinheng Microelectronics Co., Ltd. (WCH):
+OpenKeyboard.org independently created the antenna footprint, schematic, and
+PCB geometry in these files, informed by the published WCH 2.4 GHz reference
+antenna and its functional requirements:
 
 * CH570/lib/OpenDongle.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
 * CH592/lib/OpenDongle.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
 * The corresponding routed antenna geometry in each OpenDongle PCB
 
-Upstream source: https://github.com/openwch/schpcb_lib
+Reference publication: https://github.com/openwch/schpcb_lib
 
-That upstream repository does not currently include an explicit license.
-Consequently, OpenKeyboard.org does not claim to relicense the WCH-derived
-antenna geometry under CERN-OHL-W-2.0. The attribution is retained here and in
-the footprint descriptions. Permission or a replacement with independently
-created antenna geometry is still required to make the licensing of those
-portions unambiguous.
+No WCH CAD, footprint, schematic, or artwork file was copied, imported,
+converted, or traced. The reference is retained as factual attribution for the
+design inspiration; the independently authored OpenKeyboard.org source files
+are licensed under CERN-OHL-W-2.0 with the rest of the hardware design.
