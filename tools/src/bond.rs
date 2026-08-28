@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Read-only decoding and display for the firmware's persistent bond record.
 
 use anyhow::{bail, Result};

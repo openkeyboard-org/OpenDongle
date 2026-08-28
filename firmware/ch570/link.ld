@@ -1,3 +1,10 @@
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * OpenDongle CH570 linker script, based on WCH CH570 SDK link scripts.
+ * See ../NOTICE for provenance.
+ */
+
 ENTRY( _start )
 
 /* The MEMORY block is GENERATED per slot into $(BUILD)/memory.ld and pulled in

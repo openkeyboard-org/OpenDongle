@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Decoder and display for the production status command (0x91).
 
 use anyhow::{bail, Result};

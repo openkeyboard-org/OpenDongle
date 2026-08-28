@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cross-platform USB-HID maintenance tool for the OpenDongle dongle (WCH
 //! CH592F / CH570). Reads device/bond/fault status over the vendor IAP
 //! interface and reboots the dongle into the OpenBoot bootloader for

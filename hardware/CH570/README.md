@@ -108,4 +108,6 @@ AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and ar
 
 ## License
 
-This hardware design is licensed under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).
+Except for the WCH-derived antenna geometry described in
+[`../NOTICE`](../NOTICE), this hardware design is licensed under the CERN Open
+Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).

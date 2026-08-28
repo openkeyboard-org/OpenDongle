@@ -1,3 +1,6 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
+#
 # OpenDongle CH570D production firmware.
 
 # Grouped targets (`a b &: prereqs`) need GNU Make 4.3. Older Make parses `&`
