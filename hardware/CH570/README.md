@@ -1,6 +1,6 @@
 # OpenDongle CH570
 
-OpenDongle CH570 is a compact USB Type-A 2.4 GHz receiver built around the WCH CH570Q RISC-V wireless MCU. The PCB is 16.4 mm x 10.0 mm and uses a PCB-edge USB connector and a WCH-derived 2.4 GHz PCB antenna.
+OpenDongle CH570 is a compact USB Type-A 2.4 GHz receiver built around the WCH CH570Q RISC-V wireless MCU. The PCB is 16.4 mm x 10.0 mm and uses a PCB-edge USB connector and an independently created, WCH-informed 2.4 GHz PCB antenna.
 
 ## Design files
 
@@ -10,7 +10,7 @@ OpenDongle CH570 is a compact USB Type-A 2.4 GHz receiver built around the WCH C
 | `OpenDongle-CH570.kicad_sch` | Schematic |
 | `OpenDongle-CH570.kicad_pcb` | PCB layout |
 | `lib/OpenDongle.kicad_sym` | Project-owned CH570Q and four-pin PCB USB symbols |
-| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and WCH antenna footprints |
+| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and independently created, WCH-informed antenna footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 | `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
@@ -22,7 +22,7 @@ Open the project with KiCad 10 or later. The library tables use `${KIPRJMOD}` pa
 - R1 is the 1.5 kOhm connection required by WCH between V5 and the internally regulated VDD33/VIO33 rail (pin 1) for direct 5 V operation.
 - Both V5 and VDD33/VIO33 have 2.2 uF bulk and 100 nF high-frequency decoupling: C1/C2 on V5, C3/C4 on VDD33.
 - Y1 is a 32 MHz, 8 pF-load crystal on XI/XO (pins 9 and 8). The CH570 provides programmable internal crystal load capacitance, so external load capacitors are not fitted.
-- The RF output (ANT, pin 10) connects directly to the WCH-derived PCB antenna, as recommended by the CH570 datasheet.
+- The RF output (ANT, pin 10) connects directly to the independently created, WCH-informed PCB antenna, as recommended by the CH570 datasheet.
 - USB data connects to the CH570Q native USB pins: D+ to PA1/UDP (pin 4) and D- to PA0/UDM (pin 3).
 - GND reaches the CH570Q through the exposed pad (pin 11).
 - The three unused GPIOs (pins 5, 6, 7) carry no-connect flags.
@@ -103,11 +103,12 @@ AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and ar
 
 ## Source attribution
 
-- The 0.8 mm FR-4 antenna is based on the WCH reference antenna distributed in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib).
+- The 0.8 mm FR-4 antenna was independently created, informed by the WCH reference antenna published in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib); no WCH CAD or artwork file was copied, imported, converted, or traced.
 - The PCB USB connector footprint is derived from the [USB armory](https://github.com/usbarmory/usbarmory) hardware design.
 
 ## License
 
-Except for the WCH-derived antenna geometry described in
-[`../NOTICE`](../NOTICE), this hardware design is licensed under the CERN Open
-Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).
+This hardware design, including the independently created antenna
+implementation described in [`../NOTICE`](../NOTICE), is licensed under the
+CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See
+[`LICENSE`](LICENSE).
