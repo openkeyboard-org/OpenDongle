@@ -2,9 +2,11 @@
  * Phased CH592F startup — fork of WCH's vendor startup_CH592.S with SRAM
  * markers at each reset phase.
  *
- * Copyright 2021 Nanjing Qinheng Microelectronics Co. LTD (WCH)
+ * Copyright 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * Copyright 2026 Eric Molitor (EMulator)
  * SPDX-License-Identifier: Apache-2.0
+ * Attention: This software (modified or not) and binary are used for a
+ * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *
  * Sentinel byte at 0x20005800 advances
  * through 0xC0 .. 0xC5 as reset progresses and STOPS there. A value below 0xC5

@@ -1,6 +1,7 @@
 /* OpenKeyboard.org OpenDongle Linker Script
  * Copyright 2026 Eric Molitor (EMulator)
- * Based on CH592 SDK Link.ld
+ * SPDX-License-Identifier: Apache-2.0
+ * Based on the WCH CH592 SDK Link.ld; see ../NOTICE for provenance.
  *
  * OpenBoot owns [0x0000, 0x2000) and hands off to the application at a SLOT
  * base. There is no in-app staging region any more; updates are performed

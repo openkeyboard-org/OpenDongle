@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! USB-HID IAP transport and protocol for the OpenDongle dongle (WCH CH570/CH592).
 //!
 //! Direct port of the transport/protocol layer in `flash_dongle.py`. The on-wire

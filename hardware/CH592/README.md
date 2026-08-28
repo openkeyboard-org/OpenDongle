@@ -167,4 +167,6 @@ The designators are non-contiguous: there is no **C3** and no **U1** (the parts 
 
 ## License
 
-This hardware design is licensed under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).
+Except for the WCH-derived antenna geometry described in
+[`../NOTICE`](../NOTICE), this hardware design is licensed under the CERN Open
+Hardware Licence Version 2 - Weakly Reciprocal. See [`LICENSE`](LICENSE).

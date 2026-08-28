@@ -1,0 +1,31 @@
+OpenDongle Firmware
+Copyright 2026 Eric Molitor (EMulator)
+
+The Apache License 2.0 in LICENSE applies to the first-party firmware in this
+directory. The build also consumes the pinned third-party dependencies below;
+their own license files and source notices remain controlling for those files.
+
+Third-party dependencies
+------------------------
+
+* third_party/openwch/ch570 and third_party/openwch/ch592 are distributed
+  under the Apache License 2.0 included in each submodule. SDK source files
+  retain copyright and usage notices from Nanjing Qinheng Microelectronics
+  Co., Ltd. (WCH).
+* third_party/openboot is distributed under the Apache License 2.0 included in
+  that submodule and contains its own pinned third-party dependencies.
+
+WCH-derived first-party modifications
+-------------------------------------
+
+firmware/ch592/src/startup_CH592_phased.S is a modified copy of the WCH CH592
+SDK startup file. firmware/ch570/link.ld and firmware/ch592/link.ld are based
+on the corresponding WCH SDK linker scripts. These files identify their
+modifications and are distributed under Apache-2.0 while retaining WCH
+provenance. The upstream startup file states:
+
+  Attention: This software (modified or not) and binary are used for
+  microcontroller manufactured by Nanjing Qinheng Microelectronics.
+
+OpenDongle targets WCH CH570 and CH592 microcontrollers and complies with that
+stated use condition.

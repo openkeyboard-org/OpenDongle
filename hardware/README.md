@@ -47,4 +47,6 @@ This hardware design was inspired by the [bplug-ch project](https://oshwhub.com/
 
 ## License
 
-The hardware designs are licensed under the CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See [LICENSE](LICENSE).
+Except for the WCH-derived antenna geometry described in [NOTICE](NOTICE), the
+hardware designs are licensed under the CERN Open Hardware Licence Version 2 -
+Weakly Reciprocal. See [LICENSE](LICENSE).
