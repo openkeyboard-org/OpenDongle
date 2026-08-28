@@ -5,7 +5,7 @@
  * Copyright 2021 Nanjing Qinheng Microelectronics Co., Ltd.
  * Copyright 2026 Eric Molitor (EMulator)
  * SPDX-License-Identifier: Apache-2.0
- * Attention: This software (modified or not) and binary are used for a
+ * Attention: This software (modified or not) and binary are used for
  * microcontroller manufactured by Nanjing Qinheng Microelectronics.
  *
  * Sentinel byte at 0x20005800 advances
