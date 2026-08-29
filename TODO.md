@@ -435,15 +435,6 @@ the build id for no functional gain, or expands scope beyond the import:
   safe — the gate simply fails closed — but the reasoning written down is not
   the reasoning the code relies on. (`USB_ClearPendingKeyboard()` is a second
   clearer of the stash, called on RF link loss; worth naming in the same edit.)
-- **`platform_ch592.c` — two small hardenings around `dongle_nv_is_erased()`.**
-  The reported failure (that the 32-byte cap makes every bond clear report
-  failure) does not occur: `bond_record_t` does not exceed the cap. But nothing
-  *pins* that relationship, so a future field added to the record would break
-  bond-clear verification silently — a `_Static_assert` tying
-  `sizeof(bond_record_t)` to the capacity both chips assume is cheap insurance.
-  Separately, the local buffer would be better with an explicit
-  `__attribute__((aligned(4)))`: it happens to be aligned today, which is not
-  the same as being guaranteed.
 - **`usb_descriptors.c` — record the IF1 mouse descriptor's provenance.** The
   button usage range declares three usages against a report count of five, which
   is genuinely non-conformant and will be re-reported by every future reviewer.
