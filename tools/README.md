@@ -47,6 +47,8 @@ Safe by default: with no action it displays read-only status.
 ```bash
 opendongle                                     # same full status as --info
 opendongle --info                              # device, build, update, link, bond, health
+opendongle --fault                             # retained fault page only; arms/disarms nothing
+opendongle --status --samples 50 --period-ms 200  # unarmed link-state sampler
 opendongle --enter-bootloader --image app.bin  # family-checked, then reboots into OpenBoot
 opendongle --enter-bootloader --force          # reboot with no family guard
 
@@ -92,8 +94,28 @@ the guard when you have no image at hand; note the flash itself is unguarded
 either way, because OpenBoot's COMMIT attests only length and CRC.
 
 Flags: `--vid` / `--pid` (accept `0x..`/decimal), `--interface`, `--hidraw`
-(alias `--path`, explicit device path), `--info`, `--enter-bootloader`,
-`--image FILE`, `--force`.
+(alias `--path`, explicit device path), `--info`, `--fault`, `--status`, `--diag`, `--rf-poke`
+(`--samples N`, `--period-ms MS`), `--enter-bootloader`, `--image FILE`,
+`--force`.
+
+`--diag` reads the RF diagnostics pages (command 0x92, five 62-byte pages,
+provided by firmware carrying the RF diagnostics page -- a separate draft PR;
+firmware without it answers nothing and the tool reports a timeout;
+firmware `RF_DiagFill` in `firmware/common/src/rf_task.c`) with unarmed
+exchanges only: the runtime snapshot (state, channel, the access address in
+RAM vs the one the radio was last armed with, the last RX/TX/shut status, an
+`rx_armed` latch, peer MAC, last LEN-10 disposition, last persist outcome), the
+PHY and executor counters (RX arm attempts and failures, RX done/CRC/timeout,
+TX start/fail/done, the pending event mask, both delayed-post slots, the
+timer slots' remaining times) and the protocol counters (beacons seen and
+accepted or rejected with the reason, pair-ACK scheduled/started/finished,
+EV10 entries and give-ups, promotes, persist attempts). Counters wrap; with
+`--samples N --period-ms T` every counter that changed between samples is
+printed as a per-second rate, which is how a healthy reconnect camp reads
+(RX re-armed ~33/s on its 30 ms timeout) and how a deaf one is told apart
+(no RX events, or a non-zero arm status, or a radio address that is not the
+bond's). Every page ends with its raw bytes. CH592 firmware answers the page
+with zeros for the CH570-only fields.
 
 Exit codes:
 
@@ -104,8 +126,40 @@ Exit codes:
 | `2` | the handoff could not be pinned to one device. Either OpenBoot never appeared within 10 s, or the addressed application never left the bus, or more than one new bootloader appeared, or another bootloader was already present when the command started |
 | `3` | `--image` was given while only the OpenBoot bootloader is on the bus, so the image's ODG2 family could **not** be checked against the device. The guard lives in the application, which is not present. Pass `--force` to proceed anyway, and note the output says plainly that the family was not verified |
 
+`--fault` issues only the unarmed FaultRead (0x93) and decodes the 40-byte
+fault page. The CH570 page v5 and the CH592 page v1 share one layout, and both
+are recognised; any other (family, page version) pair is printed as a warning
+plus the raw bytes, with no fields decoded. For a **valid** record every field
+is shown: startup reset cause and the record's own, the startup phase marker,
+the reset-keeper state live and as recorded, kind, action, flags, all four
+counters and the trap registers. For an **invalid** record the firmware
+populates only the family, page version, valid flag, live keeper, startup
+marker and startup reset status; the record-derived fields are zero fill and
+are reported as `unavailable` rather than decoded. The raw 40 bytes are always
+the last line. Use `--fault` first on a misbehaving unit: it does not arm or
+disarm a session (a session left armed by an interrupted earlier run stays
+exactly as it was), so it perturbs the device less than `--info`.
+
+`--status` issues a single unarmed Status (0x91) exchange per sample and prints
+one line each with a timestamp, the connection state and the last RSSI. With
+`--samples N` and `--period-ms MS` it repeats, which is how to watch a link
+flicker between *waiting for reconnect* and *connected* without a maintenance
+session ever being armed. Note the CH570 SKU is reported to return a constant
+RSSI, so treat that column as a hint on that part.
+
 `--info` reports an absent or invalid bond record as information rather than an
-error.
+error, and shows a best-effort split of the invalid record's fields (magic,
+format, flags, interval, session AA, timeout, both MACs, stored vs computed
+checksum) alongside the raw bytes. An all-zero bond record **may** indicate a
+failed NV read - the firmware zero-initialises the reply and `bond_load` returns
+without filling it on an NV error - but a record that genuinely is, or was
+corrupted to, all zeros looks identical, so the tool says "may indicate" and no
+more.
+
+With `--hidraw`, `--fault` and `--status` first confirm from HID enumeration
+alone that the named path carries the `--vid`/`--pid`/`--interface` selectors,
+and refuse to send anything if it does not: an explicit path bypasses discovery,
+so nothing else would stop a vendor report going to an unrelated HID node.
 
 On Linux, opening the device needs hidraw permissions (run as root or use a
 `plugdev`/udev rule).
@@ -116,11 +170,13 @@ On Linux, opening the device needs hidraw permissions (run as root or use a
 cargo test
 ```
 
-28 tests, no hardware required: Intel-HEX parsing including checksum rejection,
+60 tests, no hardware required: Intel-HEX parsing including checksum rejection,
 ODG2 header integrity, the device-family binding, wrong-load-base and
-factory-image rejection, bond-record and fault-record decoding, status parsing
+factory-image rejection, bond-record and fault-record decoding and the exact
+text each renders (valid, invalid/best-effort, unknown layout), status parsing
 with legacy fallback, IAP packet golden vectors and transport CRC-32, the
-`int(s,0)`-style number parser, and the CLI contract.
+`--hidraw` identity check, the `int(s,0)`-style number parser, and the CLI
+contract.
 
 ## macOS caveat
 
