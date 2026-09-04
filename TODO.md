@@ -58,6 +58,82 @@ Six other findings from the same pass alleged defects that the source does not
 have — the dispositions, with the evidence for each, are in the review comments
 on [#3](https://github.com/openkeyboard-org/OpenDongle/pull/3).*
 
+## Defect: the terminal reconnect camp has no time-based liveness backstop
+
+**Where:** `firmware/common/src/rf_task.c`, `rf_stock_reacquire_giveup()`, the closed
+boot window (`RF_EVT_BOOT_WINDOW`) and the unbonded `RF_EVT_START` camp; the guard
+`rf_arm_retry_if_failed()`.
+
+**What is wrong.** Every terminal camp ends with no active soft-timer slot and arms
+RX once. From then on the only thing that re-arms the receiver is the radio's own
+30 ms RFIP timeout event (`hal_rf_ch570.c`, `hal_rf_start_rx` translates the
+"camp indefinitely" arm into a 30 ms window whose expiry the sink turns into
+`RF_EVT_RX_RESTART`). The intended backstop, `rf_arm_retry_if_failed()`, fires only
+when the arm status is non-zero -- and on this radio library that never happens:
+the linked `RFIP_SetRx` returns non-zero only for a NULL descriptor or a zero DMA
+address, both impossible for the static descriptor. So one RX arm whose
+completion event is never delivered, or a PHY that stays deaf while the timeout
+loop keeps cycling, leaves the dongle in `waiting for reconnect` until a chip
+reset. Nothing in the main loop checks radio liveness; USB suspend/resume and
+bus reset touch no radio state.
+
+**Evidence.** Structure confirmed by source reading (six independent reviews and
+a disassembly of the linked library, 2026-09-04). A failure of exactly this shape
+was observed once on the bench the same day (a dongle up since 2026-09-02 that
+answered neither keyboard build for >10 min and was cured only by a power cycle)
+but it predates the diagnostic page, so it is not yet characterised. The
+deterministic reconnect failure fixed by the companion OpenController branch (pair-ACK vs the
+keyboard's MR4 window) is a different mechanism and does not depend on this.
+
+**Fix sketch.** Give every terminal camp a slot-backed watchdog (the boot-window
+slot is free there): every ~200 ms compare the PHY event counter with the last
+value; on the first silent period re-arm RX from task context; on the second,
+shut + `hal_rf_init()` + re-arm; keep counting. Post the work as an event from
+the timer callback (callbacks run in TMR IRQ context; the vendor init must not
+run there). A deaf-but-cycling PHY needs a separate policy (e.g. a preventive
+re-init after a long interval with timeouts only). The pair-ACK burst has the
+same hole for a `StartTx` that returns 0 without a `TX_FINISH`; it needs a
+per-TX completion timer, not the `burst_active` flag (which legitimately stays
+set across the 50 ms inter-burst gap). Diagnostics to run first (firmware from the separate RF-diagnostics draft PR): IAP `0x92`
+pages 0, 1 and 4 (`rx_armed`, `rx_timeout` rate, `lle_irqs`, LLE mode) and the
+armed `0x94` ladder (rung 1 re-arm, rung 2 re-init), which tell a dead software
+loop from a deaf PHY in place.
+
+*Found by a multi-lens source analysis with adversarial verification and an
+independent codex review during the bonded-reconnect investigation; the camp
+chain and the inert guard were verified against the linked library's
+disassembly.*
+
+## Defect: `IAP_Service()` bounds its reboot fail-safe with a clock that stops in the reconnect camp
+
+**Where:** `firmware/common/src/iap.c`, `IAP_Service()` — `IAP_SVC_RF_QUIESCE_TICKS`
+(500 ms) and `IAP_SVC_USB_DRAIN_TICKS` (250 ms) are measured with `hal_now()`.
+
+**What is wrong.** On CH570 `hal_now()` is the `st_*` software epoch, which only
+advances while some soft-timer slot is armed: with nothing armed `st_rearm()`
+stops the TMR and `st_now()` returns a constant. The terminal reconnect camp arms
+no slot (the 30 ms RFIP timeout drives its re-arm), so the clock is frozen there
+— measured on the bench (2026-09-04, IAP `0x92` page 0): `hal_now()` read the
+same value in samples 3 s apart. `IAP_Service()`'s two "wall time" bounds
+therefore never expire in that state, nor after the quiesce has cancelled every
+slot. A quiesce request that never completes, or an EP6 reply the host never
+consumes, then blocks the promised fallback reset indefinitely instead of for
+500 ms + 250 ms. The comment in `iap.c` ("Deadlines are WALL time via
+hal_now()") records the intent, not the behaviour.
+
+**Impact.** No effect on the RF link (no camp-side acceptance gate depends on
+elapsed `hal_now()` time; relative timing resumes as soon as a slot is armed).
+It only weakens `--enter-bootloader`'s fail-safe. Latent; the normal path
+completes both stages long before either bound.
+
+**Fix sketch.** Bound the two stages with a continuous source (SysTick, which
+`st_now()` already uses while a slot is periodic) or with pass counts sized to
+the main-loop rate measured by the diag page (~44 k passes/s), and say so in
+the comment.
+
+*Found by codex during the review of the IAP `0x92` RF diagnostics page,
+confirmed by the page's own readout.*
+
 ## Defect: CH570 one-shot arms wider than 26 bits are silently truncated
 
 **Where:** `firmware/ch570/src/main.c`, `st_rearm()` — `R32_TMR_CNT_END = d`
@@ -83,12 +159,20 @@ software clock jumps roughly 2.01 s ahead of real time in one step. Every other
 soft timer with a deadline inside that span is then past due and dispatches in
 the same pass.
 
-**Reachability.** Confirmed, not theoretical. `rf_send_keys_up_on_link_loss()`
-cancels `HAL_TMR_SLOT_CONNECTED_POLL` first, and that cancel runs
-`st_periodic_exit_locked()`, which clears `st_periodic_slot_p1`. So the guard at
-the top of `st_rearm()` — the one that makes arms bookkeeping-only while a
-periodic grid owns the timer — is *not* in force by the time the watchdog is
-armed a few lines later. The write reaches the register.
+**Reachability (corrected 2026-09-04, measured).** Latent, not confirmed. The
+oversized arm is written to the register only when the EV10 slot is the
+NEAREST active deadline. `rf_enter_stock_reacquire()` exits the periodic grid
+(its own `hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL)`; note
+`rf_send_keys_up_on_link_loss()` cancels nothing), posts `RF_EVT_PAIR_PREP`
+and then arms EV10 -- and `rf_send_pair_prep()` re-posts itself as a 30 ms
+delayed event for the whole scan, so the 30 ms deadline is re-selected on every
+`st_set` and the truncated value is live only for the odd main-loop pass
+between the arm and the next re-post. Bench (IAP `0x92` page 3, connected
+-> keyboard gone): 71 pair-prep arms per scan = ~2.1 s, i.e. the watchdog
+expired at its intended time in every observed cycle. It would bite whenever a
+>671 ms one-shot is the nearest armed deadline with nothing shorter alongside
+it (a >= 2 ms pump stall at the wrong pass, or a future caller); the fix below
+stands, but this is not the bonded-reconnect failure.
 
 **Scope: CH570 only.** CH592 routes the same call through
 `hal_tmos_units_from_tsys()`, which divides back to 3400 TMOS units and arms a
@@ -110,7 +194,6 @@ link loss on CH570 and measures the reacquire watchdog against a wall clock.
 *Found by codex during the import review; confirmed by reading the SDK register
 definition, the tick constants, and the cancel-then-arm ordering in
 `rf_send_keys_up_on_link_loss()`.*
-
 ## Defect: suspend NAKs only EP1, so a queued mouse or consumer report survives into resume
 
 **Where:** `firmware/common/src/usb_device.c`, `USB_SuspendResume()` — the

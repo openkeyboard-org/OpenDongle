@@ -126,6 +126,50 @@ not need a source edit.
 reacquire gating out rebooted keyboards). That is a separate v0.96.x fix, and
 both want the same bench re-validation pass.
 
+## Bonded reconnect vs the OpenController MR4 receive window
+
+A bonded CH570 dongle that has not connected since it booted did not complete
+the OpenController keyboard's bonded reconnect, and neither did one that had
+settled into its channel-8 camp after an EV10 give-up on the first try. The
+keyboard side saw ~500 clean beacons in 10 s and zero valid frames; the dongle
+side heard and accepted every beacon it caught, transmitted its LEN-15 reply,
+promoted to CONNECTED, lapsed for want of a poll response and relistened,
+indefinitely. A fresh pair recovered it; nothing else did. Bench 2026-09-04,
+three consecutive cold boots, measured with the RF diagnostics page proposed in a separate draft PR.
+
+**Mechanism.** The reconnect reply is scheduled `RF_CH570_PAIR_ACK_PRE_TX_TMOS`
+= 4 x 625 us after the beacon (software-measured: 2538..2551 us from accept
+to StartTx returning, ~214 us from there to the TX-finish callback), the
+value chosen for the Bridge75 stock keyboard. The OpenController's power-MR4
+bonded search arms its receiver ~0.2 ms after each beacon and closed it
+2.5 ms later -- consistent with the reply completing on that closing edge.
+Its window had been sized against the dongle's EV10 reacquire path, whose
+reply comes ~0.3 ms after the beacon and which a dongle only takes once it
+has connected at least once since boot -- so every earlier measurement, made
+against a warm dongle, passed.
+
+**Resolution.** On the keyboard side: OpenController widens the window to
+6 ticks (3.75 ms), leaving ~1 ms of completion margin. This dongle's timing
+is unchanged; the bound the keyboard must respect is now documented at the
+constant. The dongle-side alternative (reply at 1.875 ms) was bench-proven
+too (6/6 cold-boot reconnects, 5/5 after a give-up) and not taken, because
+the source records it as measurably worse for the Bridge75.
+
+**Two things to be honest about.**
+
+- The 0.2 ms keyboard arm latency is an estimate; what is established is the
+  A/B: a 4-tick window passes 0/8 (fails 8/8) and a 6-tick window passes, and a 1.875 ms
+  reply passes against a 4-tick window. The exact cross-device edge was not
+  measured with a sniffer.
+- A second failure of a different shape was seen once on the same day and is
+  NOT covered by this: a dongle up for two days answered neither keyboard
+  build (including a continuous-RX build that catches the reply above) and was
+  cured only by a power cycle. It predates the diagnostics page and is
+  uncharacterised; `TODO.md` records the structural hole it matches (the
+  terminal camp has no time-based liveness backstop). The RF diagnostics page
+  and intervention ladder in the separate draft PR exist to characterise it
+  when it recurs.
+
 ## Security property: the RF link provides no confidentiality
 
 The Bridge75 2.4 GHz data path applies **no confidentiality protection**, by
