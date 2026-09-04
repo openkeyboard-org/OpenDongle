@@ -118,8 +118,8 @@ struct Cli {
     #[arg(long, value_name = "RUNG", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag"])]
     rf_poke: Option<u8>,
 
-    /// With --status or --diag: number of samples (default 1)
-    #[arg(long, default_value_t = 1)]
+    /// With --status or --diag: number of samples (default 1, at least 1)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     samples: u32,
 
     /// With --status or --diag: period between samples in milliseconds (default 200)
@@ -681,6 +681,7 @@ mod tests {
         assert!(!stray.sampler_args_valid());
         let stray = Cli::try_parse_from(["opendongle", "--period-ms", "5"]).unwrap();
         assert!(!stray.sampler_args_valid());
+        assert!(Cli::try_parse_from(["opendongle", "--status", "--samples", "0"]).is_err());
         let diag = Cli::try_parse_from(["opendongle", "--diag", "--samples", "3"]).unwrap();
         assert!(diag.diag && diag.sampler_args_valid() && !diag.show_info());
         assert!(Cli::try_parse_from(["opendongle", "--diag", "--status"]).is_err());

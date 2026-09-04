@@ -210,6 +210,7 @@ pub fn require_path_identity(
 
 // ---------------- High-level IAP operations ----------------
 
+/// `op_handshake`: see the call sites; part of the diagnostics readout.
 pub fn op_handshake(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_HANDSHAKE, HANDSHAKE_PAYLOAD),
@@ -217,6 +218,7 @@ pub fn op_handshake(dev: &IapDevice) -> Result<Response> {
     )
 }
 
+/// `op_arm`: see the call sites; part of the diagnostics readout.
 pub fn op_arm(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_GETDEVINFO, &[0x01, 0x00, 0x00, 0x00]),
@@ -224,6 +226,7 @@ pub fn op_arm(dev: &IapDevice) -> Result<Response> {
     )
 }
 
+/// `op_disarm`: see the call sites; part of the diagnostics readout.
 pub fn op_disarm(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_GETDEVINFO, &[0x00, 0x00, 0x00, 0x00]),
@@ -238,18 +241,22 @@ pub fn op_enter_bootloader(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_enter_bootloader(), READ_TIMEOUT_MS)
 }
 
+/// `op_version`: see the call sites; part of the diagnostics readout.
 pub fn op_version(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_VERSION, &[]), READ_TIMEOUT_MS)
 }
 
+/// `op_bond_read`: see the call sites; part of the diagnostics readout.
 pub fn op_bond_read(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_BOND_READ, &[]), READ_TIMEOUT_MS)
 }
 
+/// `op_status`: see the call sites; part of the diagnostics readout.
 pub fn op_status(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_STATUS, &[]), READ_TIMEOUT_MS)
 }
 
+/// `op_fault`: see the call sites; part of the diagnostics readout.
 pub fn op_fault(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_FAULT, &[]), READ_TIMEOUT_MS)
 }

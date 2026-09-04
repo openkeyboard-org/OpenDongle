@@ -90,6 +90,7 @@ impl BondRecord {
         Ok(())
     }
 
+    /// Decode and frame-check a response; errors name the offending byte.
     fn decode(raw: &[u8; BOND_RECORD_LEN]) -> Result<Self> {
         let record = Self::parse(raw);
         record.validate()?;
@@ -97,6 +98,7 @@ impl BondRecord {
     }
 }
 
+/// Decode a BondRead reply into a valid record or a best-effort invalid one.
 fn decode_response(response: &[u8]) -> Result<BondRead> {
     if response.len() < 3 + BOND_RECORD_LEN {
         bail!(
@@ -128,6 +130,7 @@ fn decode_response(response: &[u8]) -> Result<BondRead> {
     }
 }
 
+/// Colon-separated upper-case hex for a 6-byte MAC.
 fn format_mac(mac: &[u8; 6]) -> String {
     mac.iter()
         .map(|byte| format!("{byte:02X}"))
@@ -135,10 +138,12 @@ fn format_mac(mac: &[u8; 6]) -> String {
         .join(":")
 }
 
+/// `line`: see the call sites; part of the diagnostics readout.
 fn line(label: &str, value: impl std::fmt::Display) -> String {
     format!("  {label:<16}{value}")
 }
 
+/// `ticks_line`: see the call sites; part of the diagnostics readout.
 fn ticks_line(label: &str, ticks: u16) -> String {
     line(
         label,
@@ -232,6 +237,7 @@ fn render_bond(read: &BondRead) -> Vec<String> {
     lines
 }
 
+/// `show_bond_info`: see the call sites; part of the diagnostics readout.
 pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
     let arm = op_arm(dev)?;
     check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;

@@ -17,9 +17,11 @@ pub const PAGE_LEN: usize = 62;
 pub const PAGE_COUNT: u8 = 5;
 const PAGE_VERSION: u8 = 1;
 
+/// Little-endian u16 at `at`.
 fn le16(p: &[u8], at: usize) -> u16 {
     u16::from_le_bytes([p[at], p[at + 1]])
 }
+/// Little-endian u32 at `at`.
 fn le32(p: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([p[at], p[at + 1], p[at + 2], p[at + 3]])
 }
@@ -32,6 +34,7 @@ pub struct Page {
 }
 
 impl Page {
+    /// Decode and frame-check a response; errors name the offending byte.
     pub fn decode(expected_page: u8, response: &[u8]) -> Result<Self> {
         if response.len() < 2 {
             bail!("RfDiag: short response ({} bytes)", response.len());
@@ -68,6 +71,7 @@ impl Page {
     }
 }
 
+/// Human name of an `rf_state` value.
 fn state_name(s: u8) -> &'static str {
     match s {
         0 => "idle",
@@ -77,6 +81,7 @@ fn state_name(s: u8) -> &'static str {
     }
 }
 
+/// Human name of a LEN-10 disposition code (RFD_L10_*).
 fn disp_name(d: u8) -> &'static str {
     match d {
         0 => "none yet",
@@ -92,6 +97,7 @@ fn disp_name(d: u8) -> &'static str {
     }
 }
 
+/// Human name of a persist-outcome code (RFD_PERSIST_*).
 fn persist_name(r: u8) -> &'static str {
     match r {
         0 => "none yet",
@@ -105,6 +111,7 @@ fn persist_name(r: u8) -> &'static str {
     }
 }
 
+/// Format a "last rc" byte, naming the 0xFF/0xFE sentinels.
 fn rc(v: u8) -> String {
     match v {
         0xFF => "none yet".to_string(),
@@ -208,6 +215,7 @@ pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
     v
 }
 
+/// Render decoded pages as printable lines (every field, raw bytes last).
 pub fn render(pages: &[Page]) -> Vec<String> {
     let mut out = Vec::new();
     for p in pages {
@@ -418,6 +426,7 @@ pub fn read_all(dev: &IapDevice) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
+/// `show_rf_diag`: see the call sites; part of the diagnostics readout.
 pub fn show_rf_diag(dev: &IapDevice) -> Result<Vec<Page>> {
     let pages = read_all(dev)?;
     for line in render(&pages) {

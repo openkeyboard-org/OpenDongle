@@ -194,7 +194,9 @@ link loss on CH570 and measures the reacquire watchdog against a wall clock.
 *Found by codex during the import review; confirmed by reading the SDK register
 definition, the tick constants, and the cancel-then-arm ordering in
 `rf_send_keys_up_on_link_loss()`.*
-*Where:** `firmware/common/src/usb_device.c`, `USB_SuspendResume()` — the
+## Defect: suspend NAKs only EP1, so a queued mouse or consumer report survives into resume
+
+**Where:** `firmware/common/src/usb_device.c`, `USB_SuspendResume()` — the
 suspend branch touches `R8_UEP1_CTRL` and nothing else.
 
 **What is wrong.** The whole point of the suspend gate, stated in the file's own

@@ -47,6 +47,7 @@ const FLAG_RESET_MISMATCH: u8 = 0x02;
 /// above. Both chips define identical kind/action/flag values.
 const KNOWN_LAYOUTS: &[(u8, u8, &str)] = &[(0x70, 5, "CH570"), (0x92, 1, "CH592")];
 
+/// `known_chip`: see the call sites; part of the diagnostics readout.
 fn known_chip(family: u8, page_version: u8) -> Option<&'static str> {
     KNOWN_LAYOUTS
         .iter()
@@ -54,6 +55,7 @@ fn known_chip(family: u8, page_version: u8) -> Option<&'static str> {
         .map(|&(_, _, name)| name)
 }
 
+/// `known_layouts_list`: see the call sites; part of the diagnostics readout.
 fn known_layouts_list() -> String {
     KNOWN_LAYOUTS
         .iter()
@@ -90,6 +92,7 @@ struct FaultStatus {
     raw: [u8; FAULT_LEN],
 }
 
+/// Human name of the low three bits of R8_RESET_STATUS.
 fn reset_name(status: u8) -> &'static str {
     match status & 0x07 {
         0 => "software",
@@ -101,6 +104,7 @@ fn reset_name(status: u8) -> &'static str {
     }
 }
 
+/// Human name of a reset-keeper byte (armed/consumed/cleared).
 fn keeper_name(keep: u8) -> &'static str {
     match keep {
         KEEP_ARMED => "armed",
@@ -110,6 +114,7 @@ fn keeper_name(keep: u8) -> &'static str {
     }
 }
 
+/// Comma-separated names of the fault flag bits (unknown bits listed as hex).
 fn flag_names(flags: u8) -> String {
     if flags == 0 {
         return "none".to_string();
@@ -186,14 +191,17 @@ impl FaultStatus {
         known_chip(self.family, self.page_version)
     }
 
+    /// Name of the reset status captured pristine at startup.
     fn startup_reset_name(&self) -> &'static str {
         reset_name(self.startup_reset_status)
     }
 
+    /// Name of the reset status the fault record itself stored.
     fn record_reset_name(&self) -> &'static str {
         reset_name(self.record_reset_status)
     }
 
+    /// Human name of the fault kind byte.
     fn fault_name(&self) -> &'static str {
         match self.kind {
             0x00 => "none",
@@ -203,6 +211,7 @@ impl FaultStatus {
         }
     }
 
+    /// Human name of the fault action byte.
     fn action_name(&self) -> &'static str {
         match self.action {
             0 => "none",
@@ -216,6 +225,7 @@ impl FaultStatus {
     }
 }
 
+/// `line`: see the call sites; part of the diagnostics readout.
 fn line(label: &str, value: impl std::fmt::Display) -> String {
     format!("  {label:<16}{value}")
 }
@@ -345,6 +355,7 @@ fn render_fault(fault: &FaultStatus) -> Vec<String> {
     lines
 }
 
+/// Print the rendered fault page.
 fn print_fault(fault: &FaultStatus) {
     for text in render_fault(fault) {
         println!("{text}");
