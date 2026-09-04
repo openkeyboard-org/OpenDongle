@@ -18,6 +18,7 @@
 #include "version.h"
 #include "dongle_platform.h"
 #include "sched.h"
+#include "hal_timing.h"     /* hal_timing_diag_snapshot (IAP 0x92) */
 
 #include "iap.h"
 #include "usb_device.h"
@@ -262,6 +263,60 @@ static void st_periodic_apply_nudge(void)
 }
 
 __HIGH_CODE
+/* Continuous diagnostic timebase (hal_timing.h): the free-running SysTick the
+ * periodic mode already relies on, started here if it is not yet running. */
+uint32_t hal_timing_systick_now(void)
+{
+    st_systick_ensure();
+    return st_systick();
+}
+
+/* IAP 0x92 scheduler diagnostics (hal_timing.h seam). Task context only (the
+ * IAP handler); a brief IRQ mask keeps the snapshot self-consistent. */
+void hal_timing_diag_snapshot(hal_timing_diag_t *out)
+{
+    uint8_t  active[ST_N];
+    uint32_t deadline[ST_N];
+    uint8_t  periodic_p1;
+    uint32_t armed_delta, now;
+    uint8_t  i;
+
+    /* Copy the volatile scheduler fields under the mask, compute outside it:
+     * the masked window is then a handful of loads, not the arithmetic. */
+    {
+        uint32_t irq = __risc_v_disable_irq();
+        now = st_now();
+        for (i = 0u; i < ST_N; i++) {
+            active[i] = st_active[i];
+            deadline[i] = st_deadline[i];
+        }
+        periodic_p1 = st_periodic_slot_p1;
+        armed_delta = st_armed_delta;
+        (void)__risc_v_enable_irq(irq);
+    }
+    out->active_mask = 0u;
+    for (i = 0u; i < ST_N && i < HAL_TIMING_DIAG_SLOTS; i++) {
+        if (!active[i]) {
+            out->remaining[i] = 0;
+        } else if ((uint8_t)(i + 1u) == periodic_p1) {
+            /* The periodic grid owner keeps no one-shot deadline (st_set_periodic
+             * programs st_period and the hardware reload, not st_deadline). */
+            out->active_mask |= (uint8_t)(1u << i);
+            out->remaining[i] = 0;
+        } else {
+            out->active_mask |= (uint8_t)(1u << i);
+            out->remaining[i] = (int32_t)(deadline[i] - now);
+        }
+    }
+    for (; i < HAL_TIMING_DIAG_SLOTS; i++) {
+        out->remaining[i] = 0;
+    }
+    out->periodic_slot_p1 = periodic_p1;
+    out->slot_count = ST_N;
+    out->reserved = 0u;
+    out->armed_delta = armed_delta;
+}
+
 uint32_t st_now(void)   /* exposed for hal_timing_ch570.c (hal_now) */
 {
     /* Periodic mode: SysTick-exact, independent of the auto-reloading TMR (a

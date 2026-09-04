@@ -19,6 +19,8 @@
  * seam); both move here in the remaining P2.3(ii) increments.
  */
 #include "hal_timing_ch592.h"
+#include "hal_dispatch.h"   /* hal_dispatch_diag_snapshot stub (IAP 0x92) */
+#include "hal_timing.h"
 #include "dongle_target.h"   /* HAL_TMOS_UNIT_TICKS / HAL_TICKS_PER_US (P3a) */
 #include "CH59x_common.h"   /* __HIGH_CODE — keep the arm/cancel wrappers in SRAM
                              * like the rf_tmr0_* primitives they front, so the
@@ -270,4 +272,33 @@ uint8_t hal_timing_ch592_dispatch(uint8_t slot)
     }
     cb(slot);
     return 1;
+}
+
+/* IAP 0x92 executor diagnostics: the CH59x timing/dispatch backings are TMOS
+ * and not instrumented (the CH570 executor is the diagnostic target). */
+void hal_timing_diag_snapshot(hal_timing_diag_t *out)
+{
+    uint8_t i;
+
+    out->active_mask = 0u;
+    out->periodic_slot_p1 = 0u;
+    out->slot_count = 0u;
+    out->reserved = 0u;
+    out->armed_delta = 0u;
+    for (i = 0u; i < HAL_TIMING_DIAG_SLOTS; i++) {
+        out->remaining[i] = 0;
+    }
+}
+
+void hal_dispatch_diag_snapshot(hal_dispatch_diag_t *out)
+{
+    out->pending = 0u;
+    out->delay_bit[0] = 0u;
+    out->delay_bit[1] = 0u;
+    out->degraded = 0u;
+}
+
+uint32_t hal_timing_systick_now(void)
+{
+    return 0u;
 }

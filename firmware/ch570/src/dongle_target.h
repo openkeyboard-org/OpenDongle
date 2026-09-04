@@ -33,7 +33,23 @@
 #define DONGLE_IAP_APP_BASE 0x2000u
 #endif
 
-/* The Bridge75 needs a short PAIR_BCAST-to-ACK turnaround gap. */
+/* PAIR_BCAST-to-pair-ACK turnaround. Two constraints bound it (bench-derived):
+ *  - lower: the Bridge75 stock keyboard needs 1..8 ms between its broadcast
+ *    and our LEN-15, and reconnects best at 2.5 ms (rf_task.c: 8/8, 0.11 s,
+ *    0-1 flips vs 6/6, 0.22 s, up to 12 flips at 1.875 ms);
+ *  - upper: the OpenController keyboard's bonded-reconnect search closes its
+ *    receive window KBD_PAIR_RX_WINDOW_TICKS after it arms (power MR4). At
+ *    4 ticks = 2.5 ms our ACK (software-measured: accept -> StartTx returned
+ *    2538..2551 us, StartTx -> TX_FINISH callback ~214 us) completed on or
+ *    about that closing edge -- consistent with, not sniffed -- and was missed
+ *    EVERY time:
+ *    a bonded dongle that had not connected since boot never reconnected
+ *    (0 valid RX in 500 beacons, 3/3 cold boots, bench 2026-09-04), and only a
+ *    fresh pair -- whose continuous-RX flavour tolerates the late ACK --
+ *    recovered it. Resolved on the keyboard side (window widened to 6 ticks =
+ *    3.75 ms) to keep this value at the Bridge75 optimum; 3u was bench-proven
+ *    as the dongle-side alternative (6/6 cold, 5/5 after an EV10 give-up).
+ *    Any keyboard window narrower than ~3 ms re-opens this collision. */
 #define RF_CH570_PAIR_ACK_PRE_TX_TMOS 4u    /* 4 x 625 us = 2500 us */
 
 /* P4 deaf-camp guard retry cadence. A terminal camp (give-up reacquire,
