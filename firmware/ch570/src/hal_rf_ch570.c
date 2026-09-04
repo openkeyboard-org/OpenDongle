@@ -17,6 +17,7 @@
  * RF_ProcessCallBack vendor entry.
  */
 #include "hal_rf.h"
+#include "hal_timing.h"     /* hal_timing_systick_now (diag stamps) */
 #include "rf_protocol.h"
 
 #include "CH57x_common.h"
@@ -47,6 +48,27 @@ __attribute__((aligned(4))) static uint8_t rx_buf[CH570_RF_RX_DMA_SIZE];
 __attribute__((aligned(4))) static uint8_t pair_ack_tx_dma[17];
 
 static hal_rf_event_cb_t rf_event_cb;
+
+/* IAP 0x92 PHY diagnostics (hal_rf.h hal_rf_diag_t). Written from the arm/shut
+ * paths (task or IRQ-tail) and the vendor callback (IRQ); plain wrapping
+ * increments, no locking -- a torn sample is acceptable for a diagnostic. */
+static volatile hal_rf_diag_t rf_diag;
+
+/* IAP 0x92 page 4: IRQ-entry counters and the last-callback SysTick stamp.
+ * The vendor library keeps its register base pointers and receive state in
+ * plain globals (confirmed in the linked image: gptrLLEReg/gptrBBReg hold the
+ * block addresses, BB_LibIRQHandler writes LLE[8]/LLE[0x64] through them);
+ * reading through the same pointers is exactly what the library does. */
+static volatile uint32_t rf_lle_irqs;
+static volatile uint32_t rf_bb_irqs;
+static volatile uint32_t rf_cb_calls;
+static volatile uint32_t rf_last_cb_systick;
+extern volatile uint32_t *volatile gptrLLEReg;
+extern volatile uint32_t *volatile gptrBBReg;
+extern volatile uint32_t gStatus;        /* 1 after SetRx, 2 after BB sync, 16 after StartTx; Shut leaves it */
+extern volatile uint32_t WaitRecvTime;
+#define CH570_LLE_REG_BASE ((volatile uint32_t *)0x4000C200u)   /* per the linked library */
+#define CH570_BB_REG_BASE  ((volatile uint32_t *)0x4000C100u)
 
 static uint32_t rf_properties(void)
 {
@@ -111,7 +133,21 @@ uint8_t hal_rf_start_rx(uint8_t channel, uint16_t timeout)
      * HAL_RF_EV_RX_TIMEOUT and the body's defensive RX_RESTART re-arms —
      * behaviorally an infinite camp. */
     rx_param.timeOut = timeout ? timeout : 60000u;   /* 30 ms @ 0.5 us */
-    return RFIP_SetRx(&rx_param);
+    {
+        uint8_t rc = RFIP_SetRx(&rx_param);
+        /* Diag bookkeeping AFTER the arm: the arm is the timing-critical part. */
+        rf_diag.rx_arm_attempts++;
+        rf_diag.last_rx_rc = rc;
+        rf_diag.last_rx_aa = rx_param.accessAddress;
+        rf_diag.last_rx_channel = channel;
+        rf_diag.last_rx_timeout = (uint16_t)rx_param.timeOut;
+        if (rc != 0u) {
+            rf_diag.rx_arm_fail++;
+        } else {
+            rf_diag.rx_armed = 1u;
+        }
+        return rc;
+    }
 }
 
 __HIGH_CODE
@@ -125,6 +161,9 @@ uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
     rf_tuned_channel = channel;
 
     if ((uint32_t)len + 2u > sizeof(pair_ack_tx_dma)) {
+        rf_diag.tx_start++;
+        rf_diag.tx_fail++;
+        rf_diag.last_tx_rc = 0xFEu;   /* refused before the radio: oversize */
         return 0xffu;
     }
 
@@ -141,7 +180,17 @@ uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
     }
     tx_param.txDMA = (uint32_t)pair_ack_tx_dma;
 
-    return RFIP_StartTx(&tx_param);
+    {
+        uint8_t rc = RFIP_StartTx(&tx_param);
+        rf_diag.tx_start++;
+        rf_diag.last_tx_rc = rc;
+        rf_diag.last_tx_channel = channel;
+        rf_diag.rx_armed = 0u;
+        if (rc != 0u) {
+            rf_diag.tx_fail++;
+        }
+        return rc;
+    }
 }
 
 /* RFIP has no auto-ACK prime concept: this is identical to hal_rf_start_rx().
@@ -163,7 +212,10 @@ uint8_t hal_rf_start_rx_primed(uint8_t channel, uint16_t timeout,
 
 void hal_rf_shut(void)
 {
-    (void)RFRole_Shut();
+    uint8_t rc = (uint8_t)RFRole_Shut();
+    rf_diag.shut_calls++;
+    rf_diag.last_shut_rc = rc;
+    rf_diag.rx_armed = 0u;
 }
 
 __INTERRUPT
@@ -171,6 +223,8 @@ __HIGH_CODE
 void LLE_IRQHandler(void)
 {
     LLE_LibIRQHandler();
+    rf_lle_irqs++;   /* after the vendor handler: the BB/LLE ordering under study
+                      * must not be perturbed by the bookkeeping */
 }
 
 __INTERRUPT
@@ -178,6 +232,7 @@ __HIGH_CODE
 void BB_IRQHandler(void)
 {
     BB_LibIRQHandler();
+    rf_bb_irqs++;
 }
 
 /*
@@ -193,32 +248,110 @@ void RF_ProcessCallBack(rfRole_States_t sta, uint8_t id)
 {
     (void)id;
 
+    /* Diag: the RX latch is cleared BEFORE the sink runs (a synchronous re-arm
+     * inside the sink sets it again); the counters are bumped AFTER, so the
+     * time-critical connected re-arm is never delayed by bookkeeping. */
     if (sta & RF_STATE_RX) {
+        rf_diag.rx_armed = 0u;
         if (rf_event_cb) {
             rf_event_cb(HAL_RF_EV_RX_DONE, rx_buf, rx_buf[1]);
         }
+        rf_diag.rx_done++;
     }
     if (sta & RF_STATE_RX_CRCERR) {
+        rf_diag.rx_armed = 0u;
         if (rf_event_cb) {
             rf_event_cb(HAL_RF_EV_RX_CRCERR, rx_buf, 0u);
         }
+        rf_diag.rx_crcerr++;
     }
     if (sta & RF_STATE_TIMEOUT) {
+        rf_diag.rx_armed = 0u;
         if (rf_event_cb) {
             rf_event_cb(HAL_RF_EV_RX_TIMEOUT, rx_buf, 0u);
         }
+        rf_diag.rx_timeout++;
     }
     if (sta & RF_STATE_TX_FINISH) {
         if (rf_event_cb) {
             rf_event_cb(HAL_RF_EV_TX_DONE, rx_buf, 0u);
         }
+        rf_diag.tx_done++;
     }
+    rf_cb_calls++;                                  /* after the event handling */
+    rf_last_cb_systick = (uint32_t)SysTick->CNT;
+}
+
+void hal_rf_diag2_snapshot(hal_rf_diag2_t *out)
+{
+    volatile uint32_t *lle = gptrLLEReg;
+    volatile uint32_t *bb = gptrBBReg;
+    uint8_t bits = 0u;
+
+    out->lle_irqs = rf_lle_irqs;
+    out->bb_irqs = rf_bb_irqs;
+    out->cb_calls = rf_cb_calls;
+    out->last_cb_systick = rf_last_cb_systick;
+    /* Only the block addresses the linked library establishes; a corrupted
+     * pointer must not be dereferenced. */
+    if (lle == CH570_LLE_REG_BASE && bb == CH570_BB_REG_BASE) {
+        out->lle_ctrl = lle[0x00u / 4u];
+        out->lle_status = lle[0x08u / 4u];
+        out->lle_mask = lle[0x0Cu / 4u];
+        out->lle_timeout = lle[0x64u / 4u];
+        out->bb_status = bb[0x40u / 4u];
+        bits |= 0x80u;
+    } else {
+        out->lle_ctrl = out->lle_status = out->lle_mask = 0u;
+        out->lle_timeout = out->bb_status = 0u;
+    }
+    out->lib_status = gStatus;
+    out->lib_wait_recv = WaitRecvTime;
+    out->tuned_channel = rf_tuned_channel;
+    out->rx_white_channel = (uint8_t)rx_param.whiteChannel;
+    if (PFIC_GetStatusIRQ(BLEB_IRQn)) bits |= 0x01u;
+    if (PFIC_GetStatusIRQ(BLEL_IRQn)) bits |= 0x02u;
+    if (PFIC_GetStatusIRQ(TMR_IRQn))  bits |= 0x04u;
+    if (PFIC->IPRIOR[BLEB_IRQn] & 0x80u) bits |= 0x08u;
+    if (PFIC->IPRIOR[BLEL_IRQn] & 0x80u) bits |= 0x10u;
+    if (PFIC->IPRIOR[TMR_IRQn] & 0x80u)  bits |= 0x20u;
+    out->irq_bits = bits;
+    out->reserved = 0u;
+}
+
+void hal_rf_diag_snapshot(hal_rf_diag_t *out)
+{
+    out->rx_arm_attempts = rf_diag.rx_arm_attempts;
+    out->rx_arm_fail     = rf_diag.rx_arm_fail;
+    out->rx_done         = rf_diag.rx_done;
+    out->rx_crcerr       = rf_diag.rx_crcerr;
+    out->rx_timeout      = rf_diag.rx_timeout;
+    out->tx_start        = rf_diag.tx_start;
+    out->tx_fail         = rf_diag.tx_fail;
+    out->tx_done         = rf_diag.tx_done;
+    out->shut_calls      = rf_diag.shut_calls;
+    out->last_rx_aa      = rf_diag.last_rx_aa;
+    out->last_rx_timeout = rf_diag.last_rx_timeout;
+    out->last_rx_channel = rf_diag.last_rx_channel;
+    out->last_tx_channel = rf_diag.last_tx_channel;
+    out->last_rx_rc      = rf_diag.last_rx_rc;
+    out->last_tx_rc      = rf_diag.last_tx_rc;
+    out->last_shut_rc    = rf_diag.last_shut_rc;
+    out->rx_armed        = rf_diag.rx_armed;
 }
 
 void hal_rf_init(void)
 {
     uint32_t props = rf_properties();
     rfRoleConfig_t conf = {0};
+
+    /* Diag: "not attempted yet" sentinels (zero-filled BSS would read as
+     * success before the first operation); start the continuous timebase the
+     * page-4 stamps use. */
+    (void)hal_timing_systick_now();
+    rf_diag.last_rx_rc = 0xFFu;
+    rf_diag.last_tx_rc = 0xFFu;
+    rf_diag.last_shut_rc = 0xFFu;
 
     sys_safe_access_enable();
     R32_MISC_CTRL = (R32_MISC_CTRL & (~(0x3fu << 24))) | (0x0eu << 24);

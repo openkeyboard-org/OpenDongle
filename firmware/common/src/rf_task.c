@@ -522,6 +522,61 @@ static uint16_t rf_conn_timeout;
  * gates in the timing callbacks and the PHY sink. One-way until reset. */
 static volatile uint8_t rf_quiesced;
 
+/* ---------- IAP 0x92 RF diagnostics ----------
+ * Wrapping u32 counters and a few "last" bytes, incremented in place (task or
+ * IRQ-tail context, no locking: a lost increment is acceptable for a
+ * diagnostic). Read-only over USB via RF_DiagFill(); nothing here feeds back
+ * into the protocol. Increments sit AFTER the radio arm on hot paths. */
+static volatile uint32_t rfd_len10_seen;             /* LEN-10 reaching the not-connected accept gate */
+static volatile uint32_t rfd_len10_accept_known;     /* accepted as a known-durable reconnect */
+static volatile uint32_t rfd_len10_accept_fresh;     /* accepted as a fresh/tentative pair */
+static volatile uint32_t rfd_len10_rejected;         /* fell through the accept gate */
+static volatile uint32_t rfd_len10_ev10_seen;        /* LEN-10 seen by the EV10 reacquire branch */
+static volatile uint32_t rfd_pair_ack_posted;        /* RF_EVT_TX_PAIR_15 scheduled */
+static volatile uint32_t rfd_pair_ack_tx_ok;         /* pair-ACK StartTx rc == 0 (first + burst) */
+static volatile uint32_t rfd_pair_ack_tx_fail;       /* pair-ACK StartTx rc != 0 */
+static volatile uint32_t rfd_pair_ack_tx_done;       /* TX_FINISH while the burst was active */
+static volatile uint32_t rfd_rx_restart_handled;     /* RF_EVT_RX_RESTART re-arm attempts (a failed
+                                                      * arm counts too; it schedules the P4 retry) */
+static volatile uint32_t rfd_rx_restart_dropped_ev10;/* RF_EVT_RX_RESTART dropped (EV10 scan owns RX) */
+static volatile uint32_t rfd_arm_retry_scheduled;    /* P4 guard: retry posted after a failed arm */
+static volatile uint32_t rfd_supervision_lapses;     /* connected supervision lapsed */
+static volatile uint32_t rfd_ev10_entries;           /* EV10 reacquire scans started */
+static volatile uint32_t rfd_ev10_giveups;           /* EV10 watchdog expired -> reconnect camp */
+static volatile uint32_t rfd_pair_prep_runs;         /* EV10/pairing pair-prep RX arms */
+static volatile uint32_t rfd_ev10_ack_tx;            /* EV10 re-key ACK StartTx attempts */
+static volatile uint32_t rfd_ev10_ack_tx_fail;       /* ... that returned non-zero */
+static volatile uint32_t rfd_connected_promotes;     /* rf_state -> CONNECTED */
+static volatile uint32_t rfd_fresh_relistens;        /* rf_return_to_fresh_pair */
+static volatile uint32_t rfd_bootwin_closes;         /* boot window closed -> reconnect camp */
+static volatile uint32_t rfd_confirm_armed;          /* fresh promote entered WAIT_RX */
+static volatile uint32_t rfd_confirm_to_waitrx;      /* confirm deadline fired unconfirmed */
+static volatile uint32_t rfd_confirm_to_waitrearm;   /* confirm deadline fired confirmed */
+static volatile uint32_t rfd_persist_attempts;       /* bond_save calls */
+static volatile uint32_t rfd_persist_ok;             /* readback matched */
+static volatile uint32_t rfd_pump_passes;            /* RF_TaskPump calls (CH570) */
+static volatile uint32_t rfd_ack_accept_systick;     /* SysTick at the LEN-10 accept (sink) */
+static volatile uint32_t rfd_ack_tx_systick;         /* SysTick at the first pair-ACK StartTx */
+static volatile uint32_t rfd_ack_latency;            /* accept -> StartTx, SysTick ticks */
+static volatile uint32_t rfd_ack_tx_duration;        /* StartTx -> TX_FINISH of the first ACK */
+static volatile uint32_t rfd_last_ack_aa;            /* access address the last pair-ACK went out on */
+static volatile uint32_t rfd_reacq_entry_systick;    /* hal_timing_systick_now() at reacquire entry */
+static volatile uint32_t rfd_giveup_systick;         /* ... at the give-up camp */
+static volatile uint8_t  rfd_len10_last_disp;        /* RFD_L10_* of the last LEN-10 */
+static volatile uint8_t  rfd_persist_last_reason;    /* RFD_PERSIST_* of the last persist task run */
+static volatile uint8_t  rfd_last_save_rc = 0xFFu;   /* last bond_save rc (0xFF: none) */
+static volatile uint8_t  rfd_last_pair_ack_tx_rc = 0xFFu; /* last pair-ACK StartTx rc (0xFF: none) */
+enum {
+    RFD_L10_NONE = 0, RFD_L10_ACCEPT_KNOWN = 1, RFD_L10_ACCEPT_FRESH = 2,
+    RFD_L10_REJ_TOMBSTONE = 3, RFD_L10_REJ_LOCKED = 4, RFD_L10_REJ_BAD_MAC = 5,   /* zero, all-FF or own MAC */
+    RFD_L10_REJ_RSSI = 6, RFD_L10_REJ_OTHER = 7, RFD_L10_EV10 = 8
+};
+enum {
+    RFD_PERSIST_NONE = 0, RFD_PERSIST_SEMANTIC = 1, RFD_PERSIST_SAVE_FAIL = 2,
+    RFD_PERSIST_READBACK = 3, RFD_PERSIST_TOMBSTONE = 4, RFD_PERSIST_ALREADY = 5,
+    RFD_PERSIST_OK = 6
+};
+
 
 /* Runtime bond identity. These default to the compiled-in identity, so an
  * un-provisioned chip behaves exactly as before; RF_TaskInit() overrides them
@@ -1107,6 +1162,7 @@ static void rf_abort_pair_burst(void)
  * new-keyboard pair needs a replug boot window anyway.) */
 static void rf_return_to_fresh_pair(void)
 {
+    rfd_fresh_relistens++;
     hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL);
     hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
     hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
@@ -1145,6 +1201,8 @@ static void rf_return_to_fresh_pair(void)
 
 static void rf_enter_stock_reacquire(void)
 {
+    rfd_supervision_lapses++;
+    rfd_reacq_entry_systick = hal_timing_systick_now();
 #if !RF_TASK_EXECUTOR_TMOS
     if (rf_ch570_connected_rx_count == 0u) {
         rf_return_to_fresh_pair();
@@ -1200,6 +1258,7 @@ static void rf_enter_stock_reacquire(void)
     rf_pair_prep_idx = rf_proto_pair_scan_seed(rf_pair_ack15[4]);
     rf_channel = rf_pair_channels[rf_pair_prep_idx];
     rf_supervision_ev10_active = 1;
+    rfd_ev10_entries++;
 
     hal_rf_shut();
     rf_configure(rf_access_addr);
@@ -1250,6 +1309,7 @@ static void rf_arm_retry_if_failed(void)
          * fault-injection confirms the reschedule actually fires. */
         hal_event_post_delayed(RF_EVT_RX_RESTART,
                                RF_ARM_RETRY_TMOS * HAL_TMOS_UNIT_TICKS);
+        rfd_arm_retry_scheduled++;
     }
 }
 
@@ -1278,7 +1338,8 @@ static uint8_t rf_pair_tx_recover_if_failed(uint8_t status)
 
 static void rf_stock_reacquire_giveup(void)
 {
-
+    rfd_ev10_giveups++;
+    rfd_giveup_systick = hal_timing_systick_now();
     rf_supervision_ev10_active = 0;
     rf_stock_first_supervision_armed = 0;
     rf_last_conn_rx_tsys = 0;
@@ -1377,6 +1438,27 @@ static void rf_stock_reacquire_giveup(void)
  * be guarded; it is NOT cooperatively serialized. The legacy body below
  * is preserved VERBATIM (it is heavily bench-validated); the (sta, rsr) pair
  * it branches on is re-synthesized from the event. */
+/* IAP 0x92: name the gate a LEN-10 fell through (mirrors the accept condition
+ * in the sink; evaluated only on the reject path, counters only). */
+__HIGH_CODE
+static uint8_t rf_diag_len10_reject_reason(const uint8_t *rxBuf)
+{
+    if (rf_bond_tombstone) {
+        return RFD_L10_REJ_TOMBSTONE;
+    }
+    if (rf_bond_valid && !rf_pair_window_open) {
+        return RFD_L10_REJ_LOCKED;      /* bonded lockout: window closed and the
+                                         * known-peer disjunct did not match */
+    }
+    if (!rf_accept_peer_mac(&rxBuf[2])) {
+        return RFD_L10_REJ_BAD_MAC;
+    }
+    if (rf_rssi < RF_PAIR_MIN_RSSI) {
+        return RFD_L10_REJ_RSSI;
+    }
+    return RFD_L10_REJ_OTHER;
+}
+
 __HIGH_CODE
 static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxlen)
 {
@@ -1523,6 +1605,14 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                         rf_bond_persisted = 0;  /* tuple not the verified DataFlash one */
                     }
                 }
+                rfd_len10_seen++;
+                if (rf_pair_is_fresh) {
+                    rfd_len10_accept_fresh++;
+                    rfd_len10_last_disp = RFD_L10_ACCEPT_FRESH;
+                } else {
+                    rfd_len10_accept_known++;
+                    rfd_len10_last_disp = RFD_L10_ACCEPT_KNOWN;
+                }
 #endif
                 tmos_memcpy(rf_peer_mac, &rxBuf[2], 6);
                 /* A new pair is now in progress (this only runs for a fresh
@@ -1557,9 +1647,17 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #else
                 hal_event_post(RF_EVT_TX_PAIR_15);
 #endif
+                rfd_pair_ack_posted++;
+                rfd_ack_accept_systick = (uint32_t)SysTick->CNT;
                 break;
             }
 
+            /* IAP 0x92: a LEN-10 that fell through the accept gate above. */
+            if (rxBuf[1] == 10) {
+                rfd_len10_seen++;
+                rfd_len10_rejected++;
+                rfd_len10_last_disp = rf_diag_len10_reject_reason(rxBuf);
+            }
             /* Ignore any non-pair packet while listening for a connection. */
             hal_event_post(RF_EVT_RX_RESTART);
             break;
@@ -1640,6 +1738,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 const uint8_t *peer_mac = payload;
                 uint8_t mac_is_zero = 1;
 
+                rfd_len10_ev10_seen++;
+                rfd_len10_last_disp = RFD_L10_EV10;
+
                 for (int j = 0; j < 6; j++) {
                     if (rf_peer_mac[j] != 0) {
                         mac_is_zero = 0;
@@ -1710,6 +1811,10 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     case TX_MODE_TX_FINISH:
         if (rf_inject_burst_active) {
             uint8_t promote_now = 0;
+            rfd_pair_ack_tx_done++;
+            if (rf_inject_burst_idx == 0u) {
+                rfd_ack_tx_duration = (uint32_t)SysTick->CNT - rfd_ack_tx_systick;
+            }
             if (rf_inject_burst_idx >= RF_BURST_PROMOTE_AFTER_SESSION_BURST) {
                 promote_now = 1;
             }
@@ -1826,6 +1931,8 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* Stock configures the session-AA radio path while still in
                  * state 1, then commits state 2. Keep that ordering so our
                  * rf_config entry context matches the stock caller trace. */
+                rfd_connected_promotes++;   /* diag: before the flip, so the
+                                             * flip -> grid-arm gap is untouched */
                 rf_start_rx();
                 rf_state = RF_STATE_CONNECTED;
                 /* OQ7 Track 2f (2026-05-17): per stock event 0x40 disasm
@@ -1882,6 +1989,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                      * active, so the TMOS timer pool has room; the poll still runs,
                      * so a present keyboard confirms regardless. */
                     rf_confirm_state = RF_CONFIRM_STATE_WAIT_RX;
+                    rfd_confirm_armed++;
                     hal_event_post_delayed(RF_EVT_CONFIRM_TIMEOUT,
                         RF_CONFIRM_TIMEOUT_TMOS * HAL_TMOS_UNIT_TICKS);
                     /* N11 fix (bench-proven 2026-07-13, Codex-reviewed): a fresh
@@ -1947,6 +2055,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             /* Production shape: RF config happens while still in state 1;
              * TX_FINISH then promotes to state 2 and the already-running
              * TMR0 event-0x40 cadence becomes connected polling. */
+            rfd_connected_promotes++;       /* diag: before the flip (see above) */
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
 #if !RF_TASK_EXECUTOR_TMOS
@@ -2178,6 +2287,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * keyboard now needs a dongle replug to re-open the window. */
             rf_boot_window_active = 0;
             rf_pair_window_open   = 0;
+            rfd_bootwin_closes++;
             rf_access_addr = rf_bond_aa;
             rf_channel     = RF_PROTO_RECONNECT_CAMP_CHANNEL;
             rf_start_rx();
@@ -2246,9 +2356,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         (void)__risc_v_enable_irq(irq);
         if (st == RF_CONFIRM_STATE_WAIT_RX) {
+            rfd_confirm_to_waitrx++;
             rf_bond_persisted = 0;   /* the tentative bond was never persisted */
             rf_return_to_fresh_pair();
         } else if (st == RF_CONFIRM_STATE_WAIT_REARM) {
+            rfd_confirm_to_waitrearm++;
             rf_arm_bond_persist();            /* confirmed -> make it durable */
             /* Codex fix re-review: only (re)arm the first-supervision timer if we
              * are still the CONNECTED owner of the radio. If a persistent post-
@@ -2287,6 +2399,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * Re-arming here would RF_Shut+RF_Rx mid-dwell and gap the listen
          * window, dropping the occasional LEN-10. */
         if (rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING) {
+            rfd_rx_restart_dropped_ev10++;
             return events ^ RF_EVT_RX_RESTART;
         }
         /* RX-after-RX: fast path, no Config. Closes the "keyboard reply lands
@@ -2311,6 +2424,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * funnels through. If the re-arm fails, the radio timeout that would
          * re-drive us never fires, so reschedule ourselves off the guard. */
         rf_arm_retry_if_failed();
+        rfd_rx_restart_handled++;
 #if RF_CONFIRM_BEFORE_PERSIST
         /* Only NOW (after a SUCCESSFUL post-confirm arm) commit the durable bond,
          * so the flash erase/write never runs while RX is deaf (RF_EVT_PERSIST_BOND
@@ -2398,6 +2512,15 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         rf_configure(rf_access_addr);
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  rf_pair_ack15, sizeof(rf_pair_ack15));
+        rfd_last_pair_ack_tx_rc = status;
+        rfd_ack_tx_systick = (uint32_t)SysTick->CNT;
+        rfd_ack_latency = rfd_ack_tx_systick - rfd_ack_accept_systick;
+        rfd_last_ack_aa = rf_access_addr;
+        if (status != 0u) {
+            rfd_pair_ack_tx_fail++;
+        } else {
+            rfd_pair_ack_tx_ok++;
+        }
         /* P1': a failed StartTx here raises no TX_FINISH, so the pair-ACK chain
          * stalls with RX un-armed. Recover to the boot-window relisten. */
         if (rf_pair_tx_recover_if_failed(status)) {
@@ -2461,6 +2584,12 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             }
             status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                      rf_pair_ack15, sizeof(rf_pair_ack15));
+            rfd_last_pair_ack_tx_rc = status;
+            if (status != 0u) {
+                rfd_pair_ack_tx_fail++;
+            } else {
+                rfd_pair_ack_tx_ok++;
+            }
             /* P1': failed StartTx -> no TX_FINISH -> stalled burst; recover. */
             if (rf_pair_tx_recover_if_failed(status)) {
                 return events ^ RF_EVT_TX_PAIR_15B;
@@ -2667,6 +2796,7 @@ static void rf_send_pair_prep(void)
                                     rf_pair_prep_buf,
                                     sizeof(rf_pair_prep_buf));
     (void)status;
+    rfd_pair_prep_runs++;
 
     
 
@@ -2721,8 +2851,14 @@ static void rf_send_pair_ack(void)
                   rf_pair_ack_cb);
 
     hal_rf_shut();
-    (void)hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
-                          rf_pair_ack_buf, sizeof(rf_pair_ack_buf));
+    {
+        uint8_t ev10_tx_rc = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
+                                             rf_pair_ack_buf, sizeof(rf_pair_ack_buf));
+        rfd_ev10_ack_tx++;
+        if (ev10_tx_rc != 0u) {
+            rfd_ev10_ack_tx_fail++;
+        }
+    }
     if (rf_supervision_ev10_active) {
         /* Stamp the re-key TX instant so the EV10 restore can phase the first
          * resumed poll to rekey_TX + 1 interval. */
@@ -3084,6 +3220,7 @@ static void rf_request_bond_persist(void)
 static void rf_persist_bond_task(void)
 {
     if (rf_bond_tombstone) {
+        rfd_persist_last_reason = RFD_PERSIST_TOMBSTONE;
         rf_bond_persist_pending = 0;   /* CODEREVIEW N06 (defense-in-depth): if a
                                         * persist event slipped past RF_TombstoneBond's
                                         * cancel, do not write the cleared record. */
@@ -3109,6 +3246,7 @@ static void rf_persist_bond_task(void)
         /* stored record already matches the full tuple (incl. the N09
          * dongle identity); no write */
         rf_bond_persisted = 1;
+        rfd_persist_last_reason = RFD_PERSIST_ALREADY;
         return;
     }
 
@@ -3139,10 +3277,12 @@ static void rf_persist_bond_task(void)
      * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
      * session usable this boot; the record simply never becomes durable. */
     if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
-        
+        rfd_persist_last_reason = RFD_PERSIST_SEMANTIC;
         return;
     }
+    rfd_persist_attempts++;
     int save_rc = bond_save(&want);
+    rfd_last_save_rc = (uint8_t)save_rc;
 #if !RF_TASK_EXECUTOR_TMOS
     if (was_connected) {
         /* CH592-style: the poll cadence kept running through the write; just
@@ -3159,13 +3299,17 @@ static void rf_persist_bond_task(void)
     }
 #endif
     if (save_rc != 0) {
-        
+        rfd_persist_last_reason = RFD_PERSIST_SAVE_FAIL;
         return;                  /* leave rf_bond_persisted = 0 to retry */
     }
 
     bond_record_t back __attribute__((aligned(4)));
     if (bond_load(&back) && bond_tuple_equal(&back, &want)) {
         rf_bond_persisted = 1;
+        rfd_persist_ok++;
+        rfd_persist_last_reason = RFD_PERSIST_OK;
+    } else {
+        rfd_persist_last_reason = RFD_PERSIST_READBACK;
     }
 }
 
@@ -3304,6 +3448,264 @@ int8_t RF_GetRSSI(void)
     return rf_rssi;
 }
 
+/* ---------- IAP 0x92 RF diagnostics ----------
+ * Five RF_DIAG_PAGE_LEN-byte pages, little-endian, byte [0] = page version,
+ * [1] = page id. Decoded by tools/src/rfdiag.rs.
+ *
+ * Page 0 (runtime snapshot):
+ *   [2] rf_state  [3] rf_channel
+ *   [4] flags0: b0 bond_valid b1 bond_persisted b2 persist_pending
+ *               b3 ev10_active b4 boot_window_active b5 pair_window_open
+ *               b6 tombstone b7 pair_is_fresh
+ *   [5] flags1: b0 quiesced b1 burst_active b2 first_supervision_armed
+ *               b3 hal.rx_armed
+ *   [6] confirm_state [7] boot_window_step [8] pair_prep_idx [9] data_ch_idx
+ *   [10] rf_rssi (int8) [11] last LEN-10 disposition (RFD_L10_*)
+ *   [12..15] rf_access_addr [16..19] rf_bond_aa [20..23] hal.last_rx_aa
+ *   [24] hal.last_rx_channel [25] hal.last_rx_rc [26] hal.last_tx_rc
+ *   [27] hal.last_shut_rc [28..29] hal.last_rx_timeout [30..33] hal_now()
+ *   [34..39] rf_peer_mac [40..43] session AA advertised in the pair-ACK
+ *   [44..45] conn_interval [46..47] conn_timeout
+ *   [48..51] connected RX count (CH570) [52..55] rf_last_conn_rx_tsys
+ *   [56] persist last reason (RFD_PERSIST_*) [57] last bond_save rc
+ *   [58] last pair-ACK StartTx rc [59] hal.last_tx_channel [60] hal.rx_armed
+ * Page 1 (PHY + executor):
+ *   [2] timer active mask [3] periodic slot+1
+ *   [4..39] u32: rx_arm_attempts rx_arm_fail rx_done rx_crcerr rx_timeout
+ *                tx_start tx_fail tx_done shut_calls
+ *   [40..41] dispatch pending [42..43] delay slot 0 bit [44..45] delay slot 1 bit
+ *   [46..47] delayed posts degraded
+ *   [48..59] i16 remaining ms per timer slot (6 slots; clamped)
+ * Page 2 (protocol counters A, 15 u32 from [2]):
+ *   len10_seen len10_accept_known len10_accept_fresh len10_rejected
+ *   len10_ev10_seen pair_ack_posted pair_ack_tx_ok pair_ack_tx_fail
+ *   pair_ack_tx_done rx_restart_handled rx_restart_dropped_ev10
+ *   arm_retry_scheduled pump_passes supervision_lapses ev10_entries
+ * Page 3 (protocol counters B, 15 u32 from [2]):
+ *   ev10_giveups pair_prep_runs ev10_ack_tx ev10_ack_tx_fail
+ *   connected_promotes fresh_relistens bootwin_closes confirm_armed
+ *   confirm_to_waitrx confirm_to_waitrearm persist_attempts persist_ok
+ *   ack_latency (gauge, SysTick ticks at the core clock: LEN-10 accept ->
+ *   first pair-ACK StartTx returned) ack_tx_duration (gauge: StartTx returned
+ *   -> its TX_FINISH callback) last_ack_aa (gauge). Software endpoints, not
+ *   on-air instants.
+ * Page 4 (radio internals, continuous timebase):
+ *   [2..5] lle_irqs [6..9] bb_irqs [10..13] cb_calls [14..17] systick now
+ *   [18..21] systick at last callback [22..25] at last reacquire entry
+ *   [26..29] at last give-up [30..33] LLE[0] [34..37] LLE[8] [38..41] LLE[0xC]
+ *   [42..45] LLE[0x64] [46..49] BB[0x40] [50..53] lib gStatus
+ *   [54..55] lib WaitRecvTime (u16) [56] tuned channel [57] rx whiteChannel
+ *   [58] burst idx [59] irq bits [60..61] USB suspend episodes */
+static void rfd_put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static void rfd_put16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
+{
+    uint8_t i;
+
+    if (max < RF_DIAG_PAGE_LEN || page >= RF_DIAG_PAGE_COUNT) {
+        return 0u;
+    }
+    for (i = 0u; i < RF_DIAG_PAGE_LEN; i++) {
+        out[i] = 0u;
+    }
+    out[0] = RF_DIAG_PAGE_VERSION;
+    out[1] = page;
+
+    if (page == 0u) {
+        hal_rf_diag_t h;
+        uint8_t f0 = 0u, f1 = 0u;
+
+        hal_rf_diag_snapshot(&h);
+        if (rf_bond_valid)              f0 |= 0x01u;
+        if (rf_bond_persisted)          f0 |= 0x02u;
+        if (rf_bond_persist_pending)    f0 |= 0x04u;
+        if (rf_supervision_ev10_active) f0 |= 0x08u;
+        if (rf_boot_window_active)      f0 |= 0x10u;
+        if (rf_pair_window_open)        f0 |= 0x20u;
+        if (rf_bond_tombstone)          f0 |= 0x40u;
+#if RF_CONFIRM_BEFORE_PERSIST
+        if (rf_pair_is_fresh)           f0 |= 0x80u;
+#endif
+        if (rf_quiesced)                       f1 |= 0x01u;
+        if (rf_inject_burst_active)            f1 |= 0x02u;
+        if (rf_stock_first_supervision_armed)  f1 |= 0x04u;
+        if (h.rx_armed)                        f1 |= 0x08u;
+        out[2] = rf_state;
+        out[3] = rf_channel;
+        out[4] = f0;
+        out[5] = f1;
+#if RF_CONFIRM_BEFORE_PERSIST
+        out[6] = rf_confirm_state;
+#endif
+        out[7] = rf_boot_window_step;
+        out[8] = rf_pair_prep_idx;
+        out[9] = rf_data_ch_idx;
+        out[10] = (uint8_t)rf_rssi;
+        out[11] = rfd_len10_last_disp;
+        rfd_put32(&out[12], rf_access_addr);
+        rfd_put32(&out[16], rf_bond_aa);
+        rfd_put32(&out[20], h.last_rx_aa);
+        out[24] = h.last_rx_channel;
+        out[25] = h.last_rx_rc;
+        out[26] = h.last_tx_rc;
+        out[27] = h.last_shut_rc;
+        rfd_put16(&out[28], h.last_rx_timeout);
+        rfd_put32(&out[30], hal_now());
+        for (i = 0u; i < 6u; i++) {
+            out[34u + i] = rf_peer_mac[i];
+        }
+        rfd_put32(&out[40], rf_protocol_pair_ack_session_aa(rf_pair_ack15));
+        rfd_put16(&out[44], rf_conn_interval);
+        rfd_put16(&out[46], rf_conn_timeout);
+#if !RF_TASK_EXECUTOR_TMOS
+        rfd_put32(&out[48], rf_ch570_connected_rx_count);
+#endif
+        rfd_put32(&out[52], rf_last_conn_rx_tsys);
+        out[56] = rfd_persist_last_reason;
+        out[57] = rfd_last_save_rc;
+        out[58] = rfd_last_pair_ack_tx_rc;
+        out[59] = h.last_tx_channel;
+        out[60] = h.rx_armed;
+    } else if (page == 1u) {
+        hal_rf_diag_t h;
+        hal_dispatch_diag_t d;
+        hal_timing_diag_t t;
+
+        hal_rf_diag_snapshot(&h);
+        hal_dispatch_diag_snapshot(&d);
+        hal_timing_diag_snapshot(&t);
+        out[2] = t.active_mask;
+        out[3] = t.periodic_slot_p1;
+        rfd_put32(&out[4],  h.rx_arm_attempts);
+        rfd_put32(&out[8],  h.rx_arm_fail);
+        rfd_put32(&out[12], h.rx_done);
+        rfd_put32(&out[16], h.rx_crcerr);
+        rfd_put32(&out[20], h.rx_timeout);
+        rfd_put32(&out[24], h.tx_start);
+        rfd_put32(&out[28], h.tx_fail);
+        rfd_put32(&out[32], h.tx_done);
+        rfd_put32(&out[36], h.shut_calls);
+        rfd_put16(&out[40], d.pending);
+        rfd_put16(&out[42], d.delay_bit[0]);
+        rfd_put16(&out[44], d.delay_bit[1]);
+        rfd_put16(&out[46], d.degraded);
+        for (i = 0u; i < HAL_TIMING_DIAG_SLOTS; i++) {
+            /* Tsys ticks -> ms: HAL_TMOS_UNIT_TICKS is 625 us. */
+            int32_t ms = t.remaining[i] / (int32_t)(HAL_TMOS_UNIT_TICKS * 8u / 5u);
+            if (ms > 32767) {
+                ms = 32767;
+            } else if (ms < -32768) {
+                ms = -32768;
+            }
+            rfd_put16(&out[48u + 2u * i], (uint16_t)(int16_t)ms);
+        }
+    } else if (page == 2u) {
+        const uint32_t v[15] = {
+            rfd_len10_seen, rfd_len10_accept_known, rfd_len10_accept_fresh,
+            rfd_len10_rejected, rfd_len10_ev10_seen, rfd_pair_ack_posted,
+            rfd_pair_ack_tx_ok, rfd_pair_ack_tx_fail, rfd_pair_ack_tx_done,
+            rfd_rx_restart_handled, rfd_rx_restart_dropped_ev10,
+            rfd_arm_retry_scheduled, rfd_pump_passes, rfd_supervision_lapses,
+            rfd_ev10_entries
+        };
+        for (i = 0u; i < 15u; i++) {
+            rfd_put32(&out[2u + 4u * i], v[i]);
+        }
+    } else if (page == 4u) {
+        hal_rf_diag2_t d2;
+
+        hal_rf_diag2_snapshot(&d2);
+        rfd_put32(&out[2],  d2.lle_irqs);
+        rfd_put32(&out[6],  d2.bb_irqs);
+        rfd_put32(&out[10], d2.cb_calls);
+        rfd_put32(&out[14], hal_timing_systick_now());
+        rfd_put32(&out[18], d2.last_cb_systick);
+        rfd_put32(&out[22], rfd_reacq_entry_systick);
+        rfd_put32(&out[26], rfd_giveup_systick);
+        rfd_put32(&out[30], d2.lle_ctrl);
+        rfd_put32(&out[34], d2.lle_status);
+        rfd_put32(&out[38], d2.lle_mask);
+        rfd_put32(&out[42], d2.lle_timeout);
+        rfd_put32(&out[46], d2.bb_status);
+        rfd_put32(&out[50], d2.lib_status);
+        rfd_put16(&out[54], (uint16_t)d2.lib_wait_recv);
+        out[56] = d2.tuned_channel;
+        out[57] = d2.rx_white_channel;
+        out[58] = rf_inject_burst_idx;
+        out[59] = d2.irq_bits;
+        rfd_put16(&out[60], USB_SuspendEpisodes());
+    } else {
+        const uint32_t v[15] = {
+            rfd_ev10_giveups, rfd_pair_prep_runs, rfd_ev10_ack_tx,
+            rfd_ev10_ack_tx_fail, rfd_connected_promotes, rfd_fresh_relistens,
+            rfd_bootwin_closes, rfd_confirm_armed, rfd_confirm_to_waitrx,
+            rfd_confirm_to_waitrearm, rfd_persist_attempts, rfd_persist_ok,
+            rfd_ack_latency, rfd_ack_tx_duration, rfd_last_ack_aa
+        };
+        for (i = 0u; i < 15u; i++) {
+            rfd_put32(&out[2u + 4u * i], v[i]);
+        }
+    }
+    return RF_DIAG_PAGE_LEN;
+}
+
+/* IAP 0x94: the intervention ladder (task context, armed session). Rung 1 is
+ * the camp's own re-arm (rf_start_rx: shut + reconfigure + arm) issued from
+ * task context; rung 2 additionally re-runs the vendor init that only
+ * hal_rf_init otherwise performs. Both end on the P4 guard. Refused while a
+ * link is up or a reboot quiesce is in progress. */
+uint8_t RF_DiagIntervene(uint8_t rung)
+{
+#if RF_TASK_EXECUTOR_TMOS
+    /* CH59x: a live second RF_RoleInit under a global IRQ mask is not
+     * validated on the TMOS radio, and its diagnostics are stubs anyway. */
+    (void)rung;
+    return 0xE3u;
+#else
+    uint32_t irq;
+
+    if (rung != 1u && rung != 2u) {
+        return 0xE0u;
+    }
+    /* Snapshot the predicate AND act under one IRQ mask (codex final review):
+     * between an unmasked check and the mask a radio IRQ can accept a beacon
+     * and start a pair-ACK burst, which the intervention would then tear
+     * through while reporting success. Only the exact terminal camp qualifies:
+     * PAIRING, no EV10 scan, no boot window, no burst, not quiescing. */
+    irq = __risc_v_disable_irq();           /* ~100 us for the vendor init */
+    if (rf_quiesced) {
+        (void)__risc_v_enable_irq(irq);
+        return 0xE2u;
+    }
+    if (rf_state != RF_STATE_PAIRING || rf_supervision_ev10_active
+        || rf_boot_window_active || rf_inject_burst_active) {
+        (void)__risc_v_enable_irq(irq);
+        return 0xE1u;
+    }
+    hal_event_cancel(RF_EVT_RX_RESTART);    /* a stale restart must not race us */
+    if (rung == 2u) {
+        hal_rf_shut();
+        hal_rf_init();
+    }
+    rf_start_rx();
+    (void)__risc_v_enable_irq(irq);
+    rf_arm_retry_if_failed();
+    return 0u;
+#endif
+}
+
 uint8_t RF_GetConnectionStatus(void)
 {
     if (rf_state == RF_STATE_CONNECTED) {
@@ -3344,6 +3746,7 @@ void RF_TaskPump(void)
     while (ev) {
         ev = RF_ProcessEvent(0u, ev);
     }
+    rfd_pump_passes++;   /* diag: after the dispatch, off the event path */
 }
 
 #endif

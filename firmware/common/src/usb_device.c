@@ -84,6 +84,7 @@ static usb_ep6_out_cb_t ep6_out_cb;
  * the current key state is stashed (usb_kbd_pending) and delivered by the
  * resume path so the waking keystroke is not lost. */
 static volatile uint8_t usb_suspended;
+static volatile uint16_t usb_suspend_episodes;   /* IAP 0x92 page 4 */
 
 /* USB remote-wakeup feature. Armed/disarmed by the host via
  * SET/CLEAR_FEATURE(DEVICE_REMOTE_WAKEUP) and reported in GET_STATUS(device).
@@ -516,6 +517,7 @@ static __attribute__((noinline)) void USB_SuspendResume(void)
      * HID IN reports (see USB_Send*). */
     if (R8_USB_MIS_ST & RB_UMS_SUSPEND) {
         usb_suspended = 1;   /* host stopped SOF -- bus is idle */
+        usb_suspend_episodes++;   /* diag: correlate RF loss with host sleep */
         /* NAK any boot-keyboard report that was armed (T_RES=ACK) but not polled
          * before SOF stopped, so the host's first EP1 IN poll on resume can't
          * return it as a stale keystroke ahead of the USB_PollEP6 keys-up flush
@@ -1000,6 +1002,11 @@ uint8_t USB_IsConfigured(void)
 uint8_t USB_IsSuspended(void)
 {
     return usb_effective_suspended();
+}
+
+uint16_t USB_SuspendEpisodes(void)
+{
+    return usb_suspend_episodes;
 }
 
 uint8_t USB_GetLEDState(void)

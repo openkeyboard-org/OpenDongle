@@ -150,3 +150,28 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
         break;
     }
 }
+
+/* IAP 0x92 PHY diagnostics: not instrumented on CH59x (the CH570 executor is
+ * the diagnostic target). Zeros, with the "not attempted" rc sentinels. */
+void hal_rf_diag_snapshot(hal_rf_diag_t *out)
+{
+    uint8_t *p = (uint8_t *)out;
+    unsigned i;
+
+    for (i = 0u; i < sizeof(*out); i++) {
+        p[i] = 0u;
+    }
+    out->last_rx_rc = 0xFFu;
+    out->last_tx_rc = 0xFFu;
+    out->last_shut_rc = 0xFFu;
+}
+
+void hal_rf_diag2_snapshot(hal_rf_diag2_t *out)
+{
+    uint8_t *p = (uint8_t *)out;
+    unsigned i;
+
+    for (i = 0u; i < sizeof(*out); i++) {
+        p[i] = 0u;
+    }
+}

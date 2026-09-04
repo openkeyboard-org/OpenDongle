@@ -72,4 +72,15 @@ void hal_event_post_delayed(uint16_t evt_bit, uint32_t delta_ticks);
 void hal_event_cancel(uint16_t evt_bit);
 #endif
 
+/* Read-only executor diagnostics (IAP 0x92): the pending event mask, the bits
+ * held by the two delayed-post slots, and how many delayed posts degraded to
+ * immediate because both slots were busy. TMOS-backed chips report zeros. */
+typedef struct {
+    uint16_t pending;
+    uint16_t delay_bit[2];
+    uint16_t degraded;
+} hal_dispatch_diag_t;
+
+void hal_dispatch_diag_snapshot(hal_dispatch_diag_t *out);
+
 #endif /* HAL_DISPATCH_H */

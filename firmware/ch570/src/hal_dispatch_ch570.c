@@ -24,6 +24,9 @@ static volatile uint16_t hal_evt_pending;
 /* Fixed bit->slot map for the two delayed-post consumers. */
 static uint16_t hal_evt_delay_bit[2];
 
+/* IAP 0x92: delayed posts that found both slots busy and fired immediately. */
+static volatile uint16_t hal_evt_delay_degraded;
+
 __HIGH_CODE
 void hal_event_post(uint16_t evt_bits)
 {
@@ -68,6 +71,7 @@ void hal_event_post_delayed(uint16_t evt_bit, uint32_t delta_ticks)
     }
     if (idx == 2u) {
         hal_evt_pending |= evt_bit;   /* degraded: no free slot */
+        hal_evt_delay_degraded++;
         (void)__risc_v_enable_irq(irq);
         return;
     }
@@ -88,6 +92,17 @@ void hal_event_cancel(uint16_t evt_bit)
             st_cancel((uint8_t)(ST_SLOT_EVT_DELAY_0 + idx));
         }
     }
+    (void)__risc_v_enable_irq(irq);
+}
+
+void hal_dispatch_diag_snapshot(hal_dispatch_diag_t *out)
+{
+    uint32_t irq = __risc_v_disable_irq();
+
+    out->pending = hal_evt_pending;
+    out->delay_bit[0] = hal_evt_delay_bit[0];
+    out->delay_bit[1] = hal_evt_delay_bit[1];
+    out->degraded = hal_evt_delay_degraded;
     (void)__risc_v_enable_irq(irq);
 }
 

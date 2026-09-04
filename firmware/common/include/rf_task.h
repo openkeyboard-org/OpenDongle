@@ -95,4 +95,22 @@ uint8_t RF_GetConnectionStatus(void);
 /* Effective on-air identity, including any persistent bond override. */
 const uint8_t *RF_GetDongleMac(void);
 
+/* IAP 0x92 RF diagnostics: fill one read-only page (RF_DIAG_PAGE_LEN bytes) of
+ * runtime state and wrapping counters. Returns the bytes written, 0 for an
+ * unknown page or a too-small buffer. Page layouts are documented at
+ * RF_DiagFill in rf_task.c and mirrored by tools/src/rfdiag.rs. */
+#define RF_DIAG_PAGE_VERSION 1u
+#define RF_DIAG_PAGE_LEN     62u
+#define RF_DIAG_PAGE_COUNT   5u
+uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max);
+
+/* IAP 0x94 RF intervention ladder (armed, task context, CH570 only): 1 =
+ * re-arm RX from task context (heals a lost radio completion event), 2 = shut
+ * + vendor re-init + re-arm (heals a PHY that stayed deaf through shut/arm).
+ * The state predicate is checked and the action taken under one IRQ mask.
+ * 0 = done; 0xE0 unknown rung; 0xE1 not in the exact terminal camp (CONNECTED,
+ * EV10 scan, boot window/relisten or pair burst active); 0xE2 quiescing for a
+ * reboot; 0xE3 unsupported on this radio (CH59x). */
+uint8_t RF_DiagIntervene(uint8_t rung);
+
 #endif

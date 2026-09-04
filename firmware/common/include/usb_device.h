@@ -63,6 +63,8 @@ uint8_t USB_HasPendingWork(void);
  * keeps the poll dispatching so the link survives host sleep (v0.90 keep-alive
  * + remote wake). */
 uint8_t USB_IsSuspended(void);
+/* Number of host suspend episodes seen since boot (diagnostics). */
+uint16_t USB_SuspendEpisodes(void);
 
 /* Call from the main loop (foreground). When a HID report arrived over RF
  * while the bus was suspended and remote wakeup is armed, this drives the

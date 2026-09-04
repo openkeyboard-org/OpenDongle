@@ -26,7 +26,12 @@
  *     0x89  BondClear        no data                 (extension)
  *     0x90  Version          no data -> FW string    (extension)
  *     0x91  Status           no data -> status v1    (extension)
+ *     0x92  RfDiag           [page] (optional, default 0) -> 62-byte RF
+ *                            diagnostics page (rf_task.h RF_DiagFill);
+ *                            unarmed, read-only          (extension)
  *     0x93  FaultRead        no data -> fault record (extension)
+ *     0x94  RfPoke           [rung] -> [rc][rf_state]; armed; re-arms (1) or
+ *                            re-inits (2) the radio  (extension, diagnostic)
  *
  * Retired commands — firmware updates now happen inside the OpenBoot
  * bootloader over OBP, never in-app:
