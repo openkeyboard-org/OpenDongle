@@ -262,9 +262,9 @@ static void st_periodic_apply_nudge(void)
     }
 }
 
-__HIGH_CODE
 /* Continuous diagnostic timebase (hal_timing.h): the free-running SysTick the
- * periodic mode already relies on, started here if it is not yet running. */
+ * periodic mode already relies on, started here if it is not yet running.
+ * Flash-resident: IAP/diag context only. */
 uint32_t hal_timing_systick_now(void)
 {
     st_systick_ensure();
@@ -317,6 +317,7 @@ void hal_timing_diag_snapshot(hal_timing_diag_t *out)
     out->armed_delta = armed_delta;
 }
 
+__HIGH_CODE
 uint32_t st_now(void)   /* exposed for hal_timing_ch570.c (hal_now) */
 {
     /* Periodic mode: SysTick-exact, independent of the auto-reloading TMR (a
