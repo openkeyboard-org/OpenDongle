@@ -169,6 +169,36 @@ the source records it as measurably worse for the Bridge75.
   terminal camp has no time-based liveness backstop). The RF diagnostics page
   and intervention ladder in the separate draft PR exist to characterise it
   when it recurs.
+## Diagnostics: RF page (IAP `0x92`) and intervention ladder (`0x94`)
+
+`opendongle --diag` reads five 62-byte pages over the vendor HID interface
+without arming a maintenance session: the runtime snapshot (state, channel,
+the access address in RAM against the one the radio was last armed with,
+last RX/TX/shut status, an RX-armed latch, peer MAC, last beacon disposition,
+last persist outcome), the PHY and executor counters (RX arm attempts and
+failures, RX done/CRC/timeout, TX start/fail/done, the pending event mask,
+both delayed-post slots, every timer slot's remaining time), the protocol
+counters (beacons seen and accepted or rejected with the reason, reply
+scheduled/started/finished, EV10 entries and give-ups, promotes, relistens,
+confirm and persist outcomes, reply latency) and the radio internals (LLE/BB
+interrupt counts, a free-running SysTick timebase with stamps, the LLE/BB
+registers read through the vendor library's own base pointers, its receive
+state, the radio IRQ enable bits, USB suspend episodes). Counters wrap; the
+tool prints per-second rates between samples. A healthy reconnect camp reads
+as RX re-armed ~33/s on its 30 ms timeout with the radio address equal to
+the bond's; a deaf one is told apart by which of those stops.
+
+`opendongle --rf-poke 1|2` (armed) re-arms the receiver from task context, or
+shuts, re-runs the vendor init and re-arms. It is refused unless the dongle is
+in its exact terminal camp, and it exists to tell a dead software loop from a
+deaf PHY in place, without a debug probe (which on CH570 shares the USB pins).
+
+Honest limits: the counters are best-effort (no locking; a sample may straddle
+an event); the LLE/BB register meanings come from the linked library's
+disassembly, not from documentation; the SysTick stamps wrap every 42.9 s;
+`0x92` costs one EP6 exchange per page, which stalls the RF pump for
+milliseconds, so it is not for use inside a latency measurement. Footprint on
+CH570: ~2.9 KB flash, ~0.6 KB RAM, within the 0x800 stack floor.
 
 ## Security property: the RF link provides no confidentiality
 
