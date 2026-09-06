@@ -146,15 +146,10 @@ void Main_Circulation(void)
 {
     while (1) {
 #if DONGLE_PM_IDLE
-        /* Capture BEFORE the clear: a post made in the IRQ tail after the
-         * previous iteration's idle decision (the radio sink runs at thread
-         * level in the IRQ tail, so its post lands before __risc_v_enable_irq
-         * returns) must survive, or the sleep below could sleep past it. The
-         * latches are plain byte stores, so an IRQ post is never lost to a
-         * thread-side read-modify-write. Rationale: pm_ch592.c. */
-        uint8_t entry_work = dongle_pm_post;
-        dongle_pm_post = 0u;
-        dongle_pm_ran  = 0u;
+        /* Clear the work latches for this iteration and keep the one post
+         * that must survive the clear: a post made in the IRQ tail after the
+         * previous iteration's idle decision. Rationale: pm_ch592.c. */
+        uint8_t entry_work = pm_loop_top();
 #endif
         TMOS_SystemProcess();
         /* Run any IAP command the USB ISR deferred (bond write, reboot

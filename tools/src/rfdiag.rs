@@ -208,9 +208,12 @@ pub const PAGE5_NAMES: [&str; 14] = [
 /// count (u16 on both sides: `usb_rw_arm_count`, delta modulo 2^16) and
 /// [46..50] `wake_none` and [50..54] `stale_adc` (library temp-sample ADC residue cleared before sleeping) follow.
 ///
-/// `veto_entry` also ticks once when a post is cancelled before dispatch in
-/// the same iteration (a link-loss teardown sweeping the TMR0 ISR's post), so
-/// a count of the order of the teardowns is benign; the scheduler-shape alarm
+/// `veto_entry` counts a post that landed after the previous masked idle
+/// decision and that three scheduler passes then failed to dispatch (the
+/// firmware arms it only from that decision point, so a latch left over from
+/// a work veto never counts). It also ticks once when such a post is cancelled
+/// before dispatch (a link-loss teardown sweeping the TMR0 ISR's post), so a
+/// count of the order of the teardowns is benign; the scheduler-shape alarm
 /// is a RATE comparable to `wfe_count` / `quiet_passes`.
 pub const PAGE6_NAMES: [&str; 10] = [
     "sleep_control",
