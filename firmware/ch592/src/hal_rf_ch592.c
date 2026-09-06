@@ -41,6 +41,19 @@ static const uint8_t *volatile rf_last_rx_frame;
 
 void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf);
 
+/* IAP 0x92 page 1 PHY counters, the same contract the CH570 executor fills:
+ * arms and their status, and the vendor events as forwarded. The
+ * receive-side pair (tx_done = polls sent, rx_done = replies received) is
+ * the reply-rate oracle the power work needed: on this port a missed poll
+ * reply raises no event at all (the next poll's shut aborts the RX), so it
+ * shows only as rx_done falling behind tx_done. The event counters are
+ * written by the callback only (one context); the arm and shut counters are
+ * reached from the task AND from the IRQ-tail sink, so those increments are
+ * single-instruction AMOs (amoadd.w) rather than load/add/store, which the
+ * tail could split (codex review). */
+#define RF_DIAG_INC(field)  ((void)__atomic_fetch_add(&rf_diag.field, 1u, __ATOMIC_RELAXED))
+static hal_rf_diag_t rf_diag = { .last_rx_rc = 0xFFu, .last_tx_rc = 0xFFu, .last_shut_rc = 0xFFu };
+
 void hal_rf_init(void)
 {
     RF_RoleInit();
@@ -77,38 +90,55 @@ void hal_rf_set_channel(uint8_t channel)
 __HIGH_CODE
 uint8_t hal_rf_start_rx(uint8_t channel, uint16_t timeout)
 {
+    uint8_t rc;
     (void)timeout;   /* no hardware RX timeout in basic mode; TMOS supervises */
     if (channel != HAL_RF_CHANNEL_CURRENT) {
         RF_SetChannel(channel);
     }
-    return RF_Rx(NULL, 0, 0xFF, 0xFF);
+    rc = RF_Rx(NULL, 0, 0xFF, 0xFF);
+    RF_DIAG_INC(rx_arm_attempts);
+    rf_diag.last_rx_rc = rc;
+    if (rc != 0u) RF_DIAG_INC(rx_arm_fail); else rf_diag.rx_armed = 1u;
+    return rc;
 }
 
 __HIGH_CODE
 uint8_t hal_rf_start_rx_primed(uint8_t channel, uint16_t timeout,
                                const uint8_t *prime_buf, uint8_t prime_len)
 {
+    uint8_t rc;
     (void)timeout;
     if (channel != HAL_RF_CHANNEL_CURRENT) {
         RF_SetChannel(channel);
     }
-    return RF_Rx((uint8_t *)prime_buf, prime_len, 0xFF, 0xFF);
+    rc = RF_Rx((uint8_t *)prime_buf, prime_len, 0xFF, 0xFF);
+    RF_DIAG_INC(rx_arm_attempts);
+    rf_diag.last_rx_rc = rc;
+    if (rc != 0u) RF_DIAG_INC(rx_arm_fail); else rf_diag.rx_armed = 1u;
+    return rc;
 }
 
 __HIGH_CODE
 uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
                         const uint8_t *buf, uint8_t len)
 {
+    uint8_t rc;
     (void)access_addr;   /* AA comes from RF_Config (hal_rf_configure) */
     if (channel != HAL_RF_CHANNEL_CURRENT) {
         RF_SetChannel(channel);
     }
-    return RF_Tx((uint8_t *)buf, len, 0xFF, 0xFF);
+    rc = RF_Tx((uint8_t *)buf, len, 0xFF, 0xFF);
+    RF_DIAG_INC(tx_start);
+    rf_diag.last_tx_rc = rc;
+    if (rc != 0u) RF_DIAG_INC(tx_fail);
+    return rc;
 }
 
 void hal_rf_shut(void)
 {
-    RF_Shut();
+    RF_DIAG_INC(shut_calls);
+    rf_diag.rx_armed = 0u;
+    rf_diag.last_shut_rc = RF_Shut();
 }
 
 /*
@@ -129,19 +159,25 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     }
     switch (sta) {
     case RX_MODE_RX_DATA:
+        rf_diag.rx_armed = 0u;
         if (rsr == 0) {
+            rf_diag.rx_done++;
             rf_event_cb(HAL_RF_EV_RX_DONE, rxBuf, rxBuf ? rxBuf[1] : 0u);
         } else {
+            rf_diag.rx_crcerr++;
             rf_event_cb(HAL_RF_EV_RX_CRCERR, rxBuf, 0u);
         }
         break;
     case TX_MODE_TX_FINISH:
+        rf_diag.tx_done++;
         rf_event_cb(HAL_RF_EV_TX_DONE, rxBuf, 0u);
         break;
     case TX_MODE_TX_FAIL:
+        RF_DIAG_INC(tx_fail);
         rf_event_cb(HAL_RF_EV_TX_FAIL, rxBuf, 0u);
         break;
     default:
+        rf_diag.rx_timeout++;
         /* Auto-mode states this basic-mode firmware never arms. The legacy
          * callback's switch default posted a defensive RX restart for them;
          * forward as RX_TIMEOUT (CH59x has no real RX-timeout state, so the
@@ -151,19 +187,11 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     }
 }
 
-/* IAP 0x92 PHY diagnostics: not instrumented on CH59x (the CH570 executor is
- * the diagnostic target). Zeros, with the "not attempted" rc sentinels. */
+/* IAP 0x92 PHY diagnostics (page 1): the counters above. The radio-internal
+ * fields the CH570 executor fills (channel, AA, timeout) stay 0 here. */
 void hal_rf_diag_snapshot(hal_rf_diag_t *out)
 {
-    uint8_t *p = (uint8_t *)out;
-    unsigned i;
-
-    for (i = 0u; i < sizeof(*out); i++) {
-        p[i] = 0u;
-    }
-    out->last_rx_rc = 0xFFu;
-    out->last_tx_rc = 0xFFu;
-    out->last_shut_rc = 0xFFu;
+    *out = rf_diag;
 }
 
 void hal_rf_diag2_snapshot(hal_rf_diag2_t *out)
