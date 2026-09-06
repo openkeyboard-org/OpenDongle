@@ -224,7 +224,9 @@ aes-hw-validate:
 	    --ch592-probe "$(AES_HW_CH592)" \
 	    $(AES_HW_ARGS)
 
+# OPENBOOT is forwarded here too: the chip Makefiles read the OpenBoot slot
+# geometry at parse time, for every goal.
 clean:
-	$(MAKE) -C ch570 clean
-	$(MAKE) -C ch592 clean
+	$(MAKE) -C ch570 OPENBOOT="$(OPENBOOT)" clean
+	$(MAKE) -C ch592 OPENBOOT="$(OPENBOOT)" clean
 	$(MAKE) -C validation clean
