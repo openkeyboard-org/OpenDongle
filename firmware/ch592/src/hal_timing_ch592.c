@@ -81,6 +81,15 @@ void rf_tmr0_stop(void)
     R8_TMR0_CTRL_MOD = 0;                   /* stop counter */
     R8_TMR0_INTER_EN = 0;                   /* disable CYC_END IT */
     R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;   /* clear pending */
+#if DONGLE_PM_IDLE
+    /* A CYC_END that landed between hal_timer_cancel's mask and the
+     * PFIC_DisableIRQ above leaves IRQ 16 pending with the line disabled and
+     * the flag now clear. Under the SEVONPEND idle that is a source which never
+     * makes an edge and never clears: a permanent veto (duty 0 after every
+     * teardown) or a WFE storm. Drop it here; pm_irq_pending also detects and
+     * counts any residue (page 6 stale_tmr0). */
+    PFIC_ClearPendingIRQ(TMR0_IRQn);
+#endif
 }
 
 /* TMR0 CYC_END ISR shell. Clears the flag and hands the state-multiplex

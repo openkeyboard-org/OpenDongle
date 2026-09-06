@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include "dongle_status.h"
+#include "dongle_target.h"   /* a port may override RF_DIAG_PAGE_COUNT */
 
 /* Deferred-event bits (hal_dispatch.h vocabulary; on CH59x these are TMOS
  * task events — SYS_EVENT_MSG remains 0x8000). */
@@ -101,8 +102,31 @@ const uint8_t *RF_GetDongleMac(void);
  * RF_DiagFill in rf_task.c and mirrored by tools/src/rfdiag.rs. */
 #define RF_DIAG_PAGE_VERSION 1u
 #define RF_DIAG_PAGE_LEN     62u
+/* Pages 0-4 are common; a port may add pages (CH592 PM_IDLE=1: 5 and 6, see
+ * dongle_target.h). Compatibility runs one way: a tool that knows more pages
+ * than the firmware skips the ones RF_DiagFill answers with length 0
+ * (tools/src/rfdiag.rs REQUIRED_PAGES = 4); an older tool never requests
+ * them. */
+#ifndef RF_DIAG_PAGE_COUNT
 #define RF_DIAG_PAGE_COUNT   5u
+#endif
 uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max);
+
+#if DONGLE_PM_IDLE
+/* Idle-admission class of the RF task for the CH592 main-loop idle
+ * (pm_ch592.c): one byte of state bits read under the IRQ mask without any
+ * XIP call. 0 means the terminal PAIRING camp (bonded reconnect search or the
+ * fresh-pair listen) with nothing else in flight. */
+#define RF_IDLE_CLASS_CONNECTED 0x01u   /* rf_state == CONNECTED            */
+#define RF_IDLE_CLASS_EV10      0x02u   /* supervision EV10 reacquire scan   */
+#define RF_IDLE_CLASS_BOOTWIN   0x04u   /* boot reconnect/pair window timer  */
+#define RF_IDLE_CLASS_BURST     0x08u   /* fresh-pair ACK burst in flight    */
+#define RF_IDLE_CLASS_CONFIRM   0x10u   /* confirm-before-persist pending    */
+#define RF_IDLE_CLASS_QUIESCED  0x20u   /* IAP reboot quiesce done           */
+#define RF_IDLE_CLASS_IDLE      0x40u   /* rf_state == IDLE                  */
+#define RF_IDLE_CLASS_PERSIST   0x80u   /* bond persist posted, not written  */
+uint8_t RF_IdleClass(void);
+#endif
 
 /* IAP 0x94 RF intervention ladder (armed, task context, CH570 only): 1 =
  * re-arm RX from task context (heals a lost radio completion event), 2 = shut

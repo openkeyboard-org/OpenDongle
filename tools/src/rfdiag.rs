@@ -14,7 +14,9 @@ use crate::iap::{hexsp, op_rf_diag, IapDevice};
 
 pub const ACK_RF_DIAG: u8 = 0x92;
 pub const PAGE_LEN: usize = 62;
-pub const PAGE_COUNT: u8 = 5;
+/// Pages 0-4 are common to every chip; 5 ("power") and 6 ("power detail")
+/// exist only on CH592 firmware built with PM_IDLE=1 and are skipped otherwise.
+pub const PAGE_COUNT: u8 = 7;
 const PAGE_VERSION: u8 = 1;
 
 /// Little-endian u16 at `at`.
@@ -179,7 +181,91 @@ pub const PAGE1_NAMES: [&str; 9] = [
     "shut_calls",
 ];
 
-/// All the u32 counters of a full sample, keyed by name, for rate printing.
+/// Page 5 words at [2 + 4 i]. `hal_now` is the 60 MHz SysTick clock (a gauge,
+/// used as the idle-duty denominator); everything else is a wrapping counter.
+pub const PAGE5_NAMES: [&str; 14] = [
+    "wfe_count",
+    "idle_tsys",
+    "hb_irqs",
+    "hal_now",
+    "wake_tmr3",
+    "wake_radio",
+    "wake_both",
+    "wake_tmr0",
+    "wake_usb",
+    "wake_other",
+    "veto_work",
+    "veto_pending",
+    "veto_usb",
+    "veto_state",
+];
+
+/// Page 6 words at [2 + 4 i]; the `sleep_control` and `*_ipr*` words are gauges.
+/// [42] last-wake flags, [43] PB15 boot snapshot, [44..46] remote-wake arm
+/// count (u16 on both sides: `usb_rw_arm_count`, delta modulo 2^16) and
+/// [46..50] `wake_none` and [50..54] `stale_adc` (library temp-sample ADC residue cleared before sleeping) follow.
+///
+/// `veto_entry` also ticks once when a post is cancelled before dispatch in
+/// the same iteration (a link-loss teardown sweeping the TMR0 ISR's post), so
+/// a count of the order of the teardowns is benign; the scheduler-shape alarm
+/// is a RATE comparable to `wfe_count` / `quiet_passes`.
+pub const PAGE6_NAMES: [&str; 10] = [
+    "sleep_control",
+    "alien_ipr0",
+    "alien_ipr1",
+    "veto_ep0",
+    "stale_tmr0",
+    "veto_alien",
+    "veto_entry",
+    "quiet_passes",
+    "last_wake_ipr0",
+    "last_wake_ipr1",
+];
+
+/// The clock-gate oracle (page 6 `sleep_control`): the gated set is exactly
+/// 0x4DF6 (TMR1/2, UART0-3, SPI0, PWMX, I2C, LCD) and the four live blocks -
+/// TMR0 (RF pacer), TMR3 (heartbeat), USB and BLE - stay clocked. Byte 2 is
+/// R8_SLP_WAKE_CTRL (0x20 at reset) and is not part of the check.
+const CLK_GATE_MASK: u32 = 0x4DF6;
+const CLK_LIVE_MASK: u32 = 0x0001 | 0x0008 | 0x1000 | 0x8000;
+
+pub fn clock_gate_verdict(sleep_control: u32) -> String {
+    let gated = sleep_control & 0xFFFF;
+    let live_gated = gated & CLK_LIVE_MASK;
+    if live_gated != 0 {
+        format!("LIVE BLOCK GATED (mask 0x{live_gated:04X}: TMR0/TMR3/USB/BLE must stay clocked)")
+    } else if gated == 0 {
+        "gates off".to_string()
+    } else if gated & !CLK_GATE_MASK != 0 {
+        // A bit the firmware's static assert refuses: not a PM_CLK_GATE_MASK value.
+        format!(
+            "RESERVED BIT GATED (mask 0x{:04X}: outside the validated 0x{CLK_GATE_MASK:04X} set)",
+            gated & !CLK_GATE_MASK
+        )
+    } else if gated == CLK_GATE_MASK {
+        format!("gates=0x{gated:04X} (full validated set; TMR0/TMR3/USB/BLE clocked)")
+    } else {
+        // PM_CLK_GATE_MASK subsets are legitimate builds (bench bisection).
+        format!("gates=0x{gated:04X} (permitted subset of 0x{CLK_GATE_MASK:04X}; TMR0/TMR3/USB/BLE clocked)")
+    }
+}
+
+/// The counters that are 16 bits wide on the wire (widened to u32 in
+/// `counters`); their per-sample delta wraps at 2^16, not 2^32.
+const U16_COUNTERS: [&str; 1] = ["rw_arms"];
+
+/// The wrapping delta of a counter between two samples, in the counter's own
+/// width: a u16 stepping 65535 -> 0 is +1, not 4_294_901_761.
+pub fn counter_delta(name: &str, prev: u32, cur: u32) -> u32 {
+    if U16_COUNTERS.contains(&name) {
+        u32::from((cur as u16).wrapping_sub(prev as u16))
+    } else {
+        cur.wrapping_sub(prev)
+    }
+}
+
+/// All the counters of a full sample, keyed by name, for rate printing (u16
+/// counters widened; see `counter_delta`).
 pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
     let mut v = Vec::new();
     for p in pages {
@@ -208,6 +294,25 @@ pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
                 for (i, n) in PAGE4_NAMES.iter().enumerate() {
                     v.push((*n, le32(&p.raw, 2 + 4 * i)));
                 }
+            }
+            5 => {
+                for (i, n) in PAGE5_NAMES.iter().enumerate() {
+                    if *n == "hal_now" {
+                        continue; // a clock; the derived idle duty uses it
+                    }
+                    v.push((*n, le32(&p.raw, 2 + 4 * i)));
+                }
+            }
+            6 => {
+                for (i, n) in PAGE6_NAMES.iter().enumerate() {
+                    if *n == "sleep_control" || n.contains("ipr") {
+                        continue; // gauges / last-seen masks
+                    }
+                    v.push((*n, le32(&p.raw, 2 + 4 * i)));
+                }
+                v.push(("wake_none", le32(&p.raw, 46)));
+                v.push(("rw_arms", u32::from(le16(&p.raw, 44))));
+                v.push(("stale_adc", le32(&p.raw, 50)));
             }
             _ => {}
         }
@@ -402,6 +507,54 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                 ));
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
             }
+            5 => {
+                let f = r[58];
+                out.push("power:".to_string());
+                out.push(format!(
+                    "  idle            wfe_count={} idle_tsys={} hb_irqs={} hal_now=0x{:08X} level={} heartbeat_us={}",
+                    le32(r, 2), le32(r, 6), le32(r, 10), le32(r, 14), r[59], le16(r, 60)
+                ));
+                out.push(format!(
+                    "  wakes           tmr3={} radio={} both={} tmr0={} usb={} other={}",
+                    le32(r, 18), le32(r, 22), le32(r, 26), le32(r, 30), le32(r, 34), le32(r, 38)
+                ));
+                out.push(format!(
+                    "  vetoes          work={} pending={} usb={} state={}",
+                    le32(r, 42), le32(r, 46), le32(r, 50), le32(r, 54)
+                ));
+                out.push(format!(
+                    "  flags           tmr0_counting={} tmr3_counting={} usb_configured={} usb_suspended={} idle_in_suspend={} debug_en={} remote_wake_armed={}",
+                    f & 0x01 != 0, f & 0x02 != 0, f & 0x04 != 0, f & 0x08 != 0,
+                    f & 0x10 != 0, f & 0x20 != 0, f & 0x40 != 0
+                ));
+                out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
+            }
+            6 => {
+                let sc = le32(r, 2);
+                let wf = r[42];
+                let pb = r[43];
+                out.push("power detail:".to_string());
+                out.push(format!(
+                    "  clock gates     sleep_control=0x{:08X} {}",
+                    sc,
+                    clock_gate_verdict(sc)
+                ));
+                out.push(format!(
+                    "  vetoes          ep0={} entry={} alien={} (last alien IPR0=0x{:08X} IPR1=0x{:08X}) stale_tmr0={} stale_adc={} quiet_passes={} wake_none={}",
+                    le32(r, 14), le32(r, 26), le32(r, 22), le32(r, 6), le32(r, 10),
+                    le32(r, 18), le32(r, 50), le32(r, 30), le32(r, 46)
+                ));
+                out.push(format!(
+                    "  last wake       IPR0=0x{:08X} IPR1=0x{:08X} flags=0x{:02X} (tmr0_cyc={} tmr3_cyc={} usb_transfer={} usb_suspend={} usb_bus_rst={})",
+                    le32(r, 34), le32(r, 38), wf,
+                    wf & 0x01 != 0, wf & 0x02 != 0, wf & 0x04 != 0, wf & 0x08 != 0, wf & 0x10 != 0
+                ));
+                out.push(format!(
+                    "  pb15 at boot    pu={} pd={} dir={} debug_en={}; remote-wake arms={}",
+                    pb & 0x01 != 0, pb & 0x02 != 0, pb & 0x04 != 0, pb & 0x08 != 0, le16(r, 44)
+                ));
+                out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
+            }
             _ => out.push(format!("  page {} raw   {}", p.id, hexsp(r, PAGE_LEN))),
         }
     }
@@ -443,7 +596,7 @@ pub fn rates(prev: &[Page], cur: &[Page], dt: f64) -> Vec<String> {
     let mut line = String::from("  rates/s        ");
     let mut n = 0;
     for ((name, va), (_, vb)) in a.iter().zip(b.iter()) {
-        let d = vb.wrapping_sub(*va);
+        let d = counter_delta(name, *va, *vb);
         if d == 0 {
             continue;
         }
@@ -460,7 +613,61 @@ pub fn rates(prev: &[Page], cur: &[Page], dt: f64) -> Vec<String> {
     if out.is_empty() {
         out.push("  rates/s         (no counter changed)".to_string());
     }
+    if let Some(line) = power_derived(prev, cur, dt) {
+        out.push(line);
+    }
     out
+}
+
+/// Page 5 `idle_tsys` and `hal_now` are 32-bit counts of the 60 MHz SysTick,
+/// so both wrap every 71.6 s. A per-sample delta is exact only while the sample
+/// is shorter than that; a wrapped numerator cannot be recovered from host
+/// time, so the duty is reported unavailable above this conservative bound
+/// instead of silently low (90 % over 120 s would otherwise print ~30 %).
+const TSYS_HZ: f64 = 60.0e6;
+const TSYS_WRAP_S: f64 = 4_294_967_296.0 / TSYS_HZ;
+const DUTY_MAX_DT_S: f64 = 60.0;
+
+/// Values derived from page 5 deltas.
+///
+/// `idle_duty`: SysTick ticks spent in WFE over the SysTick ticks that
+/// elapsed (host time stands in only if the firmware clock did not move),
+/// exact for samples under `DUTY_MAX_DT_S`, `n/a` beyond.
+///
+/// `radio_wake_ratio` = `wake_both / (wake_radio + wake_both)`. The firmware
+/// snapshots what is pending right after the WFE, before any ISR runs:
+/// `wake_radio` counts exits where a radio IRQ was the ONLY pending source,
+/// which proves the radio ended the WFE; `wake_both` counts exits where
+/// another source (TMR3/TMR0/USB/alien) was pending too, and those the
+/// counters cannot order - a radio IRQ that never woke the core and waited for
+/// the next source looks the same as a radio wake with a heartbeat landing in
+/// the read window. The ratio is therefore a co-pending frequency, not a
+/// wake-failure rate. The R2a proof is the protocol, not the number: a
+/// keyboard-absent negative control must read `wake_radio == wake_both == 0`,
+/// then every reconnect/pair must advance `wake_radio`; a radio that never
+/// ends the WFE shows as `wake_both` advancing with `wake_radio` flat.
+fn power_derived(prev: &[Page], cur: &[Page], dt: f64) -> Option<String> {
+    let a = prev.iter().find(|p| p.id == 5)?;
+    let b = cur.iter().find(|p| p.id == 5)?;
+    let d = |at: usize| le32(&b.raw, at).wrapping_sub(le32(&a.raw, at));
+    let duty = if dt >= DUTY_MAX_DT_S {
+        format!(
+            "n/a (sample {dt:.1}s > {DUTY_MAX_DT_S:.0}s; idle_tsys wraps every {TSYS_WRAP_S:.1}s)"
+        )
+    } else {
+        let elapsed = if d(14) != 0 { f64::from(d(14)) } else { dt * TSYS_HZ };
+        format!("{:.1}%", 100.0 * f64::from(d(6)) / elapsed)
+    };
+    let radio = u64::from(d(22));
+    let both = u64::from(d(26));
+    let ratio = if radio + both == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{:.1}%", 100.0 * both as f64 / (radio + both) as f64)
+    };
+    Some(format!(
+        "  derived         idle_duty={duty} radio_wake_ratio={ratio} (wake_both/(wake_radio+wake_both): radio-pending WFE exits with another source also pending, unordered; only wake_radio, radio pending alone, proves the radio ended the WFE - a non-waking radio reads wake_both up with wake_radio flat)"
+    ))
 }
 
 #[cfg(test)]
@@ -547,6 +754,93 @@ mod tests {
         assert!(text.contains("after SetRx (armed)"), "{text}");
         assert!(text.contains("regs_valid=true"), "{text}");
         assert_eq!(counters(&[p])[0], ("lle_irqs", 1000));
+    }
+
+    #[test]
+    fn decodes_power_page_and_derives_duty() {
+        let sample = |wfe: u32, idle: u32, now: u32, radio: u32, both: u32| {
+            page(5, |raw| {
+                raw[2..6].copy_from_slice(&wfe.to_le_bytes());
+                raw[6..10].copy_from_slice(&idle.to_le_bytes());
+                raw[14..18].copy_from_slice(&now.to_le_bytes());
+                raw[22..26].copy_from_slice(&radio.to_le_bytes());
+                raw[26..30].copy_from_slice(&both.to_le_bytes());
+                raw[58] = 0x63; // TMR0+TMR3 counting, debug_en, remote wake armed
+                raw[59] = 3;
+                raw[60..62].copy_from_slice(&1000u16.to_le_bytes());
+            })
+        };
+        let pa = Page::decode(5, &sample(1000, 0, 0, 10, 0)).unwrap();
+        let pb = Page::decode(5, &sample(2000, 54_000_000, 60_000_000, 29, 1)).unwrap();
+        let text = render(&[pb.clone()]).join("\n");
+        assert!(text.contains("level=3 heartbeat_us=1000"), "{text}");
+        assert!(text.contains("tmr3_counting=true"), "{text}");
+        assert!(text.contains("remote_wake_armed=true"), "{text}");
+        assert!(text.contains("wakes           tmr3=0 radio=29 both=1"), "{text}");
+        assert!(counters(&[pb.clone()]).iter().all(|(n, _)| *n != "hal_now"));
+        let r = rates(&[pa.clone()], &[pb.clone()], 1.0).join("\n");
+        assert!(r.contains("wfe_count=1000.0"), "{r}");
+        assert!(r.contains("idle_duty=90.0%"), "{r}");
+        assert!(r.contains("radio_wake_ratio=5.0%"), "{r}");
+        // 90 % duty over 120 s: the u32 idle_tsys delta has wrapped once and
+        // would read ~30 %; the tool must say so instead of printing it.
+        let pc = Page::decode(5, &sample(121_000, 6_480_000_000u64 as u32, 0, 29, 1)).unwrap();
+        let r = rates(&[pa], &[pc], 120.0).join("\n");
+        assert!(r.contains("idle_duty=n/a (sample 120.0s > 60s; idle_tsys wraps every 71.6s)"), "{r}");
+        // Under the bound the firmware clock is the denominator even when the
+        // host interval disagrees (USB latency), and a stalled clock falls
+        // back to host time rather than dividing by zero.
+        let r = rates(&[pb.clone()], &[Page::decode(5, &sample(3000, 84_000_000, 90_000_000, 29, 1)).unwrap()], 2.0).join("\n");
+        assert!(r.contains("idle_duty=100.0%"), "{r}");
+        let r = rates(&[pb.clone()], &[Page::decode(5, &sample(3000, 114_000_000, 60_000_000, 29, 1)).unwrap()], 1.0).join("\n");
+        assert!(r.contains("idle_duty=100.0%"), "{r}");
+    }
+
+    #[test]
+    fn remote_wake_arm_count_deltas_as_u16() {
+        let with = |arms: u16| {
+            Page::decode(6, &page(6, |raw| raw[44..46].copy_from_slice(&arms.to_le_bytes()))).unwrap()
+        };
+        assert_eq!(counter_delta("rw_arms", 65535, 0), 1);
+        assert_eq!(counter_delta("rw_arms", 3, 5), 2);
+        assert_eq!(counter_delta("wfe_count", u32::MAX, 0), 1);
+        let r = rates(&[with(65535)], &[with(0)], 1.0).join("\n");
+        assert!(r.contains("rw_arms=1.0"), "{r}");
+        assert!(!r.contains("4294901761"), "{r}");
+    }
+
+    #[test]
+    fn power_detail_page_checks_the_clock_gate_oracle() {
+        let with = |sc: u32| page(6, |raw| raw[2..6].copy_from_slice(&sc.to_le_bytes()));
+        let text = render(&[Page::decode(6, &with(0x0020_4DF6)).unwrap()]).join("\n");
+        assert!(text.contains("gates=0x4DF6 (full validated set"), "{text}");
+        let text = render(&[Page::decode(6, &with(0x0020_4DFE)).unwrap()]).join("\n");
+        assert!(text.contains("LIVE BLOCK GATED (mask 0x0008"), "{text}");
+        let text = render(&[Page::decode(6, &with(0x0020_0000)).unwrap()]).join("\n");
+        assert!(text.contains("gates off"), "{text}");
+        let text = render(&[Page::decode(6, &with(0x0020_0006)).unwrap()]).join("\n");
+        assert!(text.contains("gates=0x0006 (permitted subset of 0x4DF6"), "{text}");
+        let text = render(&[Page::decode(6, &with(0x0020_0200)).unwrap()]).join("\n");
+        assert!(text.contains("RESERVED BIT GATED (mask 0x0200"), "{text}");
+        let p = Page::decode(
+            6,
+            &page(6, |raw| {
+                raw[30..34].copy_from_slice(&7u32.to_le_bytes());
+                raw[42] = 0x03;
+                raw[43] = 0x08;
+                raw[44..46].copy_from_slice(&3u16.to_le_bytes());
+                raw[46..50].copy_from_slice(&2u32.to_le_bytes());
+            }),
+        )
+        .unwrap();
+        let text = render(&[p.clone()]).join("\n");
+        assert!(text.contains("tmr0_cyc=true tmr3_cyc=true usb_transfer=false"), "{text}");
+        assert!(text.contains("pu=false pd=false dir=false debug_en=true; remote-wake arms=3"), "{text}");
+        let c = counters(&[p]);
+        assert!(c.contains(&("quiet_passes", 7)), "{c:?}");
+        assert!(c.contains(&("wake_none", 2)), "{c:?}");
+        assert!(c.contains(&("rw_arms", 3)), "{c:?}");
+        assert!(c.iter().all(|(n, _)| !n.contains("ipr") && *n != "sleep_control"), "{c:?}");
     }
 
     #[test]

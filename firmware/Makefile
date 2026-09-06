@@ -55,6 +55,7 @@ PYTHON ?= /usr/bin/python3 -I
 
 .PHONY: all ch570 ch592 ch570-factory ch592-factory \
 	ch570-factory-flash ch592-factory-flash \
+	ch570-print-build-id ch592-print-build-id \
 	ch570-openboot ch592-openboot openboot-test \
 	ch570-bundle ch592-bundle bundles \
 	aes-hw-build aes-hw-validate \
@@ -114,6 +115,22 @@ ch592-factory-flash:
 	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" \
 	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
 	    flash-factory
+
+# The build id a configuration advertises, printed bare (no Entering/Leaving
+# lines) so it compares byte-for-byte against `opendongle --info` and the
+# object tree's .build-id-stamp. Knobs and BUILD_ID given on this command line
+# (PM_IDLE=1 PM_IDLE_LEVEL=3 ..., BUILD_ID=00000000) reach the sub-make through
+# MAKEFLAGS exactly as they do for the build targets above, so the id printed
+# is the id the same command line would build.
+ch570-print-build-id:
+	@$(MAKE) --no-print-directory -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" print-build-id
+
+ch592-print-build-id:
+	@$(MAKE) --no-print-directory -C ch592 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" print-build-id
 
 # OpenBoot bootloader images, built from the pinned submodule with the
 # product board files (OpenBoot/firmware/boards/opendongle-*.mk). OpenBoot

@@ -39,6 +39,14 @@
 #define DONGLE_HAS_RF 1
 #endif
 
+/* When 1, the CH592 Tier-1 power-management subsystem is compiled in
+ * (ch592/src/pm_ch592.c: main-loop SEVONPEND-WFE idle, TMR3 heartbeat, IAP
+ * 0x92 pages 5-6). Only the CH592 Makefile ever sets it; every other port, and
+ * the CH592 all-off build, is a true no-op. */
+#ifndef DONGLE_PM_IDLE
+#define DONGLE_PM_IDLE 0
+#endif
+
 #ifndef DONGLE_BUILD_PROFILE
 #define DONGLE_BUILD_PROFILE DONGLE_PROFILE_UNKNOWN
 #endif
@@ -72,5 +80,12 @@ uint8_t dongle_fault_fill(uint8_t *out, uint8_t max);
 void ch570_capture_boot_entropy(void);
 void ch570_mix_jitter_entropy(void);
 void dongle_fault_boot(uint8_t reset_status);
+
+#if DONGLE_PM_IDLE
+/* IAP 0x92 power pages (command 0x92, pages 5 and 6): fill the page into a
+ * zeroed RF_DIAG_PAGE_LEN buffer whose header ([0] version, [1] page) the
+ * caller (RF_DiagFill) already wrote. CH592 pm_ch592.c. */
+void dongle_pm_diag_fill(uint8_t page, uint8_t *out);
+#endif
 
 #endif /* DONGLE_PLATFORM_H */

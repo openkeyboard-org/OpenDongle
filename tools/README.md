@@ -98,7 +98,9 @@ Flags: `--vid` / `--pid` (accept `0x..`/decimal), `--interface`, `--hidraw`
 (`--samples N`, `--period-ms MS`), `--enter-bootloader`, `--image FILE`,
 `--force`.
 
-`--diag` reads the RF diagnostics pages (command 0x92, five 62-byte pages,
+`--diag` reads the RF diagnostics pages (command 0x92, up to seven 62-byte
+pages: 0-4 on every chip, plus the CH592 power pages 5 "power" and 6 "power
+detail" that exist only on a `PM_IDLE=1` build and are skipped otherwise;
 provided by firmware carrying the RF diagnostics page -- a separate draft PR;
 firmware without it answers nothing and the tool reports a timeout;
 firmware `RF_DiagFill` in `firmware/common/src/rf_task.c`) with unarmed
@@ -116,6 +118,25 @@ printed as a per-second rate, which is how a healthy reconnect camp reads
 (no RX events, or a non-zero arm status, or a radio address that is not the
 bond's). Every page ends with its raw bytes. CH592 firmware answers the page
 with zeros for the CH570-only fields.
+
+On a `PM_IDLE=1` CH592 build each sample after the first also prints two
+derived figures. `idle_duty` is page 5 `idle_tsys` (60 MHz SysTick ticks spent
+in WFE) over the `hal_now` ticks that elapsed; both are 32-bit and wrap every
+71.6 s, and a wrapped numerator cannot be recovered from host time, so the duty
+is exact for `--period-ms` under 60000 and prints `n/a` beyond that rather
+than a silently low figure. `radio_wake_ratio` is
+`wake_both / (wake_radio + wake_both)`: the firmware snapshots what is pending
+right after the WFE, before any ISR runs, and `wake_radio` counts exits where a
+radio IRQ was the ONLY source pending (proof that the radio ended the WFE)
+while `wake_both` counts exits where another source was pending too, which the
+counters cannot order (a radio IRQ that never woke the core and waited for the
+next TMR3/TMR0/USB looks the same as a radio wake with a heartbeat landing in
+the read window). The ratio is a co-pending frequency, not a wake-failure
+rate; the radio-wake proof is the protocol around it: a keyboard-absent
+negative control must read `wake_radio == wake_both == 0`, then every
+reconnect/pair must advance `wake_radio`, and a radio that never ends the WFE
+shows as `wake_both` advancing with `wake_radio` flat. The page 6 remote-wake
+arm count is 16 bits on both sides and its rate wraps accordingly.
 
 Exit codes:
 
@@ -158,6 +179,13 @@ status is non-zero on any refusal, and the reply names the reason. Use it on a
 dongle that is deaf to its keyboard, rung 1 first: which rung restores the
 link says whether the software re-arm loop or the PHY was dead. It needs the
 firmware from the RF-diagnostics draft PR.
+
+The build id `--info` prints is the one to check against the tree that built
+the image: `make -C firmware ch592-print-build-id MRS_TOOLCHAIN=... <the same
+knobs>` (or `ch570-print-build-id`) prints exactly the id that command line
+builds, and `firmware/<chip>/build/<profile>/.build-id-stamp` holds the id the
+last build actually compiled in. All three must agree; a mismatch means the
+flashed image is not the configuration you think it is.
 
 `--info` reports an absent or invalid bond record as information rather than an
 error, and shows a best-effort split of the invalid record's fields (magic,

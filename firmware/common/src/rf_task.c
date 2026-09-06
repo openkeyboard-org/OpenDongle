@@ -2178,6 +2178,12 @@ static void rf_arm_post_poll_rx(void)
 
 static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 {
+#ifdef RF_PROCESS_EVENT_HOOK
+    /* CH592 PM_IDLE: the "app task ran this iteration" latch, so leftover bits
+     * a handler re-queues (the `events ^ bit` returns below) are never slept
+     * past. Defined by ch592/src/hal_timing_ch592.h; CH570 defines nothing. */
+    RF_PROCESS_EVENT_HOOK(events);
+#endif
 #if RF_TASK_EXECUTOR_TMOS
     if (events & SYS_EVENT_MSG) {
         uint8_t *pMsg;
@@ -3443,6 +3449,33 @@ uint8_t RF_GetState(void)
     return rf_state;
 }
 
+#if DONGLE_PM_IDLE
+/* Idle-admission class for the CH592 main-loop idle (pm_ch592.c): the
+ * terminal-camp predicate of RF_DiagIntervene plus every state the level
+ * policy distinguishes, as one byte. SRAM-resident because it is re-read under
+ * the IRQ mask right before the WFE, where no XIP fetch may sit. */
+DONGLE_HIGHCODE_RF_HOT
+uint8_t RF_IdleClass(void)
+{
+    uint8_t c = 0u;
+
+    if (rf_state == RF_STATE_CONNECTED) {
+        c |= RF_IDLE_CLASS_CONNECTED;
+    } else if (rf_state == RF_STATE_IDLE) {
+        c |= RF_IDLE_CLASS_IDLE;
+    }
+    if (rf_supervision_ev10_active) c |= RF_IDLE_CLASS_EV10;
+    if (rf_boot_window_active)      c |= RF_IDLE_CLASS_BOOTWIN;
+    if (rf_inject_burst_active)     c |= RF_IDLE_CLASS_BURST;
+#if RF_CONFIRM_BEFORE_PERSIST
+    if (rf_confirm_state != RF_CONFIRM_STATE_NONE) c |= RF_IDLE_CLASS_CONFIRM;
+#endif
+    if (rf_quiesced)                c |= RF_IDLE_CLASS_QUIESCED;
+    if (rf_bond_persist_pending)    c |= RF_IDLE_CLASS_PERSIST;
+    return c;
+}
+#endif /* DONGLE_PM_IDLE */
+
 int8_t RF_GetRSSI(void)
 {
     return rf_rssi;
@@ -3646,6 +3679,11 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
         out[58] = rf_inject_burst_idx;
         out[59] = d2.irq_bits;
         rfd_put16(&out[60], USB_SuspendEpisodes());
+#if DONGLE_PM_IDLE
+    } else if (page >= 5u) {
+        /* Pages 5 "power" and 6 "power detail": ch592/src/pm_ch592.c. */
+        dongle_pm_diag_fill(page, out);
+#endif
     } else {
         const uint32_t v[15] = {
             rfd_ev10_giveups, rfd_pair_prep_runs, rfd_ev10_ack_tx,

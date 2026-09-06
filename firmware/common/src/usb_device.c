@@ -18,6 +18,9 @@
 #include "usb_descriptors.h"
 #include "usb_device.h"
 #include "dongle_usb_hal.h"     /* hal_usb_pins_predetach/enable/reattach */
+#if DONGLE_PM_IDLE
+#include "hal_timing.h"         /* hal_now: the EP0-quiet stamp for pm_ch592.c */
+#endif
 
 /* Production HID endpoints use the validated automatic-toggle mode. */
 #define USB_HID_IN_TOG_MODE RB_UEP_AUTO_TOG
@@ -77,8 +80,9 @@ static usb_ep6_out_cb_t ep6_out_cb;
 
 /* USB suspend state. Set when the host stops SOF (RB_UIF_SUSPEND + bus idle),
  * cleared on resume and on bus reset. The dongle is bus-powered and keeps the
- * RF poll dispatching while suspended (the main loop skips LowPower_Idle when
- * this is set — see USB_IsSuspended), so the link survives host sleep. We also
+ * RF poll dispatching while suspended (on CH592 the core idles between polls
+ * under pm_ch592.c's heartbeat-bounded WFE; see USB_IsSuspended for the history
+ * of the older no-WFI rule), so the link survives host sleep. We also
  * suppress HID IN reports while suspended so a key that arrives over RF during
  * host sleep can't be delivered as a stale report the instant the host resumes;
  * the current key state is stashed (usb_kbd_pending) and delivered by the
@@ -144,6 +148,34 @@ static uint8_t usb_effective_suspended(void)
 {
     return (uint8_t)((usb_suspended || (R8_USB_MIS_ST & RB_UMS_SUSPEND)) ? 1u : 0u);
 }
+
+#if DONGLE_PM_IDLE
+/* CH592 main-loop idle (ch592/src/pm_ch592.c) inputs. usb_last_setup_tsys is
+ * hal_now() at the last SETUP - the start of the EP0-quiet window during which
+ * the idle never takes the IRQ mask (CSR-0x800 churn is an enumeration hazard
+ * on this silicon). usb_rw_arm_count counts SET_FEATURE(DEVICE_REMOTE_WAKEUP)
+ * for the page-6 suspend/resume oracle. */
+volatile uint32_t usb_last_setup_tsys;
+volatile uint16_t usb_rw_arm_count;
+
+/* One SRAM-resident snapshot of every idle-admission input, so nothing the
+ * idle path evaluates under the IRQ mask fetches flash (USB_IsConfigured,
+ * USB_IsSuspended and USB_GetLEDState are XIP). Taken unmasked before the
+ * quiet passes and again under the mask, where no USB ISR can move it. */
+DONGLE_HIGHCODE_RF_HOT
+uint8_t USB_PmSnapshot(void)
+{
+    uint8_t s = 0u;
+
+    if (usb_config != 0u)                                   s |= USB_PM_CONFIGURED;
+    if (usb_suspended || (R8_USB_MIS_ST & RB_UMS_SUSPEND))  s |= USB_PM_SUSPENDED;
+    if (iap_pkt_pending || usb_resume_clear_kbd)            s |= USB_PM_PENDING;
+    if (usb_wake_request && !usb_wake_inflight)             s |= USB_PM_WAKE_REQ;
+    if (usb_remote_wakeup)                                  s |= USB_PM_RW_ARMED;
+    s |= (uint8_t)((usb_led_state & 7u) << USB_PM_LED_SHIFT);
+    return s;
+}
+#endif /* DONGLE_PM_IDLE */
 
 /* ---------- HID report descriptor lookup ---------- */
 
@@ -329,6 +361,11 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                 /* SET/CLEAR_FEATURE(DEVICE_REMOTE_WAKEUP) — the host arms or
                  * disarms our ability to wake it. bRequest 0x03=SET, 0x01=CLEAR. */
                 usb_remote_wakeup = (uint8_t)(bRequest == 0x03);
+#if DONGLE_PM_IDLE
+                if (bRequest == 0x03) {
+                    usb_rw_arm_count++;   /* page 6: the host armed remote wake */
+                }
+#endif
 #endif
             } else if ((bmReqType & 0x1F) == 0x02 && wValue == 0x0000 && bRequest == 0x01) {
                 /* CLEAR_FEATURE(ENDPOINT_HALT) */
@@ -553,6 +590,9 @@ void USB_IRQHandler(void)
          * and enumeration never starts. Gate on SETUP_ACT instead — the
          * canonical WCH CH59x pattern. */
         if (raw_st & RB_UIS_SETUP_ACT) {
+#if DONGLE_PM_IDLE
+            usb_last_setup_tsys = hal_now();   /* EP0-quiet window starts here */
+#endif
             R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_ACK | UEP_T_RES_NAK;
             USB_EP0_Setup();
         } else
