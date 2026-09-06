@@ -173,9 +173,12 @@ the compiler the build will actually use (the `CROSS` prefix under
   checked on the generated code rather than on the spelling: a fast handler lets
   the hardware preserve `ra`/`t0`/`a0` and spills only the callee-saved `s0`
   before `mret`, the ordinary `interrupt` ABI spills all four, and the probe
-  compiles both (for the chip's own `-march`/`-mabi`) and refuses a compiler
-  that emits the ordinary shape for the fast attribute or the same shape for
-  both. That is the property the firmware depends on: the CH59x BLE library is
+  compiles both and refuses a compiler that emits the ordinary shape for the
+  fast attribute or the same shape for both. Each chip Makefile passes its own
+  `$(ARCH)` as the probe target (`--probe-flags`), and the top-level
+  `make check-deps` delegates to the chip Makefiles so it probes the same way;
+  a bare invocation of the script without `--probe-flags` probes a generic
+  `rv32imac`. That is the property the firmware depends on: the CH59x BLE library is
   compiled against WCH's fast-interrupt ABI, mainline GCC and clang reject the
   argument outright, and a plain-interrupt build wedges before any IRQ is
   delivered.
@@ -188,8 +191,10 @@ SHA-256, so two compiler builds whose tags sanitise alike still get different
 ids) and the driver's own SHA-256 as `compiler_sha256=`, so a driver whose bytes
 changed under an unchanged banner also moves the id and recompiles every object.
 A compiler that prints no identity fails any goal that compiles the application
-(`clean`, the OpenBoot-only targets and `check-deps` still work) rather than
-producing an id. `check-deps` prints the driver's SHA-256 for the build log, and
+at Makefile parse time, rather than producing an id; `clean`, the OpenBoot-only
+targets and `check-deps` are exempt from that parse-time guard so they can run
+on a checkout without an application compiler (`check-deps` itself then reports
+the missing or wrong toolchain, which is its job). `check-deps` prints the driver's SHA-256 for the build log, and
 the factory rule appends `app_compiler`, `app_compiler_id`,
 `app_compiler_sha256` and `app_build_id` to the factory manifest, which is where
 the strict mode's digest comes from.

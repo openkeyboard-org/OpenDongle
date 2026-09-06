@@ -143,15 +143,16 @@ openboot-test:
 	    --all-targets -- -D warnings
 	cargo test --manifest-path $(OPENBOOT)/tools/Cargo.toml
 
+# Delegated to the chip Makefiles: each one owns its SDK pin and passes its own
+# $(ARCH) as the fast-interrupt probe target, so this checks exactly what a
+# build of that chip checks (the bare script would probe a generic rv32imac).
 check-deps:
-	$(PYTHON) check_dependencies.py \
-	    --sdk "$(CH570_SDK)" \
-	    --sdk-revision 1e34c9450cd6df390153952c097cd09dd8a91aed \
-	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
-	$(PYTHON) check_dependencies.py \
-	    --sdk "$(CH592_SDK)" \
-	    --sdk-revision a46e0086f1ffb5e5502703970bff94888e67f4cb \
-	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" check-deps
+	$(MAKE) -C ch592 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" check-deps
 
 # Host-side suite: no cross toolchain, no hardware. Covers the build-identity
 # contract and the factory composition. (OpenBoot's own host suite is separate

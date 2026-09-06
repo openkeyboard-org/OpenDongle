@@ -70,10 +70,12 @@ HW_SAVED = ("ra", "t0", "a0")
 
 
 def fail(message: str) -> None:
+    """Abort the check with a message; main() prints it and exits 2."""
     raise RuntimeError(message)
 
 
 def run_git(sdk: Path, *args: str) -> str:
+    """Run a git query inside the SDK checkout and return its trimmed output."""
     try:
         result = subprocess.run(
             ["git", "-C", os.fspath(sdk), *args],
@@ -88,6 +90,7 @@ def run_git(sdk: Path, *args: str) -> str:
 
 
 def validate_sdk(sdk: Path, revision: str) -> None:
+    """Require the SDK checkout to be initialised, at the pinned revision, and clean."""
     if not sdk.is_dir():
         fail(
             f"SDK is missing: {sdk}\n"
@@ -109,6 +112,7 @@ def validate_sdk(sdk: Path, revision: str) -> None:
 
 
 def compiler_version_line(compiler: Path) -> str:
+    """The driver's first --version line: its identity (name, vendor tag, version)."""
     try:
         line = subprocess.run(
             [os.fspath(compiler), "--version"],
@@ -146,6 +150,7 @@ def compiler_numeric_version(compiler: Path) -> str:
 
 
 def compiler_major(numeric_version: str) -> int:
+    """The major component of a numeric GCC version such as ``15.2.0`` or ``15``."""
     return int(numeric_version.split(".")[0])
 
 
@@ -155,6 +160,7 @@ def _spills(asm: str) -> set[str]:
 
 
 def _compile_to_asm(compiler: Path, attr: str, probe_flags: tuple[str, ...]) -> str:
+    """Compile the probe handler under ``attr`` to assembly text, or fail."""
     with tempfile.TemporaryDirectory(prefix="wch-probe-") as tmp:
         src = Path(tmp) / "probe.c"
         out = Path(tmp) / "probe.s"
@@ -263,8 +269,11 @@ def validate_toolchain(
             f"{required_major}: {version}\n  {compiler}"
         )
     probe_fast_interrupt(compiler, probe_flags)
-    digest = hashlib.sha256(compiler.read_bytes()).hexdigest()
-    if expect_sha256 is not None and digest != expect_sha256.lower():
+    try:
+        digest = hashlib.sha256(compiler.read_bytes()).hexdigest()
+    except OSError as exc:
+        fail(f"cannot read the compiler driver to record its digest: {compiler}: {exc}")
+    if expect_sha256 is not None and digest != expect_sha256:
         fail(
             f"compiler SHA-256 is {digest}, expected {expect_sha256}: {compiler}\n"
             "--expect-compiler-sha256 asks for byte-reproducible artifacts from "
@@ -277,6 +286,7 @@ def validate_toolchain(
 
 
 def main() -> int:
+    """Parse the command line and run the SDK and toolchain checks; exit 2 on failure."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--sdk-revision", required=True)
@@ -302,13 +312,25 @@ def main() -> int:
         help="also require this exact gcc-driver digest (byte-reproducible releases)",
     )
     args = parser.parse_args()
+    expect = None
+    if args.expect_compiler_sha256 is not None:
+        # A digest copied out of a manifest may carry whitespace or upper-case
+        # hex; normalise it, and refuse anything that is not one SHA-256.
+        expect = args.expect_compiler_sha256.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expect):
+            print(
+                f"dependency check failed: --expect-compiler-sha256 must be 64 hex "
+                f"digits, got {args.expect_compiler_sha256!r}",
+                file=sys.stderr,
+            )
+            return 2
     try:
         validate_sdk(args.sdk, args.sdk_revision)
         validate_toolchain(
             args.toolchain,
             args.tool_prefix,
             args.compiler_major,
-            args.expect_compiler_sha256,
+            expect,
             tuple(args.probe_flags.split()),
         )
     except RuntimeError as exc:
