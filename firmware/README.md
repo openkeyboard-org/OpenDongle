@@ -156,44 +156,64 @@ note above.
 `MRS_TOOLCHAIN`, `OPENWCH_ROOT`, `CH570_SDK`, and `CH592_SDK` use Make's `?=`
 assignment, so they may be supplied by the environment, command line, or a
 developer-local make wrapper. `make check-deps` verifies the SDK revisions,
-clean SDK worktrees, compiler version, compiler digest, and required tools
-before compilation.
+clean SDK worktrees, the compiler's GCC major, its support for WCH's
+fast-interrupt ABI, and the required tools before compilation.
 
-### The toolchain pin: what it covers, and what it costs
+### The compiler gate: properties, not bytes
 
-`check_dependencies.py` pins the **`riscv32-wch-elf-gcc` binary** by SHA-256, and
-it is an order-only prerequisite of every object file — so the check is not
-advisory: a mismatch stops the build.
+`check_dependencies.py` is an order-only prerequisite of every object file, so
+it is not advisory: a failure stops the build. It gates on three properties of
+the compiler the build will actually use (the `CROSS` prefix under
+`MRS_TOOLCHAIN`):
 
-That strictness is deliberate. The build id reported by `opendongle --info`
-covers the compiler digest, so the id is only an honest answer to "is the
-running build the expected one?" while something actually enforces that digest.
-Two different builds of the same compiler version can produce different
-binaries; without the pin they would share a build id.
+- the tools exist (`gcc`, `objcopy`, `size`, `nm`);
+- the driver reports the required GCC **major** (15 for the application;
+  OpenBoot keeps its own GCC 12 gate, see `OPENBOOT_TOOLCHAIN` above);
+- the driver **implements `__attribute__((interrupt("WCH-Interrupt-fast")))`**,
+  checked on the generated code rather than on the spelling: a fast handler lets
+  the hardware preserve `ra`/`t0`/`a0` and spills only the callee-saved `s0`
+  before `mret`, the ordinary `interrupt` ABI spills all four, and the probe
+  compiles both (for the chip's own `-march`/`-mabi`) and refuses a compiler
+  that emits the ordinary shape for the fast attribute or the same shape for
+  both. That is the property the firmware depends on: the CH59x BLE library is
+  compiled against WCH's fast-interrupt ABI, mainline GCC and clang reject the
+  argument outright, and a plain-interrupt build wedges before any IRQ is
+  delivered.
 
-Two honest limits, both worth knowing before you rely on the pin:
+The compiler's identity is still part of the build id. Each chip Makefile folds
+the driver's first `--version` line (name, WCH build tag, version, e.g.
+`riscv32-wch-elf-gcc (g5115c7e44-dirty) 15.2.0`) into `CONFIG_TEXT` as the
+`compiler=` token (a sanitised readable prefix plus 16 hex digits of the line's
+SHA-256, so two compiler builds whose tags sanitise alike still get different
+ids) and the driver's own SHA-256 as `compiler_sha256=`, so a driver whose bytes
+changed under an unchanged banner also moves the id and recompiles every object.
+A compiler that prints no identity fails any goal that compiles the application
+(`clean`, the OpenBoot-only targets and `check-deps` still work) rather than
+producing an id. `check-deps` prints the driver's SHA-256 for the build log, and
+the factory rule appends `app_compiler`, `app_compiler_id`,
+`app_compiler_sha256` and `app_build_id` to the factory manifest, which is where
+the strict mode's digest comes from.
 
-- **It covers the driver, not the whole toolchain.** `gcc` delegates to `cc1`,
-  the assembler and the linker, and `objcopy` produces the released binary.
-  None of those are hashed, and the version check only interrogates the driver.
-  A mixed or partially replaced toolchain directory can therefore pass this
-  gate and still produce different firmware under the same build id. Verifying
-  a complete toolchain archive would close that gap.
-- **It covers one platform's one release.** A contributor on a different host
-  platform or a different MounRiver build is blocked until the pin is updated.
-  If you hit that, the honest options are to obtain the pinned toolchain, or to
-  change the pin here and accept that your artifacts are not the pinned bytes —
-  in which case the build id no longer implies them.
+What the id therefore means: **same source, same configuration, same compiler
+identity line and driver bytes.** It does not by itself promise byte-identical
+binaries across hosts; two installs with the same driver that differ in `cc1`,
+the assembler or the linker would share an id. Anyone who needs that stronger
+promise passes `--expect-compiler-sha256 <digest>` (the `app_compiler_sha256`
+line of a release's factory manifest) to `check_dependencies.py`, which turns
+the digest back into a hard gate for that build. Even then it is driver
+verification, not a byte-reproducibility guarantee: `cc1`, the assembler, the
+linker and `objcopy` are not covered.
 
-Both are known and accepted for now rather than overlooked; a future change may
-add an explicit opt-out that states the consequence at build time, and widen the
-pin to the components that actually determine the output.
+History: until this change the gate was an exact SHA-256 of the gcc driver,
+which blocked every host whose MounRiver drop differed from the one that
+recorded the pin, even at the same 15.2.0 version, and forced a local override
+that could never be committed.
 
 ## Verifying a build
 
 The build is reproducible: `build_identity.py` hashes the sources, the linker
-script, the compiler and linker flag sets, and the pinned SDK/toolchain
-revisions into a 32-bit build id that is compiled into the image and reported by
+script, the compiler and linker flag sets, the pinned SDK revision and the
+compiler's identity into a 32-bit build id that is compiled into the image and reported by
 the host tool (`opendongle --info`). Two builds of the same tree on the same
 host produce byte-identical artifacts, so a rebuild-and-compare is a meaningful
 check:
@@ -210,11 +230,14 @@ image, and it is only as strong as the inputs the build id actually covers. Two
 gaps are worth stating rather than leaving implied, both documented above and in
 `TODO.md`:
 
-- The toolchain pin covers the `riscv32-wch-elf-gcc` driver, not `cc1`, the
+- The compiler gate checks the `riscv32-wch-elf-gcc` driver's properties; the
+  driver's identity line and digest are folded into the build id and recorded
+  in the factory manifest, never gated by default, and even the strict
+  `--expect-compiler-sha256` mode verifies the driver alone, not `cc1`, the
   assembler, the linker or `objcopy`. A partially replaced toolchain directory
-  can produce different bytes under the same build id, so "the same pinned
-  toolchain" means the whole directory unchanged, not merely a matching driver
-  digest.
+  can therefore produce different bytes under the same build id, so "the same
+  toolchain" means the whole directory unchanged, not merely a matching
+  identity line or driver digest.
 - **OpenBoot still builds with GCC12.** The pinned submodule carries its own
   toolchain pin, still on MounRiver GCC12 and its `riscv-wch-elf-*` tool names,
   so a factory build needs both toolchains present:

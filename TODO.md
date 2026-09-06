@@ -443,17 +443,14 @@ the build id for no functional gain, or expands scope beyond the import:
 - **`finalize_image.py`** — create both output parent directories and stage each
   temporary file beside its own destination, so a cross-directory or
   cross-filesystem `--output-bin` cannot leave an ELF written and a BIN missing.
-- **`check_dependencies.py`** — the pinned digest covers the `riscv32-wch-elf-gcc`
-  driver only, not `cc1`, the assembler, the linker or `objcopy`, so a partially
-  replaced toolchain directory can pass the gate and still produce different
-  firmware under the same build id. Widening this to a full toolchain manifest
-  would close the gap. Related: the SDK cleanliness check ignores files matched
-  by gitignore rules, which could hide a stray input the compiler consumes.
-- **`check_dependencies.py`** — add an explicit opt-out (e.g.
-  `--allow-unpinned-compiler`) that states plainly at build time that the
-  resulting artifacts are not the pinned bytes and the build id no longer
-  implies them. Today a contributor on another host platform or MounRiver
-  release is hard-blocked. See `firmware/README.md`, "The toolchain pin".
+- **`check_dependencies.py`** — the optional strict mode (`--expect-compiler-sha256`)
+  covers the `riscv32-wch-elf-gcc` driver only, not `cc1`, the assembler, the
+  linker or `objcopy`, so a partially replaced toolchain directory can pass it and
+  still produce different firmware under the same build id; the default gate
+  (GCC major + fast-interrupt probe) makes no byte promise at all. Widening the
+  strict mode to a full toolchain manifest would close the gap. Related: the SDK
+  cleanliness check ignores files matched by gitignore rules, which could hide a
+  stray input the compiler consumes.
 - **`check_dependencies.py`** — `validate_sdk()` resolves the SDK's git toplevel
   with `rev-parse --show-toplevel`. If it is ever pointed at an *uninitialised*
   submodule root (an empty directory), git walks up and answers with the
