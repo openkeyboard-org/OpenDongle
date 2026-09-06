@@ -150,6 +150,29 @@ volatile uint8_t dongle_pm_ran;
  * cleared) by pm_loop_top. Thread context only. */
 static uint8_t pm_entry_armed;
 
+/* Swap the post latch with zero in one instruction and return what it held.
+ * Inline asm rather than __atomic_exchange_n on purpose: every C-level access
+ * to the latch stays the plain volatile word access it has always been (the
+ * ISR/task stores in hal_event_post, the loads in pm_idle_try), so there is
+ * no atomic-builtin-versus-plain mix for the C memory model to object to,
+ * and the compiler keeps gp-relative addressing at every post site (the
+ * builtins drop it: one extra address instruction per post in the RF sink,
+ * measured as 22 latch references instead of 20 and a 40-byte larger image).
+ * The "memory" clobber orders the surrounding volatile accesses against the
+ * swap. Single core; the ISR is the only other writer, and amoswap.w is the
+ * A extension of this rv32imac build. */
+static inline __attribute__((always_inline)) uint32_t pm_post_take(void)
+{   /* always_inline and no section attribute: it must land in pm_loop_top
+     * (__HIGH_CODE) as the one instruction, not as a call to it. */
+    uint32_t old;
+    uint32_t zero = 0u;
+    __asm__ volatile ("amoswap.w %0, %1, (%2)"
+                      : "=&r" (old)
+                      : "r" (zero), "r" (&dongle_pm_post)
+                      : "memory");
+    return old;
+}
+
 /* Counters for IAP 0x92 pages 5 and 6. Written on the idle path at thread level
  * except pm_hb_irqs (TMR3 ISR); read by dongle_pm_diag_fill. */
 static volatile uint32_t pm_wfe_count, pm_idle_tsys, pm_hb_irqs;
@@ -325,24 +348,24 @@ static void pm_attribute_wake(void)
 __HIGH_CODE
 uint8_t pm_loop_top(void)
 {
-    /* Capture and clear the post latch in ONE instruction (amoswap.w, the A
-     * extension of this rv32imac build): an ISR post lands either before the
-     * swap, and is captured, or after it, and survives for the next loop
-     * top. A separate read then clear could erase a post that landed in
-     * between (review of PR #36); the event itself would still sit in TMOS
-     * and be dispatched by this iteration's three passes, but the latch is
-     * what the entry alarm and the quiet-pass veto read. Not a mask: taking
-     * CSR 0x800 on every loop iteration is the enumeration hazard the
-     * USB_ServiceRemoteWake comment in usb_device.c records. The other two
-     * stores race nothing: dongle_pm_ran is written by task context only,
-     * pm_entry_armed by this loop only.
+    /* Capture and clear the post latch in ONE instruction (pm_post_take):
+     * an ISR post lands either before the swap, and is captured, or after
+     * it, and survives for the next loop top. A separate read then clear
+     * could erase a post that landed in between (review of PR #36); the
+     * event itself would still sit in TMOS and be dispatched by this
+     * iteration's three passes, but the latch is what the entry alarm and
+     * the quiet-pass veto read. Not a mask: taking CSR 0x800 on every loop
+     * iteration is the enumeration hazard the USB_ServiceRemoteWake comment
+     * in usb_device.c records. The other two stores race nothing:
+     * dongle_pm_ran is written by task context only, pm_entry_armed by this
+     * loop only.
      *
      * The capture counts only if the previous decision armed it: a post that
      * landed after the masked observation must survive the clear (the radio
      * sink runs at thread level in the IRQ tail, so its post lands before
      * __risc_v_enable_irq returns); one left over from a work veto is stale
      * and must not. */
-    uint32_t post = __atomic_exchange_n(&dongle_pm_post, 0u, __ATOMIC_RELAXED);
+    uint32_t post = pm_post_take();
     uint8_t entry_work = (uint8_t)((post != 0u) & pm_entry_armed);
 
     dongle_pm_ran   = 0u;
