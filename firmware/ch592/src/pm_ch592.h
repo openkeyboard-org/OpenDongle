@@ -15,9 +15,10 @@
 
 #if DONGLE_PM_IDLE
 /* Per-iteration "work happened" latches (why: pm_ch592.c header comment).
- * Plain byte stores from every context; cleared only by pm_loop_top at the
- * top of Main_Circulation. */
-extern volatile uint8_t dongle_pm_post;   /* set by every hal_event_post   */
+ * Plain stores from every context; cleared only by pm_loop_top at the top of
+ * Main_Circulation (the post latch with one amoswap, so no ISR post is lost
+ * between a read and a clear). */
+extern volatile uint32_t dongle_pm_post;  /* set by every hal_event_post; a word so the loop top can amoswap it */
 extern volatile uint8_t dongle_pm_ran;    /* set at RF_ProcessEvent entry  */
 /* The host LED state poll_usb_led_state (main.c) last relayed; the masked
  * admission re-check compares the live USB snapshot against it. */

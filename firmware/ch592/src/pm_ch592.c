@@ -144,7 +144,7 @@
 
 enum { PM_V_NONE = 0, PM_V_USB, PM_V_EP0 };
 
-volatile uint8_t dongle_pm_post;
+volatile uint32_t dongle_pm_post;   /* a word: pm_loop_top swaps it with one amoswap.w */
 volatile uint8_t dongle_pm_ran;
 /* Set under the mask when the re-check saw both latches clear; consumed (and
  * cleared) by pm_loop_top. Thread context only. */
@@ -325,15 +325,26 @@ static void pm_attribute_wake(void)
 __HIGH_CODE
 uint8_t pm_loop_top(void)
 {
-    /* Capture BEFORE the clear, and only if the previous decision armed it:
-     * a post that landed after the masked observation must survive the clear
-     * (the radio sink runs at thread level in the IRQ tail, so its post lands
-     * before __risc_v_enable_irq returns); one left over from a work veto is
-     * stale and must not. Plain byte stores, so an IRQ post is never lost to
-     * a thread-side read-modify-write. */
-    uint8_t entry_work = (uint8_t)(dongle_pm_post & pm_entry_armed);
+    /* Capture and clear the post latch in ONE instruction (amoswap.w, the A
+     * extension of this rv32imac build): an ISR post lands either before the
+     * swap, and is captured, or after it, and survives for the next loop
+     * top. A separate read then clear could erase a post that landed in
+     * between (review of PR #36); the event itself would still sit in TMOS
+     * and be dispatched by this iteration's three passes, but the latch is
+     * what the entry alarm and the quiet-pass veto read. Not a mask: taking
+     * CSR 0x800 on every loop iteration is the enumeration hazard the
+     * USB_ServiceRemoteWake comment in usb_device.c records. The other two
+     * stores race nothing: dongle_pm_ran is written by task context only,
+     * pm_entry_armed by this loop only.
+     *
+     * The capture counts only if the previous decision armed it: a post that
+     * landed after the masked observation must survive the clear (the radio
+     * sink runs at thread level in the IRQ tail, so its post lands before
+     * __risc_v_enable_irq returns); one left over from a work veto is stale
+     * and must not. */
+    uint32_t post = __atomic_exchange_n(&dongle_pm_post, 0u, __ATOMIC_RELAXED);
+    uint8_t entry_work = (uint8_t)((post != 0u) & pm_entry_armed);
 
-    dongle_pm_post  = 0u;
     dongle_pm_ran   = 0u;
     pm_entry_armed  = 0u;
     return entry_work;
