@@ -53,6 +53,22 @@
  * is what the heartbeat bounds, and veto_entry (page 6) is the alarm that the
  * scheduler-shape argument stopped holding (e.g. a fourth task).
  *
+ * entry_work is ARMED only by the masked re-check, the one point that observes
+ * both latches clear with interrupts off (pm_entry_armed, consumed by
+ * pm_loop_top). A post latch that is still set at the loop top after a
+ * work veto is usually stale - the post was dispatched in that very iteration
+ * and the latch merely outlived it - and counting it as entry work vetoed one
+ * idle attempt per work item (bench: ~285/s on a live link against ~4500
+ * sleeps, which drowned the alarm). It is not PROVEN stale: a late ISR post
+ * can still be queued, and that post is safe for the same reason as any
+ * other queued at the top of an iteration - the next iteration's three passes
+ * dispatch it and dongle_pm_ran vetoes - not because of the carry-over.
+ * Armed, a set latch means the post landed after the masked observation,
+ * which is exactly the IRQ-tail case the carry-over exists for; three passes
+ * then either dispatch it (veto_work) or the alarm is real. What the stale
+ * veto used to catch by accident - a timer expiring during the final pass -
+ * is the heartbeat-bounded residual stated above.
+ *
  * 2026-06-13 ("no WFI while suspended", usb_device.h): that failure was a plain
  * WFI with the RF poll unbounded and no TMOS-quiet test, on a driver that predates
  * this tree; its mechanism was never isolated. The two candidates the tree supports
@@ -130,6 +146,9 @@ enum { PM_V_NONE = 0, PM_V_USB, PM_V_EP0 };
 
 volatile uint8_t dongle_pm_post;
 volatile uint8_t dongle_pm_ran;
+/* Set under the mask when the re-check saw both latches clear; consumed (and
+ * cleared) by pm_loop_top. Thread context only. */
+static uint8_t pm_entry_armed;
 
 /* Counters for IAP 0x92 pages 5 and 6. Written on the idle path at thread level
  * except pm_hb_irqs (TMR3 ISR); read by dongle_pm_diag_fill. */
@@ -304,6 +323,23 @@ static void pm_attribute_wake(void)
 }
 
 __HIGH_CODE
+uint8_t pm_loop_top(void)
+{
+    /* Capture BEFORE the clear, and only if the previous decision armed it:
+     * a post that landed after the masked observation must survive the clear
+     * (the radio sink runs at thread level in the IRQ tail, so its post lands
+     * before __risc_v_enable_irq returns); one left over from a work veto is
+     * stale and must not. Plain byte stores, so an IRQ post is never lost to
+     * a thread-side read-modify-write. */
+    uint8_t entry_work = (uint8_t)(dongle_pm_post & pm_entry_armed);
+
+    dongle_pm_post  = 0u;
+    dongle_pm_ran   = 0u;
+    pm_entry_armed  = 0u;
+    return entry_work;
+}
+
+__HIGH_CODE
 void pm_idle_try(uint8_t entry_work)
 {
     uint32_t irq, t0;
@@ -336,8 +372,9 @@ void pm_idle_try(uint8_t entry_work)
         }
     }
     if (entry_work) {
-        /* Queued before this iteration and STILL not dispatched: never sleep
-         * on it. A bounded count is benign: hal_event_cancel does not clear
+        /* Posted after the previous masked observation and STILL not
+         * dispatched by three passes: never sleep on it. A bounded count is
+         * benign: hal_event_cancel does not clear
          * the post latch (and must not - that could erase a real post of
          * another bit), so a post that a teardown cancels in the same
          * iteration (the TMR0 ISR's POLL / SEND_PAIR_ACK swept by
@@ -359,7 +396,10 @@ void pm_idle_try(uint8_t entry_work)
     __asm__ volatile ("wfi");                           /* self-SEV: drains any stale event */
     PFIC->SCTLR |= (1u << 3);                           /* re-arm WFE mode */
     usb = USB_PmSnapshot();                             /* re-read under the mask */
-    if (dongle_pm_post || dongle_pm_ran
+    /* Both latches clear, observed with interrupts off: anything the next
+     * loop top finds posted came after this point (see pm_loop_top). */
+    pm_entry_armed = (uint8_t)!(dongle_pm_post || dongle_pm_ran);
+    if (!pm_entry_armed
             || !pm_level_allows(RF_IdleClass())         /* IRQ-tail promote since the unmasked check */
             || pm_irq_pending()
             || pm_usb_veto(usb) != PM_V_NONE) {
