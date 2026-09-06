@@ -99,8 +99,10 @@ Flags: `--vid` / `--pid` (accept `0x..`/decimal), `--interface`, `--hidraw`
 `--force`.
 
 `--diag` reads the RF diagnostics pages (command 0x92, up to seven 62-byte
-pages: 0-4 on every chip, plus the CH592 power pages 5 "power" and 6 "power
-detail" that exist only on a `PM_IDLE=1` build and are skipped otherwise;
+pages: 0-3 required of any firmware that answers the command, 4 present on the
+current firmware of both chips but skipped if an earlier firmware answers it
+with an empty payload, plus the CH592 power pages 5 "power" and 6 "power
+detail" that exist only on a `PM_IDLE=1` build and are skipped the same way;
 provided by firmware carrying the RF diagnostics page -- a separate draft PR;
 firmware without it answers nothing and the tool reports a timeout;
 firmware `RF_DiagFill` in `firmware/common/src/rf_task.c`) with unarmed

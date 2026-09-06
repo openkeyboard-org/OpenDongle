@@ -100,7 +100,10 @@ uint8_t hal_rf_start_rx_primed(uint8_t channel, uint16_t timeout,
 
 /* Transmit `len` bytes from `buf` on `channel` at `access_addr`. The per-chip
  * implementation owns the on-air framing of the payload. Returns the radio's
- * raw start status (0 = success). */
+ * raw start status (0 = success), or 0xFE when the payload is refused before
+ * the radio is touched (oversize) -- the value the diagnostics snapshot records
+ * as last_tx_rc, so the on-wire byte and the API status agree. Callers treat
+ * any nonzero status as a failure. */
 uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
                         const uint8_t *buf, uint8_t len);
 

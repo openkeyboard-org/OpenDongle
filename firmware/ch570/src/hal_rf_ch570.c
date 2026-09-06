@@ -164,7 +164,8 @@ uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
         rf_diag.tx_start++;
         rf_diag.tx_fail++;
         rf_diag.last_tx_rc = 0xFEu;   /* refused before the radio: oversize */
-        return 0xffu;
+        return 0xFEu;                 /* the same value the diagnostic records;
+                                       * every caller treats nonzero as failure */
     }
 
     tx_param.accessAddress = access_addr;

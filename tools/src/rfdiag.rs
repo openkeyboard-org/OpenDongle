@@ -14,8 +14,11 @@ use crate::iap::{hexsp, op_rf_diag, IapDevice};
 
 pub const ACK_RF_DIAG: u8 = 0x92;
 pub const PAGE_LEN: usize = 62;
-/// Pages 0-4 are common to every chip; 5 ("power") and 6 ("power detail")
-/// exist only on CH592 firmware built with PM_IDLE=1 and are skipped otherwise.
+/// Pages 0-3 are required of any firmware that answers 0x92; page 4 is present
+/// on the current firmware of both chips but tolerated missing (an earlier
+/// firmware answers it with an empty payload and it is skipped, see
+/// `REQUIRED_PAGES`); 5 ("power") and 6 ("power detail") exist only on CH592
+/// firmware built with PM_IDLE=1 and are skipped otherwise.
 pub const PAGE_COUNT: u8 = 7;
 const PAGE_VERSION: u8 = 1;
 
@@ -471,7 +474,7 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                         line = String::from("                 ");
                     }
                 }
-                if line.trim().len() > 0 {
+                if !line.trim().is_empty() {
                     out.push(line);
                 }
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
@@ -607,7 +610,7 @@ pub fn rates(prev: &[Page], cur: &[Page], dt: f64) -> Vec<String> {
             line = String::from("                 ");
         }
     }
-    if line.trim().len() > 0 {
+    if !line.trim().is_empty() {
         out.push(line);
     }
     if out.is_empty() {
@@ -712,7 +715,7 @@ mod tests {
         let b = page(2, |raw| raw[2..6].copy_from_slice(&150u32.to_le_bytes()));
         let pa = Page::decode(2, &a).unwrap();
         let pb = Page::decode(2, &b).unwrap();
-        assert_eq!(counters(&[pa.clone()])[0], ("len10_seen", 100));
+        assert_eq!(counters(std::slice::from_ref(&pa))[0], ("len10_seen", 100));
         let r = rates(&[pa], &[pb], 2.0).join("\n");
         assert!(r.contains("len10_seen=25.0"), "{r}");
     }
@@ -747,7 +750,7 @@ mod tests {
             raw[59] = 0x87;
         });
         let p = Page::decode(4, &r).unwrap();
-        let text = render(&[p.clone()]).join("\n");
+        let text = render(std::slice::from_ref(&p)).join("\n");
         assert!(text.contains("lle_irqs=1000"), "{text}");
         assert!(text.contains("last callback 1.000s ago"), "{text}");
         assert!(text.contains("(mode RX)"), "{text}");
@@ -772,13 +775,13 @@ mod tests {
         };
         let pa = Page::decode(5, &sample(1000, 0, 0, 10, 0)).unwrap();
         let pb = Page::decode(5, &sample(2000, 54_000_000, 60_000_000, 29, 1)).unwrap();
-        let text = render(&[pb.clone()]).join("\n");
+        let text = render(std::slice::from_ref(&pb)).join("\n");
         assert!(text.contains("level=3 heartbeat_us=1000"), "{text}");
         assert!(text.contains("tmr3_counting=true"), "{text}");
         assert!(text.contains("remote_wake_armed=true"), "{text}");
         assert!(text.contains("wakes           tmr3=0 radio=29 both=1"), "{text}");
-        assert!(counters(&[pb.clone()]).iter().all(|(n, _)| *n != "hal_now"));
-        let r = rates(&[pa.clone()], &[pb.clone()], 1.0).join("\n");
+        assert!(counters(std::slice::from_ref(&pb)).iter().all(|(n, _)| *n != "hal_now"));
+        let r = rates(std::slice::from_ref(&pa), std::slice::from_ref(&pb), 1.0).join("\n");
         assert!(r.contains("wfe_count=1000.0"), "{r}");
         assert!(r.contains("idle_duty=90.0%"), "{r}");
         assert!(r.contains("radio_wake_ratio=5.0%"), "{r}");
@@ -790,9 +793,9 @@ mod tests {
         // Under the bound the firmware clock is the denominator even when the
         // host interval disagrees (USB latency), and a stalled clock falls
         // back to host time rather than dividing by zero.
-        let r = rates(&[pb.clone()], &[Page::decode(5, &sample(3000, 84_000_000, 90_000_000, 29, 1)).unwrap()], 2.0).join("\n");
+        let r = rates(std::slice::from_ref(&pb), &[Page::decode(5, &sample(3000, 84_000_000, 90_000_000, 29, 1)).unwrap()], 2.0).join("\n");
         assert!(r.contains("idle_duty=100.0%"), "{r}");
-        let r = rates(&[pb.clone()], &[Page::decode(5, &sample(3000, 114_000_000, 60_000_000, 29, 1)).unwrap()], 1.0).join("\n");
+        let r = rates(std::slice::from_ref(&pb), &[Page::decode(5, &sample(3000, 114_000_000, 60_000_000, 29, 1)).unwrap()], 1.0).join("\n");
         assert!(r.contains("idle_duty=100.0%"), "{r}");
     }
 
@@ -833,7 +836,7 @@ mod tests {
             }),
         )
         .unwrap();
-        let text = render(&[p.clone()]).join("\n");
+        let text = render(std::slice::from_ref(&p)).join("\n");
         assert!(text.contains("tmr0_cyc=true tmr3_cyc=true usb_transfer=false"), "{text}");
         assert!(text.contains("pu=false pd=false dir=false debug_en=true; remote-wake arms=3"), "{text}");
         let c = counters(&[p]);
