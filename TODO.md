@@ -194,45 +194,6 @@ link loss on CH570 and measures the reacquire watchdog against a wall clock.
 *Found by codex during the import review; confirmed by reading the SDK register
 definition, the tick constants, and the cancel-then-arm ordering in
 `rf_send_keys_up_on_link_loss()`.*
-## Defect: suspend NAKs only EP1, so a queued mouse or consumer report survives into resume
-
-**Where:** `firmware/common/src/usb_device.c`, `USB_SuspendResume()` — the
-suspend branch touches `R8_UEP1_CTRL` and nothing else.
-
-**What is wrong.** The whole point of the suspend gate, stated in the file's own
-comment, is that "a key that arrives over RF during host sleep can't be
-delivered as a stale report the instant the host resumes". EP1 gets that
-treatment. EP2 (mouse) and EP3 (composite consumer/media) do not: if
-`USB_SendMouse()` or `USB_SendComposite()` armed the endpoint just before SOF
-stopped, it stays `T_RES = ACK` across the entire suspend and the SIE hands the
-buffered report to the host on the first IN token after resume.
-
-**Impact, and why it is worse than one stale report.** RF-sourced HID reports
-are change-driven: a press and its matching release are separate reports. The
-press can be sitting armed when suspend begins, while the release that would
-have cancelled it arrives *during* suspend and is correctly dropped by the
-`usb_hid_in_ready()` gate. So the host can resume, receive the press, and never
-receive the release — a stuck button or a held media key rather than a single
-spurious event. It resolves on the next real report from that device, so it is
-a glitch, not a wedge.
-
-**Scope.** EP1 is already handled. EP5 is inert — nothing in the firmware ever
-writes `UEP_T_RES_ACK` to `R8_UEP5_CTRL`, so including it would be harmless but
-pointless. EP6 is the IAP endpoint and is deliberately outside the HID suspend
-policy.
-
-**Fix sketch.** Extend the suspend branch to EP2 and EP3, masking only
-`MASK_UEP_T_RES` exactly as the existing EP1 line does — that preserves the data
-toggle, which must not be disturbed. (CodeRabbit's report suggested this masking
-as a correction; the EP1 line already does it. The gap is the missing endpoints,
-not the mask.)
-
-**Before merging the fix:** it changes firmware bytes on both chips. Re-run the
-hardware matrix and add a bench case that queues a mouse or consumer report and
-then forces a host suspend/resume.
-
-*Found by CodeRabbit; confirmed by reading the suspend handler.*
-
 ## Hazard: the IN handlers fight the hardware toggle, and the obvious fix is not safe
 
 **Where:** `firmware/common/src/usb_device.c` — `USB_HID_IN_TOG_MODE` is
@@ -432,6 +393,54 @@ hardware matrix and re-pin the digests.
 reading the code, and the reachability analysis is what downgraded it from
 "bricks the radio" to "latent".*
 
+## Follow-up: bench case for the mouse/consumer suspend replay fix (needs a controller harness)
+
+**What was fixed without it:** `USB_SuspendResume` now NAKs EP2/EP3 at suspend
+and `USB_PollEP6` reconciles them on resume (mouse all-up, consumer no-key,
+coordinated with fresh reports through `usb_reconcile_ep2/ep3`). The change was
+reviewed (three codex passes to Merge) and regression-tested on the keyboard
+path (host asleep 60 s, link intact, 0 lapses, the resume flush executed against
+a real host), but the defect scenario itself, a mouse or consumer press armed
+when SOF stops, has not been reproduced or shown fixed on hardware.
+
+**Why not:** the bench keyboard stand-in, OpenController, only ever transmits
+the keyboard RF tag (0xA1). The dongle routes 0xA3 to EP3 (consumer,
+`[id 1][usage LE16]`) and 0xA8 to EP2 (mouse, 5-byte body), and the
+controller's UART accepts no frame that would make it send either.
+
+**What the case needs:**
+
+- **A report source:** a tagged-report UART frame in OpenController (its
+  `keyboard_uart.c` parser: `expected_for_header` / `frame_is_valid` /
+  `dispatch_frame`; `main.c` frame callback; `rf_task.c` `RF_QueueHIDReport`
+  generalised with a tag and length so the response TX writes the tag into
+  `tx_payload[1]`), streamed at the RF poll rate while the host goes to sleep,
+  so an EP2/EP3 report is armed in the last poll interval before SOF stops.
+- **An oracle:** page 4 of the 0x92 diagnostics is full (bytes 2-61), so a
+  dongle-side "armed at suspend" / "stale IN completion after resume" pair
+  needs a new page or a page-6 spare; the host side alternative is cursor
+  tracking around the sleep, which needs pyobjc (Quartz) on the bench Mac.
+- **Both directions:** a pending press (the original defect) and a pending
+  release (the mirror case the NAK alone would have created), each followed by a
+  host sleep of at least 60 s and a wake from the host's own keyboard.
+
+## Follow-up: the boot-keyboard resume flush has the same fresh-report ordering exposure as EP2/EP3 had
+
+**Where:** `firmware/common/src/usb_device.c`, `USB_PollEP6()` resume block, EP1.
+
+A boot-keyboard report that arrives over RF after the resume ISR has cleared
+`usb_suspended` but before the main loop runs the resume flush is armed on EP1
+and then replaced (if unpolled) or logically released (if polled) by the stash
+delivery or the keys-up flush. The window is the few tens of microseconds
+between the resume interrupt and the next main-loop iteration, so it is far
+narrower than the suspend-episode replay that was fixed, and recovery is the
+next real report; recorded because the mouse/consumer endpoints now coordinate
+exactly this case through `usb_reconcile_ep2/ep3` (resume arms a flag, a fresh
+report clears it under the sender's mask, the flush is decided and armed under
+the same mask). EP1 could use the same flag with newest-wins over the stash;
+it needs the S-scenario oracle on the bench because the keyboard path is the
+validated one.
+
 ## Deferred review findings
 
 Real improvements that were not taken during the import because each one changes
@@ -619,7 +628,6 @@ the build id for no functional gain, or expands scope beyond the import:
   remote-wake latency contract first.
 - **`TEM_SAMPLE`.** The library's 1 s ADC temperature sample is pre-existing; it costs
   an ADC conversion and one stale-pending clear per second. Measure before disabling.
-- **EP2/EP3 stale-report replay after suspend** (pre-existing, see the USB defect above).
 - **CH592 OpenBoot USB bootloader on macOS** never binds as HID (usage page 0xFF00);
   USB updates of the CH592 dongle are impossible from this host. Validated only on CH570.
 - **Production PB15 strap.** The park sets PB15 input pull-down; page 6 [43] reports the
