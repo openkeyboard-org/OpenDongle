@@ -144,34 +144,22 @@
 
 enum { PM_V_NONE = 0, PM_V_USB, PM_V_EP0 };
 
-volatile uint32_t dongle_pm_post;   /* a word: pm_loop_top swaps it with one amoswap.w */
+/* Every access is a relaxed atomic builtin (the ISR/task store in
+ * hal_event_post, the loads below, the exchange in pm_loop_top), so the
+ * object is never mixed between atomic and plain access. Relaxed on this
+ * single core is one lw/sw/amoswap.w; the only cost is that GCC addresses
+ * the object explicitly instead of gp-relative, one extra instruction at
+ * each post site (owner's call: absorbed for the simpler code). */
+volatile uint32_t dongle_pm_post;
 volatile uint8_t dongle_pm_ran;
 /* Set under the mask when the re-check saw both latches clear; consumed (and
  * cleared) by pm_loop_top. Thread context only. */
 static uint8_t pm_entry_armed;
 
-/* Swap the post latch with zero in one instruction and return what it held.
- * Inline asm rather than __atomic_exchange_n on purpose: every C-level access
- * to the latch stays the plain volatile word access it has always been (the
- * ISR/task stores in hal_event_post, the loads in pm_idle_try), so there is
- * no atomic-builtin-versus-plain mix for the C memory model to object to,
- * and the compiler keeps gp-relative addressing at every post site (the
- * builtins drop it: one extra address instruction per post in the RF sink,
- * measured as 22 latch references instead of 20 and a 40-byte larger image).
- * The "memory" clobber orders the surrounding volatile accesses against the
- * swap. Single core; the ISR is the only other writer, and amoswap.w is the
- * A extension of this rv32imac build. */
-static inline __attribute__((always_inline)) uint32_t pm_post_take(void)
-{   /* always_inline and no section attribute: it must land in pm_loop_top
-     * (__HIGH_CODE) as the one instruction, not as a call to it. */
-    uint32_t old;
-    uint32_t zero = 0u;
-    __asm__ volatile ("amoswap.w %0, %1, (%2)"
-                      : "=&r" (old)
-                      : "r" (zero), "r" (&dongle_pm_post)
-                      : "memory");
-    return old;
-}
+/* dongle_pm_ran is written and read by task context only (RF_ProcessEvent
+ * runs under TMOS_SystemProcess in this loop), so its plain accesses race
+ * nothing; the post latch is read through the builtin like every access. */
+#define PM_POST_PENDING()  (__atomic_load_n(&dongle_pm_post, __ATOMIC_RELAXED) != 0u)
 
 /* Counters for IAP 0x92 pages 5 and 6. Written on the idle path at thread level
  * except pm_hb_irqs (TMR3 ISR); read by dongle_pm_diag_fill. */
@@ -348,7 +336,7 @@ static void pm_attribute_wake(void)
 __HIGH_CODE
 uint8_t pm_loop_top(void)
 {
-    /* Capture and clear the post latch in ONE instruction (pm_post_take):
+    /* Capture and clear the post latch in ONE instruction (amoswap.w):
      * an ISR post lands either before the swap, and is captured, or after
      * it, and survives for the next loop top. A separate read then clear
      * could erase a post that landed in between (review of PR #36); the
@@ -365,7 +353,7 @@ uint8_t pm_loop_top(void)
      * sink runs at thread level in the IRQ tail, so its post lands before
      * __risc_v_enable_irq returns); one left over from a work veto is stale
      * and must not. */
-    uint32_t post = pm_post_take();
+    uint32_t post = __atomic_exchange_n(&dongle_pm_post, 0u, __ATOMIC_RELAXED);
     uint8_t entry_work = (uint8_t)((post != 0u) & pm_entry_armed);
 
     dongle_pm_ran   = 0u;
@@ -379,7 +367,7 @@ void pm_idle_try(uint8_t entry_work)
     uint32_t irq, t0;
     uint8_t usb, v, n;
 
-    if (dongle_pm_post || dongle_pm_ran) {
+    if (PM_POST_PENDING() || dongle_pm_ran) {
         pm_veto_work++;
         return;
     }
@@ -400,7 +388,7 @@ void pm_idle_try(uint8_t entry_work)
     for (n = 0u; n < PM_QUIET_PASSES; n++) {
         TMOS_SystemProcess();
         pm_quiet_passes++;
-        if (dongle_pm_post || dongle_pm_ran) {
+        if (PM_POST_PENDING() || dongle_pm_ran) {
             pm_veto_work++;
             return;
         }
@@ -432,7 +420,7 @@ void pm_idle_try(uint8_t entry_work)
     usb = USB_PmSnapshot();                             /* re-read under the mask */
     /* Both latches clear, observed with interrupts off: anything the next
      * loop top finds posted came after this point (see pm_loop_top). */
-    pm_entry_armed = (uint8_t)!(dongle_pm_post || dongle_pm_ran);
+    pm_entry_armed = (uint8_t)!(PM_POST_PENDING() || dongle_pm_ran);
     if (!pm_entry_armed
             || !pm_level_allows(RF_IdleClass())         /* IRQ-tail promote since the unmasked check */
             || pm_irq_pending()

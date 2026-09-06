@@ -86,7 +86,9 @@ static inline uint32_t hal_tmos_units_from_tsys(uint32_t delta_ticks)
  * neither, so the shared rf_task.c stays hook-free there. */
 extern volatile uint32_t dongle_pm_post;
 extern volatile uint8_t dongle_pm_ran;
-#define hal_event_post(bits)  (dongle_pm_post = 1u, tmos_set_event(rf_taskID, (bits)))
+/* The post latch is accessed only through relaxed atomic builtins (see its
+ * definition in pm_ch592.c). */
+#define hal_event_post(bits)  (__atomic_store_n(&dongle_pm_post, 1u, __ATOMIC_RELAXED), tmos_set_event(rf_taskID, (bits)))
 #define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u)
 #else
 #define hal_event_post(bits)  tmos_set_event(rf_taskID, (bits))
