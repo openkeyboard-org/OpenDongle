@@ -118,13 +118,17 @@ static volatile uint8_t usb_wake_inflight;
  * the stuck-key edge case. */
 static volatile uint8_t usb_resume_clear_kbd;
 /* Set with it on the same edge, one per change-driven endpoint without a
- * stash: EP2 (mouse) and EP3 (consumer). USB_PollEP6 sends an all-up / no-key
- * report for each flag still set; a FRESH report on that endpoint clears its
- * flag under the sender's IRQ mask first, because a fresh report carries the
- * device's whole current state and is the better reconciliation. The check
- * and the arm of the flush happen under one mask in usb_arm_mouse /
- * usb_arm_composite, so a fresh press can neither be overwritten by the flush
- * nor released by it (codex review of the suspend fix). */
+ * stash: EP2 (mouse) and EP3 (consumer), and EP1 (keyboard) for its stash /
+ * keys-up delivery. USB_PollEP6 sends the reconciliation report for each flag
+ * still set; a FRESH report on that endpoint (one that is actually armed)
+ * clears its flag under the sender's IRQ mask first, because a fresh report
+ * carries the device's whole current state and is the better reconciliation.
+ * The check and the arm happen under one mask in usb_reconcile_keyboard /
+ * usb_arm_mouse / usb_arm_composite, so a fresh press can neither be
+ * overwritten by the flush nor released by it (codex and CodeRabbit reviews of
+ * the suspend fix). For EP1 this also means a report that arrived after resume
+ * outranks the stash captured during suspend: newest wins. */
+static volatile uint8_t usb_reconcile_ep1;
 static volatile uint8_t usb_reconcile_ep2;
 static volatile uint8_t usb_reconcile_ep3;
 
@@ -556,6 +560,7 @@ static __attribute__((noinline)) void USB_BusReset(void)
     usb_wake_request = 0;
     usb_wake_inflight = 0;
     usb_kbd_pending_valid = 0;  /* drop any stashed wake report across reset */
+    usb_reconcile_ep1 = 0;
     usb_reconcile_ep2 = 0;
     usb_reconcile_ep3 = 0;
 }
@@ -592,6 +597,7 @@ static __attribute__((noinline)) void USB_SuspendResume(void)
          * usb_resume_clear_kbd). */
         if (usb_suspended) {
             usb_resume_clear_kbd = 1;
+            usb_reconcile_ep1 = 1;
             usb_reconcile_ep2 = 1;
             usb_reconcile_ep3 = 1;
         }
@@ -893,6 +899,9 @@ void USB_ServiceRemoteWake(void)
     }
 }
 
+/* A fresh boot-keyboard report. Once it is actually armed it clears the
+ * resume reconciliation flag (it carries the whole current key state); the
+ * suspend-time stash below does not, since nothing reached the host. */
 USB_HID_SEND_HIGHCODE
 void USB_SendKeyboard(const uint8_t report[8])
 {
@@ -912,8 +921,49 @@ void USB_SendKeyboard(const uint8_t report[8])
         (void)__risc_v_enable_irq(irq_state);
         return;
     }
+    usb_reconcile_ep1 = 0;          /* only a report that is actually armed reconciles */
+    usb_kbd_pending_valid = 0;      /* and it supersedes any stash still held from an
+                                     * earlier episode, which must not replay on a later
+                                     * resume (codex review); a stash for a NEW suspend
+                                     * can only be written after this, while suspended */
     for (int i = 0; i < 8; i++)
         EP1_IN()[i] = report[i];
+    R8_UEP1_T_LEN = 8;
+    R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
+    (void)__risc_v_enable_irq(irq_state);
+}
+
+/* EP1 resume delivery: the key state stashed at wake time (the waking
+ * keystroke, or all-up if it was released before resume), else keys-up so a
+ * pre-suspend held key cannot stay logically stuck. ONE IRQ mask covers the
+ * whole decision - the fresh-report gate, the suspend check, the stash
+ * consumption and the arm - because the pieces interact (codex review):
+ *  - a fresh report armed since the resume edge (usb_reconcile_ep1 clear)
+ *    carries the whole key state and outranks the stash: deliver nothing, and
+ *    LEAVE the stash alone - if the bus has suspended again meanwhile, that
+ *    stash belongs to the new episode and its resume edge (which re-arms the
+ *    flag and usb_resume_clear_kbd) delivers it;
+ *  - the bus already suspended again: same deferral, nothing consumed, and no
+ *    call into usb_hid_in_ready, whose side effect would request a remote
+ *    wake for a flush that is not a keystroke;
+ *  - otherwise consume the stash (or take keys-up), clear the flag and arm.
+ * Called from the main loop only. */
+static void usb_reconcile_keyboard(void)
+{
+    static const uint8_t keys_up[8] = { 0 };
+    const volatile uint8_t *src = keys_up;
+    uint32_t irq_state = __risc_v_disable_irq();
+    if (!usb_reconcile_ep1 || usb_config == 0u || usb_effective_suspended()) {
+        (void)__risc_v_enable_irq(irq_state);
+        return;
+    }
+    if (usb_kbd_pending_valid) {
+        src = usb_kbd_pending;
+        usb_kbd_pending_valid = 0;
+    }
+    usb_reconcile_ep1 = 0;
+    for (int i = 0; i < 8; i++)
+        EP1_IN()[i] = src[i];
     R8_UEP1_T_LEN = 8;
     R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
@@ -936,22 +986,25 @@ void USB_ClearPendingKeyboard(void)
     (void)__risc_v_enable_irq(irq_state);
 }
 
-USB_HID_SEND_HIGHCODE
 /* Arm EP2 with a 5-byte mouse report. reconcile=0 is a fresh report: it
  * clears the resume reconciliation flag, since it carries the device's whole
  * current state. reconcile=1 is the resume all-up flush: it is sent only if
  * no fresh report has cleared the flag since the resume edge. One IRQ mask
  * covers the flag decision and the arm, so the two orderings cannot cross. */
+USB_HID_SEND_HIGHCODE
 static void usb_arm_mouse(const uint8_t report[5], uint8_t reconcile)
 {
     uint32_t irq_state = __risc_v_disable_irq();
     if (reconcile) {
-        if (!usb_reconcile_ep2) {
+        /* The flush: skipped if a fresh report already reconciled, deferred
+         * (flag kept for the next resume edge) if the bus suspended again or
+         * is unconfigured - checked directly, not through usb_hid_in_ready,
+         * whose side effect would request a remote wake for a flush. */
+        if (!usb_reconcile_ep2 || usb_config == 0u || usb_effective_suspended()) {
             (void)__risc_v_enable_irq(irq_state);
-            return;                 /* a fresh report already reconciled it */
+            return;
         }
-    }
-    if (!usb_hid_in_ready()) {
+    } else if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
         return;                     /* dropped: the flag stays, nothing reached the host */
     }
@@ -963,6 +1016,7 @@ static void usb_arm_mouse(const uint8_t report[5], uint8_t reconcile)
     (void)__risc_v_enable_irq(irq_state);
 }
 
+USB_HID_SEND_HIGHCODE
 void USB_SendMouse(const uint8_t report[5])
 {
     usb_arm_mouse(report, 0u);
@@ -976,12 +1030,12 @@ static void usb_arm_composite(const uint8_t *report, uint8_t len, uint8_t reconc
 {
     uint32_t irq_state = __risc_v_disable_irq();
     if (reconcile) {
-        if (!usb_reconcile_ep3) {
+        /* Same three-way gate as usb_arm_mouse. */
+        if (!usb_reconcile_ep3 || usb_config == 0u || usb_effective_suspended()) {
             (void)__risc_v_enable_irq(irq_state);
-            return;                 /* a fresh consumer report already reconciled it */
+            return;
         }
-    }
-    if (!usb_hid_in_ready()) {
+    } else if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
         return;                     /* dropped: the flag stays, nothing reached the host */
     }
@@ -1050,26 +1104,10 @@ void USB_PollEP6(void)
      * have_pending implies configured; the gate never drops a real flush. */
     if (usb_resume_clear_kbd && usb_config != 0u) {
         usb_resume_clear_kbd = 0;
-        uint8_t rep[8];
-        uint8_t have_pending;
-        uint32_t irq = __risc_v_disable_irq();
-        have_pending = usb_kbd_pending_valid;
-        if (have_pending) {
-            for (int i = 0; i < 8; i++)
-                rep[i] = usb_kbd_pending[i];
-            usb_kbd_pending_valid = 0;
-        }
-        (void)__risc_v_enable_irq(irq);
-        if (have_pending) {
-            /* Deliver the key state captured at wake time (the waking
-             * keystroke, or all-up if the key was already released). */
-            USB_SendKeyboard(rep);
-        } else {
-            /* No report was dropped during suspend — flush all-keys-up so a
-             * pre-suspend held key can't stay logically stuck. */
-            static const uint8_t keys_up[8] = { 0 };
-            USB_SendKeyboard(keys_up);
-        }
+        /* The keyboard: the stash captured at wake time or keys-up, gated on
+         * no fresh report since the resume edge and deferred if the bus has
+         * suspended again (usb_reconcile_keyboard). */
+        usb_reconcile_keyboard();
         /* The same reconciliation for the change-driven mouse (EP2) and
          * consumer (EP3) reports, which have no stash: a report armed when
          * SOF stopped was NAKed by USB_SuspendResume and anything that

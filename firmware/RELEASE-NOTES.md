@@ -307,7 +307,9 @@ the keyboard gets from its keys-up flush; the next real report re-asserts
 whatever is still held. A fresh report that reaches the endpoint first, in the
 window between the resume interrupt and the main loop, cancels the flush for
 that endpoint (it carries the device's whole current state), so a press that
-lands right at resume is neither dropped nor released by the flush. On Linux the
+lands right at resume is neither dropped nor released by the flush; the keyboard's
+own resume delivery (the stashed waking keystroke, or keys-up) is gated the same
+way, so a report armed after resume outranks the stash. On Linux the
 no-key report also resets the retained consumer report, which would otherwise
 suppress the next identical press; the one residual is a fresh consumer report
 of that same usage arriving inside the resume window, in which case the host

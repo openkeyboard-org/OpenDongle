@@ -424,23 +424,6 @@ controller's UART accepts no frame that would make it send either.
   release (the mirror case the NAK alone would have created), each followed by a
   host sleep of at least 60 s and a wake from the host's own keyboard.
 
-## Follow-up: the boot-keyboard resume flush has the same fresh-report ordering exposure as EP2/EP3 had
-
-**Where:** `firmware/common/src/usb_device.c`, `USB_PollEP6()` resume block, EP1.
-
-A boot-keyboard report that arrives over RF after the resume ISR has cleared
-`usb_suspended` but before the main loop runs the resume flush is armed on EP1
-and then replaced (if unpolled) or logically released (if polled) by the stash
-delivery or the keys-up flush. The window is the few tens of microseconds
-between the resume interrupt and the next main-loop iteration, so it is far
-narrower than the suspend-episode replay that was fixed, and recovery is the
-next real report; recorded because the mouse/consumer endpoints now coordinate
-exactly this case through `usb_reconcile_ep2/ep3` (resume arms a flag, a fresh
-report clears it under the sender's mask, the flush is decided and armed under
-the same mask). EP1 could use the same flag with newest-wins over the stash;
-it needs the S-scenario oracle on the bench because the keyboard path is the
-validated one.
-
 ## Deferred review findings
 
 Real improvements that were not taken during the import because each one changes
