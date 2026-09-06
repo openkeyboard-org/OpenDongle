@@ -951,11 +951,11 @@ static void usb_arm_mouse(const uint8_t report[5], uint8_t reconcile)
             return;                 /* a fresh report already reconciled it */
         }
     }
-    usb_reconcile_ep2 = 0;
     if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
-        return;
+        return;                     /* dropped: the flag stays, nothing reached the host */
     }
+    usb_reconcile_ep2 = 0;          /* only a report that is actually armed reconciles */
     for (int i = 0; i < 5; i++)
         EP2_IN()[i] = report[i];
     R8_UEP2_T_LEN = 5;
@@ -981,12 +981,12 @@ static void usb_arm_composite(const uint8_t *report, uint8_t len, uint8_t reconc
             return;                 /* a fresh consumer report already reconciled it */
         }
     }
-    if (len != 0u && report[0] == 1u)
-        usb_reconcile_ep3 = 0;
     if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
-        return;
+        return;                     /* dropped: the flag stays, nothing reached the host */
     }
+    if (len != 0u && report[0] == 1u)
+        usb_reconcile_ep3 = 0;      /* only a consumer report that is actually armed reconciles */
     if (len > 16) len = 16;
     for (int i = 0; i < len; i++)
         EP3_IN()[i] = report[i];
