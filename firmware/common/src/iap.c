@@ -33,6 +33,8 @@
 #define CMD_BOND_CLEAR  0x89
 #define CMD_VERSION     0x90
 #define CMD_STATUS      0x91
+#define CMD_RF_DIAG     0x92
+#define CMD_RF_POKE     0x94
 #define CMD_FAULT       0x93
 
 #define ACK_OK          0x0F
@@ -40,6 +42,8 @@
 #define ACK_DEVINFO     0x04
 #define ACK_BOND_READ   0x88
 #define ACK_STATUS      0x91
+#define ACK_RF_DIAG     0x92
+#define ACK_RF_POKE     0x94
 #define ACK_FAULT       0x93
 
 static uint8_t iap_armed;
@@ -348,6 +352,39 @@ static void handle_fault(void)
     USB_SendEP6(resp, sizeof(resp));
 }
 
+/* Read-only RF diagnostics page (command 0x92, optional 1-byte page selector,
+ * default page 0). Unarmed like the fault page: it is the readout for a unit
+ * whose runtime state is the thing under investigation, and arming is a
+ * mutation interlock, not authentication. An unknown page answers with
+ * payload length 0. */
+static void handle_rf_diag(const uint8_t *data, uint8_t len)
+{
+    uint8_t resp[64] = {0};
+    uint8_t page = len ? data[0] : 0u;
+
+    resp[0] = ACK_RF_DIAG;
+    resp[1] = RF_DiagFill(page, &resp[2], (uint8_t)(sizeof(resp) - 2u));
+    USB_SendEP6(resp, sizeof(resp));
+}
+
+/* RF intervention ladder (command 0x94, armed): data[0] = rung. Mutating by
+ * design -- it re-arms or re-initialises the radio -- so it sits behind the
+ * session arm like the bond commands. Reply: [ack][2][rc][rf_state]. */
+static void handle_rf_poke(const uint8_t *data, uint8_t len)
+{
+    uint8_t resp[4];
+
+    if (!iap_armed) {
+        send_reject();
+        return;
+    }
+    resp[0] = ACK_RF_POKE;
+    resp[1] = 2u;
+    resp[2] = len ? RF_DiagIntervene(data[0]) : 0xE0u;
+    resp[3] = RF_GetState();
+    USB_SendEP6(resp, sizeof(resp));
+}
+
 void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
 {
     /* Once a reboot is latched, every further command is dropped without a
@@ -390,6 +427,8 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_BOND_CLEAR:  handle_bond_clear(); break;
     case CMD_VERSION:     handle_version(); break;
     case CMD_STATUS:      handle_status(); break;
+    case CMD_RF_DIAG:     handle_rf_diag(data, len); break;
+    case CMD_RF_POKE:     handle_rf_poke(data, len); break;
     case CMD_FAULT:       handle_fault(); break;
     default:              break;
     }

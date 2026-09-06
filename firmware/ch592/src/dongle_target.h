@@ -38,6 +38,13 @@
 /* N23 post-reset visibility: expose the read-only fault page. */
 #define DONGLE_FAULT_ENABLE 1
 
+/* Tier-1 power management (pm_ch592.c, PM_IDLE=1): two extra IAP 0x92 pages,
+ * 5 "power" and 6 "power detail", exist only when the subsystem is compiled
+ * in; rf_task.h takes the default (5) otherwise. */
+#if DONGLE_PM_IDLE
+#define RF_DIAG_PAGE_COUNT 7u
+#endif
+
 /* CH570 alone needs a delayed pair-ACK transmit. */
 #define RF_CH570_PAIR_ACK_PRE_TX_TMOS 0u
 

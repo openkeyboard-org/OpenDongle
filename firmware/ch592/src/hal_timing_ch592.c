@@ -19,6 +19,8 @@
  * seam); both move here in the remaining P2.3(ii) increments.
  */
 #include "hal_timing_ch592.h"
+#include "hal_dispatch.h"   /* hal_dispatch_diag_snapshot stub (IAP 0x92) */
+#include "hal_timing.h"
 #include "dongle_target.h"   /* HAL_TMOS_UNIT_TICKS / HAL_TICKS_PER_US (P3a) */
 #include "CH59x_common.h"   /* __HIGH_CODE — keep the arm/cancel wrappers in SRAM
                              * like the rf_tmr0_* primitives they front, so the
@@ -79,6 +81,15 @@ void rf_tmr0_stop(void)
     R8_TMR0_CTRL_MOD = 0;                   /* stop counter */
     R8_TMR0_INTER_EN = 0;                   /* disable CYC_END IT */
     R8_TMR0_INT_FLAG = RB_TMR_IF_CYC_END;   /* clear pending */
+#if DONGLE_PM_IDLE
+    /* A CYC_END that landed between hal_timer_cancel's mask and the
+     * PFIC_DisableIRQ above leaves IRQ 16 pending with the line disabled and
+     * the flag now clear. Under the SEVONPEND idle that is a source which never
+     * makes an edge and never clears: a permanent veto (duty 0 after every
+     * teardown) or a WFE storm. Drop it here; pm_irq_pending also detects and
+     * counts any residue (page 6 stale_tmr0). */
+    PFIC_ClearPendingIRQ(TMR0_IRQn);
+#endif
 }
 
 /* TMR0 CYC_END ISR shell. Clears the flag and hands the state-multiplex
@@ -270,4 +281,33 @@ uint8_t hal_timing_ch592_dispatch(uint8_t slot)
     }
     cb(slot);
     return 1;
+}
+
+/* IAP 0x92 executor diagnostics: the CH59x timing/dispatch backings are TMOS
+ * and not instrumented (the CH570 executor is the diagnostic target). */
+void hal_timing_diag_snapshot(hal_timing_diag_t *out)
+{
+    uint8_t i;
+
+    out->active_mask = 0u;
+    out->periodic_slot_p1 = 0u;
+    out->slot_count = 0u;
+    out->reserved = 0u;
+    out->armed_delta = 0u;
+    for (i = 0u; i < HAL_TIMING_DIAG_SLOTS; i++) {
+        out->remaining[i] = 0;
+    }
+}
+
+void hal_dispatch_diag_snapshot(hal_dispatch_diag_t *out)
+{
+    out->pending = 0u;
+    out->delay_bit[0] = 0u;
+    out->delay_bit[1] = 0u;
+    out->degraded = 0u;
+}
+
+uint32_t hal_timing_systick_now(void)
+{
+    return 0u;
 }

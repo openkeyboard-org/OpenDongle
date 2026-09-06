@@ -100,7 +100,10 @@ uint8_t hal_rf_start_rx_primed(uint8_t channel, uint16_t timeout,
 
 /* Transmit `len` bytes from `buf` on `channel` at `access_addr`. The per-chip
  * implementation owns the on-air framing of the payload. Returns the radio's
- * raw start status (0 = success). */
+ * raw start status (0 = success), or 0xFE when the payload is refused before
+ * the radio is touched (oversize) -- the value the diagnostics snapshot records
+ * as last_tx_rc, so the on-wire byte and the API status agree. Callers treat
+ * any nonzero status as a failure. */
 uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
                         const uint8_t *buf, uint8_t len);
 
@@ -110,5 +113,67 @@ void hal_rf_shut(void);
 /* RX DMA frame base (rx[0]=RSSI, rx[1]=len, rx[2..]=payload) for the rf_task
  * RX decoder. Stable for the life of the program. */
 const uint8_t *hal_rf_rx_buf(void);
+
+/* ---- Read-only PHY diagnostics (IAP 0x92 RF diag page) ----
+ * Wrapping counters and last-status bytes the implementation maintains on
+ * every arm, shut and forwarded event. Best-effort: the snapshot is not taken
+ * under one IRQ mask, so a sample may straddle an in-flight event; the host
+ * differences two samples for rates. "last rc" bytes read 0xFF until the first
+ * operation. The implementation does its bookkeeping AFTER the radio call so
+ * the timing-critical arm/start is not delayed. */
+typedef struct {
+    uint32_t rx_arm_attempts;  /* hal_rf_start_rx calls */
+    uint32_t rx_arm_fail;      /* ... that returned non-zero */
+    uint32_t rx_done;          /* HAL_RF_EV_RX_DONE forwarded */
+    uint32_t rx_crcerr;        /* HAL_RF_EV_RX_CRCERR forwarded */
+    uint32_t rx_timeout;       /* HAL_RF_EV_RX_TIMEOUT forwarded */
+    uint32_t tx_start;         /* hal_rf_start_tx calls */
+    uint32_t tx_fail;          /* ... that returned non-zero */
+    uint32_t tx_done;          /* HAL_RF_EV_TX_DONE forwarded */
+    uint32_t shut_calls;       /* hal_rf_shut calls */
+    uint32_t last_rx_aa;       /* access address supplied to the last RX arm */
+    uint16_t last_rx_timeout;  /* raw radio timeout field of the last RX arm */
+    uint8_t  last_rx_channel;  /* resolved channel of the last RX arm */
+    uint8_t  last_tx_channel;  /* resolved channel of the last TX start */
+    uint8_t  last_rx_rc;       /* last hal_rf_start_rx status (0xFF: none yet) */
+    uint8_t  last_tx_rc;       /* last hal_rf_start_tx status (0xFF: none yet,
+                                * 0xFE: refused before the radio -- oversize) */
+    uint8_t  last_shut_rc;     /* last vendor shut status (0xFF: none yet) */
+    uint8_t  rx_armed;         /* software latch: a 0-status RX arm not yet
+                                * ended by a shut, a TX start, or an RX/timeout
+                                * event. Cannot prove the hardware obeyed the
+                                * arm; read it together with rx_timeout progress. */
+} hal_rf_diag_t;
+
+void hal_rf_diag_snapshot(hal_rf_diag_t *out);
+
+/* Second diagnostics block (IAP 0x92 page 4): IRQ-entry counters, a free-
+ * running SysTick stamp of the last vendor callback, the radio's raw LLE/BB
+ * registers read through the vendor library's own base pointers (the only
+ * documentation of that block is the library itself), the library's receive-
+ * state globals, and the radio IRQ enable/priority bits. Zeros on radios
+ * that do not expose them. */
+typedef struct {
+    uint32_t lle_irqs;         /* LLE_IRQHandler entries */
+    uint32_t bb_irqs;          /* BB_IRQHandler entries */
+    uint32_t cb_calls;         /* vendor status-callback entries */
+    uint32_t last_cb_systick;  /* SysTick CNT (low word) at the last callback */
+    uint32_t lle_ctrl;         /* LLE[0x00]: bits[1:0] 0 idle, 1 RX, 2 TX */
+    uint32_t lle_status;       /* LLE[0x08]: pending status (bit 17 = timeout) */
+    uint32_t lle_mask;         /* LLE[0x0C]: enabled status bits */
+    uint32_t lle_timeout;      /* LLE[0x64]: the value the library writes as its
+                                * receive-window time (WaitRecvTime after a sync) */
+    uint32_t bb_status;        /* BB[0x40] */
+    uint32_t lib_status;       /* library gStatus: 1 after SetRx, 2 after a BB sync,
+                                * 16 after StartTx; Shut does not clear it */
+    uint32_t lib_wait_recv;    /* library WaitRecvTime */
+    uint8_t  tuned_channel;    /* HAL channel shadow */
+    uint8_t  rx_white_channel; /* rx_param.whiteChannel */
+    uint8_t  irq_bits;         /* b0..b2 enabled BLEB/BLEL/TMR, b3..b5 high
+                                * priority BLEB/BLEL/TMR, b7 register pointers valid */
+    uint8_t  reserved;
+} hal_rf_diag2_t;
+
+void hal_rf_diag2_snapshot(hal_rf_diag2_t *out);
 
 #endif /* HAL_RF_H */

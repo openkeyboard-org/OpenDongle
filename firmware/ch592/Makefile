@@ -187,6 +187,75 @@ ifdef PAIR_MIN_RSSI
 CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
 
+# Tier-1 power management knobs (src/pm_ch592.c). Every one is a -D CFLAG
+# (hashed into the build id) AND a CONFIG_TEXT token (schema=11). "All off" is
+# the six switches at 0 (PM_IDLE PM_IDLE_LEVEL PM_IDLE_IN_SUSPEND PM_GPIO_PARK
+# PM_USB_DIGIN_OFF PM_CLK_GATE) with the period and mask knobs at their defaults; that
+# image carries no PM code and is byte-identical to a tree without it (the
+# ladder's equivalence gate), so a zero period is a validation error by design.
+#   PM_IDLE            0/1  compile the subsystem: TMR3 heartbeat, the work
+#                           latches, the idle path, IAP 0x92 pages 5-6
+#   PM_IDLE_LEVEL      0..3 which RF classes may sleep: 0 never (plumbing only),
+#                           1 terminal PAIRING camp, 2 all PAIRING + IDLE,
+#                           3 + CONNECTED between polls
+#   PM_IDLE_IN_SUSPEND 0/1  idle while the USB host is suspended (default on;
+#                           0 restores today's spin-while-suspended)
+#   PM_GPIO_PARK       0/1  park the CH592D no-connects (PB15 pull-DOWN)
+#   PM_USB_DIGIN_OFF   0/1  PB10/PB11 digital input buffers off
+#   PM_CLK_GATE        0/1  PWR_PeriphClkCfg(DISABLE, 0x4DF6)
+#   PM_HEARTBEAT_US    100..10000 TMR3 heartbeat period (the TMOS deadline bound)
+#   PM_EP0_QUIET_MS    0..5000 no idle this long after a USB SETUP
+PM_IDLE ?= 1
+PM_IDLE_LEVEL ?= 3
+PM_IDLE_IN_SUSPEND ?= 1
+PM_GPIO_PARK ?= 1
+PM_USB_DIGIN_OFF ?= 0
+PM_CLK_GATE ?= 0
+# Gate mask for PM_CLK_GATE=1 as a DECIMAL (19958 = 0x4DF6: TMR1 TMR2 UART0-3 SPI0 PWMX
+# I2C LCD). Subsets exist for bench bisection; pm_ch592.c refuses any bit outside
+# 0x4DF6 and any of TMR0/TMR3/USB/BLE.
+PM_CLK_GATE_MASK ?= 19958
+PM_HEARTBEAT_US ?= 1000
+PM_EP0_QUIET_MS ?= 200
+# Every value is handed verbatim to the C preprocessor (-DDONGLE_PM_x=...), so
+# each must be exactly ONE plain decimal token: digits only, no sign, no
+# leading zero except a lone "0". A bare `filter` would accept 'PM_IDLE=1 junk'
+# (the stray word becomes a compiler argument), and a shell `test -ge` accepts
+# 'PM_HEARTBEAT_US=01000', which C then reads as octal 512.
+pm-nondigits = $(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(1)))))))))))
+# $(call pm-decimal,KNOB): the knob's value if it is one canonical decimal
+# token, else empty.
+pm-decimal = $(if $(filter 1,$(words $(strip $($(1))))),$(if $(call pm-nondigits,$(strip $($(1)))),,$(if $(filter-out 0,$(filter 0%,$(strip $($(1))))),,$(strip $($(1))))))
+# $(call pm-require-in,KNOB,ALLOWED-TOKENS,DESCRIPTION)
+pm-require-in = $(if $(filter $(2),$(call pm-decimal,$(1))),,$(error $(1) must be $(3), got '$($(1))'))
+# $(call pm-require-range,KNOB,MIN,MAX): a canonical decimal in MIN..MAX (the
+# shell comparison only ever sees a token pm-decimal accepted).
+pm-require-range = $(if $(call pm-decimal,$(1)),$(if $(filter ok,$(shell test "$(call pm-decimal,$(1))" -ge $(2) -a "$(call pm-decimal,$(1))" -le $(3) 2>/dev/null && echo ok)),,$(error $(1) must be $(2)..$(3), got '$($(1))')),$(error $(1) must be a plain decimal integer $(2)..$(3), got '$($(1))'))
+$(call pm-require-in,PM_IDLE,0 1,0 or 1)
+$(call pm-require-in,PM_IDLE_LEVEL,0 1 2 3,0..3)
+$(call pm-require-in,PM_IDLE_IN_SUSPEND,0 1,0 or 1)
+$(call pm-require-in,PM_GPIO_PARK,0 1,0 or 1)
+$(call pm-require-in,PM_USB_DIGIN_OFF,0 1,0 or 1)
+$(call pm-require-in,PM_CLK_GATE,0 1,0 or 1)
+$(call pm-require-range,PM_CLK_GATE_MASK,0,65535)
+$(call pm-require-range,PM_HEARTBEAT_US,100,10000)
+$(call pm-require-range,PM_EP0_QUIET_MS,0,5000)
+# Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
+# named before the compiler runs.
+ifneq ($(strip $(PM_IDLE_LEVEL)),0)
+ifeq ($(strip $(PM_IDLE)),0)
+$(error PM_IDLE_LEVEL=$(strip $(PM_IDLE_LEVEL)) needs PM_IDLE=1)
+endif
+endif
+CFLAGS += -DDONGLE_PM_IDLE=$(strip $(PM_IDLE)) -DDONGLE_PM_IDLE_LEVEL=$(strip $(PM_IDLE_LEVEL))
+CFLAGS += -DDONGLE_PM_IDLE_IN_SUSPEND=$(strip $(PM_IDLE_IN_SUSPEND))
+CFLAGS += -DDONGLE_PM_GPIO_PARK=$(strip $(PM_GPIO_PARK))
+CFLAGS += -DDONGLE_PM_USB_DIGIN_OFF=$(strip $(PM_USB_DIGIN_OFF))
+CFLAGS += -DDONGLE_PM_CLK_GATE=$(strip $(PM_CLK_GATE))
+CFLAGS += -DDONGLE_PM_CLK_GATE_MASK=$(strip $(PM_CLK_GATE_MASK))u
+CFLAGS += -DDONGLE_PM_HEARTBEAT_US=$(strip $(PM_HEARTBEAT_US))
+CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
+
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
@@ -210,12 +279,22 @@ APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # $(APP_SRC) below), so editing the driver moves the build id. It was in
 # neither before, meaning the file was dead code that no build compiled.
 APP_SRC += src/hal_aes_ch592.c
+# Tier-1 power management. Always compiled (so it is always hashed); every
+# function in it sits under its PM_* knob, so the all-off object is empty.
+APP_SRC += src/pm_ch592.c
 
 HAL_SRC := $(SDK)/BLE/HAL/MCU.c $(SDK)/BLE/HAL/RTC.c
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_sys.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_flash.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_adc.c
+# The GPIO and power drivers only when a PM consumer is enabled, so the all-off
+# object list is exactly the pre-PM one; --gc-sections drops the unused
+# LowPower_* from the enabled builds (neither file has file-scope data).
+ifneq ($(filter-out 0,$(PM_IDLE) $(PM_GPIO_PARK) $(PM_CLK_GATE)),)
+DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_gpio.c
+DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_pwr.c
+endif
 STARTUP_SRC := src/startup_CH592_phased.S
 STARTUP_SRC += $(BLE_LIB_DIR)/ble_task_scheduler.S
 STARTUP_SRC += src/bb_irq_trampoline.S src/fault_handler.S
@@ -230,6 +309,12 @@ DEPS := $(OBJS:.o=.d)
 SOURCE_BASENAMES := $(notdir $(C_SRCS) $(S_SRCS))
 ifneq ($(words $(SOURCE_BASENAMES)),$(words $(sort $(SOURCE_BASENAMES))))
 $(error duplicate source basename in the flattened object directory)
+endif
+# The += above must stay AFTER the APP_SRC := assignment: an immediate
+# assignment placed later would discard it, and pm_ch592.c would silently drop
+# out of both the link and BUILD_ID_INPUTS (which expands APP_SRC).
+ifeq ($(filter src/pm_ch592.c,$(APP_SRC)),)
+$(error pm_ch592.c fell out of APP_SRC - keep the += after the APP_SRC := line)
 endif
 
 VPATH := $(COMMON)/src:src:$(SDK)/BLE/HAL:$(SDK)/SRC/StdPeriphDriver:$(BLE_LIB_DIR)
@@ -284,8 +369,9 @@ ifeq ($(strip $(COMPILER_SHA256)),)
 $(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
 endif
 endif
-
-CONFIG_TEXT := schema=10||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
+# schema=11: the PM knob tokens (below) joined the compiler identity tokens
+# that schema 10 introduced; pm_idle was a fixed 0 through schema 10.
+CONFIG_TEXT := schema=11||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
@@ -599,6 +685,12 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 
 size: $(BUILD)/$(TARGET).elf
 	"$(SIZE)" "$<"
+
+# The id this configuration advertises, so a flashed unit's `--info` and the
+# object tree's .build-id-stamp can be compared against it.
+.PHONY: print-build-id
+print-build-id:
+	@echo $(BUILD_ID)
 
 size-check: $(BUILD)/$(TARGET).bin
 	@size=$$(stat -c%s "$<"); \

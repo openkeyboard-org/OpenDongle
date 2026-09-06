@@ -543,6 +543,12 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 size: $(BUILD)/$(TARGET).elf
 	"$(SIZE)" "$<"
 
+# The id this configuration advertises, so a flashed unit's `--info` and the
+# object tree's .build-id-stamp can be compared against it.
+.PHONY: print-build-id
+print-build-id:
+	@echo $(BUILD_ID)
+
 size-check: $(BUILD)/$(TARGET).bin
 	@size=$$(stat -c%s "$<"); \
 	 test "$$size" -le $(APP_MAX_BYTES) || { \

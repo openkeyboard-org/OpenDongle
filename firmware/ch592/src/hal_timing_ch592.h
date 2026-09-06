@@ -75,7 +75,22 @@ static inline uint32_t hal_tmos_units_from_tsys(uint32_t delta_ticks)
  * because they need rf_taskID — an rf_task file-static — in scope at the
  * expansion site. Coalescing is contractual and native: tmos_set_event on an
  * already-set bit is one dispatch. */
+#if DONGLE_PM_IDLE
+/* Power-management latches (pm_ch592.c). dongle_pm_post is set by EVERY
+ * hal_event_post - IRQ-tail and task context alike - as one volatile byte
+ * store folded into the macro (no read-modify-write, so an IRQ post can never
+ * be lost to a thread-side RMW; no call site consumes the return value).
+ * dongle_pm_ran is set at RF_ProcessEvent entry through RF_PROCESS_EVENT_HOOK
+ * so leftover bits a handler re-queues (`events ^ bit` returns) are never slept
+ * past. CH570 resolves this header name to its forwarding stub, which defines
+ * neither, so the shared rf_task.c stays hook-free there. */
+extern volatile uint8_t dongle_pm_post;
+extern volatile uint8_t dongle_pm_ran;
+#define hal_event_post(bits)  (dongle_pm_post = 1u, tmos_set_event(rf_taskID, (bits)))
+#define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u)
+#else
 #define hal_event_post(bits)  tmos_set_event(rf_taskID, (bits))
+#endif
 #define hal_event_cancel(bit) tmos_stop_task(rf_taskID, (bit))
 #define hal_event_post_delayed(bit, delta_ticks) \
     tmos_start_task(rf_taskID, (bit), hal_tmos_units_from_tsys(delta_ticks))

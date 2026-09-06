@@ -64,6 +64,32 @@ typedef void (*hal_timer_cb_t)(uint8_t slot);
  * (wrap-safe) subtraction for deltas. */
 uint32_t hal_now(void);
 
+/* Read-only scheduler diagnostics (IAP 0x92): which slots are armed, the
+ * periodic grid owner (slot+1, 0 = none), the delta last programmed into the
+ * hardware, and each one-shot slot's remaining time in Tsys ticks (signed:
+ * negative = expired but not yet dispatched). The periodic owner keeps no
+ * one-shot deadline and reads remaining == 0; consult periodic_slot_p1.
+ * Slots beyond the implementation's count read inactive. RF_DiagFill
+ * serializes the mask, the owner and the remaining times (armed_delta and
+ * slot_count are available to in-firmware callers only). TMOS-backed chips
+ * report zeros. */
+#define HAL_TIMING_DIAG_SLOTS 6u
+typedef struct {
+    uint8_t  active_mask;
+    uint8_t  periodic_slot_p1;
+    uint8_t  slot_count;
+    uint8_t  reserved;
+    uint32_t armed_delta;
+    int32_t  remaining[HAL_TIMING_DIAG_SLOTS];
+} hal_timing_diag_t;
+
+void hal_timing_diag_snapshot(hal_timing_diag_t *out);
+
+/* Free-running continuous timebase for diagnostics (CH570: SysTick CNT low
+ * word at the core clock, started on first use; it never stops, unlike
+ * hal_now(), which freezes when no slot is armed). TMOS-backed chips return 0. */
+uint32_t hal_timing_systick_now(void);
+
 /* Arm `slot` to fire `delta_ticks` from now, invoking cb(slot) in the
  * PLATFORM-DEFINED callback context (see the contract above: timer-IRQ on
  * CH570; TMOS task via the posted-event shim on CH59x). Re-arming an active

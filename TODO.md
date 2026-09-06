@@ -599,3 +599,28 @@ the build id for no functional gain, or expands scope beyond the import:
 - **Validation record not published.** The bench harness and the per-case
   hardware validation record are kept out of this repository for now; they carry
   bench-specific hardware identifiers and need a scrub pass before publication.
+
+## Power-management follow-ups (CH592 Tier 1, 2026-09-06)
+
+- **Heartbeat tax.** TMR3 is a 60 MHz counter whether the period is 1 ms or 200 ms;
+  the plumbing rung measured +0.29 mA before any idle. An exact-deadline mode (arm the
+  32 kHz RTC trigger to the next TMOS timeout, or read the next timeout under the mask)
+  could retire the heartbeat in the keyboard-absent and suspended states.
+- **Clock gating cadence effect.** `PM_CLK_GATE=1` (mask 0x4DF6) saves ~0.25 mA but the
+  morning A/B read the receive-restart rate 1.6 % low; the afternoon bisect (timers
+  only 1123/s, UARTs only 1134/s, all-but-timers 1107-1115/s, ungated 1124-1139/s) was
+  drowned by RF-environment variance. Redo as an interleaved A/B (3x each) with an RF
+  trace or the controller's own poll-receive counters as the oracle.
+- **USB NAK wakes.** ~3000 wakes/s from the 1 ms-interval HID IN endpoints while the
+  host is awake. Raising `bInterval` on the mouse/consumer interfaces (keep the
+  keyboard at 1 ms) is a product decision; measure before changing.
+- **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
+  the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
+  remote-wake latency contract first.
+- **`TEM_SAMPLE`.** The library's 1 s ADC temperature sample is pre-existing; it costs
+  an ADC conversion and one stale-pending clear per second. Measure before disabling.
+- **EP2/EP3 stale-report replay after suspend** (pre-existing, see the USB defect above).
+- **CH592 OpenBoot USB bootloader on macOS** never binds as HID (usage page 0xFF00);
+  USB updates of the CH592 dongle are impossible from this host. Validated only on CH570.
+- **Production PB15 strap.** The park sets PB15 input pull-down; page 6 [43] reports the
+  boot-time PU/PD/DIR/debug ownership. Read it from the first production CH592D unit.
