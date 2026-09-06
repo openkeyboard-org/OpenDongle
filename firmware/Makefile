@@ -23,6 +23,17 @@ CH592_SDK ?= $(OPENWCH_ROOT)/ch592/EVT/EXAM
 OPENBOOT ?= $(abspath ../third_party/openboot)
 MINICHLINK ?= minichlink
 WCHLINK_SERIAL ?=
+# Every chip target below is a sub-make run FROM the chip directory, so a path
+# given relative to this directory has to be made absolute before it is
+# forwarded. Not $(abspath): that splits on whitespace, and the macOS MounRiver
+# install lives under a path with spaces. A directory that does not exist is
+# forwarded as given, so the chip's check-deps can name it.
+absdir = $(if $(1),$(or $(shell cd "$(1)" 2>/dev/null && pwd),$(1)))
+override MRS_TOOLCHAIN := $(call absdir,$(MRS_TOOLCHAIN))
+override OPENBOOT_TOOLCHAIN := $(call absdir,$(OPENBOOT_TOOLCHAIN))
+override CH570_SDK := $(call absdir,$(CH570_SDK))
+override CH592_SDK := $(call absdir,$(CH592_SDK))
+override OPENBOOT := $(call absdir,$(OPENBOOT))
 # The -I is load-bearing, not decoration: the build tools insert their own
 # directory onto sys.path deliberately (see finalize_image.py), which only
 # behaves predictably when the interpreter starts isolated from the invoking

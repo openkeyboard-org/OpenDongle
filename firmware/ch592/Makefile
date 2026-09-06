@@ -275,7 +275,8 @@ RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 # fields are required INDEPENDENTLY: a readable driver with a blank banner, or a
 # banner over an unreadable driver, must not produce a valid-looking build id.
 NO_APP_CC_GOALS := clean openboot-image check-openboot-toolchain check-deps $(OPENBOOT_BIN)
-ifneq ($(filter-out $(NO_APP_CC_GOALS),$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)),)
+APP_CC_NEEDED := $(filter-out $(NO_APP_CC_GOALS),$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
+ifneq ($(APP_CC_NEEDED),)
 ifeq ($(strip $(COMPILER_ID)),)
 $(error cannot identify the compiler "$(CC)" (--version printed nothing): set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
 endif
@@ -298,11 +299,20 @@ BUILD_ID_INPUTS += $(OPENBOOT)/protocol/openboot_protocol.h $(FINALIZE_TOOL)
 #	This must stay ABOVE the -DDONGLE_BUILD_ID line below, or the id would feed
 #	its own input. Every codegen-affecting flag is already set by this point;
 #	only the build-id define comes after.
+#
+#	Only computed when a goal compiles the application: the inputs include SDK
+#	sources, so on a checkout whose submodules are not initialised the hash
+#	would fail before check-deps could name the missing SDK. The exempt goals
+#	(clean, the OpenBoot-only targets, check-deps) never use the id.
+ifneq ($(APP_CC_NEEDED),)
 BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
     --flags 'CFLAGS=$(CFLAGS)' --flags 'LDFLAGS=$(LDFLAGS)' \
     $(BUILD_ID_INPUTS))
 ifeq ($(BUILD_ID),)
 $(error failed to calculate firmware build identity)
+endif
+else
+BUILD_ID := 00000000
 endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
