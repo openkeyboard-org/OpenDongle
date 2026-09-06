@@ -27,13 +27,18 @@ WCHLINK_SERIAL ?=
 # given relative to this directory has to be made absolute before it is
 # forwarded. Not $(abspath): that splits on whitespace, and the macOS MounRiver
 # install lives under a path with spaces. A directory that does not exist is
-# forwarded as given, so the chip's check-deps can name it. CDPATH is cleared
-# because an exported one makes `cd` echo the directory it resolved.
+# rooted at this directory all the same (an absolute one is kept as is), so the
+# chip's check-deps names the path that was meant rather than resolving the
+# relative one under the chip directory, where a same-named directory would be
+# checked instead. CDPATH is cleared because an exported one makes `cd` echo
+# the directory it resolved. The case patterns carry their optional opening
+# parenthesis on purpose: make matches parentheses to find the end of $(shell).
 #
 # Make re-sends a command-line variable to every sub-make with its ORIGINAL
 # value (through MAKEFLAGS), so the normalised value only reaches a chip
 # Makefile when it is forwarded explicitly, as every chip target below does.
-absdir = $(if $(1),$(or $(shell unset CDPATH; cd "$(1)" 2>/dev/null && pwd),$(1)))
+absdir = $(if $(1),$(shell unset CDPATH; if cd "$(1)" 2>/dev/null; then pwd; \
+    else case "$(1)" in (/*) printf '%s\n' "$(1)";; (*) printf '%s/%s\n' "$(CURDIR)" "$(1)";; esac; fi))
 override MRS_TOOLCHAIN := $(call absdir,$(MRS_TOOLCHAIN))
 override OPENBOOT_TOOLCHAIN := $(call absdir,$(OPENBOOT_TOOLCHAIN))
 override CH570_SDK := $(call absdir,$(CH570_SDK))
