@@ -206,7 +206,13 @@ pub const PAGE5_NAMES: [&str; 14] = [
 /// Page 6 words at [2 + 4 i]; the `sleep_control` and `*_ipr*` words are gauges.
 /// [42] last-wake flags, [43] PB15 boot snapshot, [44..46] remote-wake arm
 /// count (u16 on both sides: `usb_rw_arm_count`, delta modulo 2^16) and
-/// [46..50] `wake_none` and [50..54] `stale_adc` (library temp-sample ADC residue cleared before sleeping) follow.
+/// [46..50] `wake_none` and [50..54] `stale_adc` (library temp-sample ADC residue cleared before sleeping) follow,
+/// then [54..58] `hb_arm_deadline` and [58..62] `hb_arm_cap`: in the exact-deadline
+/// heartbeat mode (page 5 flag 0x80), how many sleeps armed TMR3 to an app timer's
+/// deadline versus to the cap; both stay 0 in the fixed-period mode. Page 5 [59] is
+/// the idle level in its low nibble and, in that mode, a saturating count of
+/// deadline-table entries dropped as stuck (`hb_stale_drop`) in its high nibble:
+/// any nonzero value is a finding.
 ///
 /// `veto_entry` counts a post that landed after the previous masked idle
 /// decision and that three scheduler passes then failed to dispatch (the
@@ -319,6 +325,8 @@ pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
                 v.push(("wake_none", le32(&p.raw, 46)));
                 v.push(("rw_arms", u32::from(le16(&p.raw, 44))));
                 v.push(("stale_adc", le32(&p.raw, 50)));
+                v.push(("hb_arm_deadline", le32(&p.raw, 54)));
+                v.push(("hb_arm_cap", le32(&p.raw, 58)));
             }
             _ => {}
         }
@@ -515,10 +523,12 @@ pub fn render(pages: &[Page]) -> Vec<String> {
             }
             5 => {
                 let f = r[58];
+                let exact = f & 0x80 != 0;
                 out.push("power:".to_string());
                 out.push(format!(
-                    "  idle            wfe_count={} idle_tsys={} hb_irqs={} hal_now=0x{:08X} level={} heartbeat_us={}",
-                    le32(r, 2), le32(r, 6), le32(r, 10), le32(r, 14), r[59], le16(r, 60)
+                    "  idle            wfe_count={} idle_tsys={} hb_irqs={} hal_now=0x{:08X} level={} {}={} hb_stale_drop={}",
+                    le32(r, 2), le32(r, 6), le32(r, 10), le32(r, 14), r[59] & 0x0F,
+                    if exact { "deadline_cap_us" } else { "heartbeat_us" }, le16(r, 60), r[59] >> 4
                 ));
                 out.push(format!(
                     "  wakes           tmr3={} radio={} both={} tmr0={} usb={} other={}",
@@ -529,9 +539,9 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     le32(r, 42), le32(r, 46), le32(r, 50), le32(r, 54)
                 ));
                 out.push(format!(
-                    "  flags           tmr0_counting={} tmr3_counting={} usb_configured={} usb_suspended={} idle_in_suspend={} debug_en={} remote_wake_armed={}",
+                    "  flags           tmr0_counting={} tmr3_counting={} usb_configured={} usb_suspended={} idle_in_suspend={} debug_en={} remote_wake_armed={} exact_deadline={}",
                     f & 0x01 != 0, f & 0x02 != 0, f & 0x04 != 0, f & 0x08 != 0,
-                    f & 0x10 != 0, f & 0x20 != 0, f & 0x40 != 0
+                    f & 0x10 != 0, f & 0x20 != 0, f & 0x40 != 0, exact
                 ));
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
             }
@@ -549,6 +559,10 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     "  vetoes          ep0={} entry={} alien={} (last alien IPR0=0x{:08X} IPR1=0x{:08X}) stale_tmr0={} stale_adc={} quiet_passes={} wake_none={}",
                     le32(r, 14), le32(r, 26), le32(r, 22), le32(r, 6), le32(r, 10),
                     le32(r, 18), le32(r, 50), le32(r, 30), le32(r, 46)
+                ));
+                out.push(format!(
+                    "  heartbeat arms  deadline={} cap={} (exact-deadline mode only; 0/0 in the fixed-period mode)",
+                    le32(r, 54), le32(r, 58)
                 ));
                 out.push(format!(
                     "  last wake       IPR0=0x{:08X} IPR1=0x{:08X} flags=0x{:02X} (tmr0_cyc={} tmr3_cyc={} usb_transfer={} usb_suspend={} usb_bus_rst={})",
@@ -779,7 +793,7 @@ mod tests {
         let pa = Page::decode(5, &sample(1000, 0, 0, 10, 0)).unwrap();
         let pb = Page::decode(5, &sample(2000, 54_000_000, 60_000_000, 29, 1)).unwrap();
         let text = render(std::slice::from_ref(&pb)).join("\n");
-        assert!(text.contains("level=3 heartbeat_us=1000"), "{text}");
+        assert!(text.contains("level=3 heartbeat_us=1000 hb_stale_drop=0"), "{text}");
         assert!(text.contains("tmr3_counting=true"), "{text}");
         assert!(text.contains("remote_wake_armed=true"), "{text}");
         assert!(text.contains("wakes           tmr3=0 radio=29 both=1"), "{text}");
@@ -836,16 +850,21 @@ mod tests {
                 raw[43] = 0x08;
                 raw[44..46].copy_from_slice(&3u16.to_le_bytes());
                 raw[46..50].copy_from_slice(&2u32.to_le_bytes());
+                raw[54..58].copy_from_slice(&11u32.to_le_bytes());
+                raw[58..62].copy_from_slice(&900u32.to_le_bytes());
             }),
         )
         .unwrap();
         let text = render(std::slice::from_ref(&p)).join("\n");
+        assert!(text.contains("heartbeat arms  deadline=11 cap=900"), "{text}");
         assert!(text.contains("tmr0_cyc=true tmr3_cyc=true usb_transfer=false"), "{text}");
         assert!(text.contains("pu=false pd=false dir=false debug_en=true; remote-wake arms=3"), "{text}");
         let c = counters(&[p]);
         assert!(c.contains(&("quiet_passes", 7)), "{c:?}");
         assert!(c.contains(&("wake_none", 2)), "{c:?}");
         assert!(c.contains(&("rw_arms", 3)), "{c:?}");
+        assert!(c.contains(&("hb_arm_deadline", 11)), "{c:?}");
+        assert!(c.contains(&("hb_arm_cap", 900)), "{c:?}");
         assert!(c.iter().all(|(n, _)| !n.contains("ipr") && *n != "sleep_control"), "{c:?}");
     }
 

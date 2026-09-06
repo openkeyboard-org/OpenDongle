@@ -594,10 +594,13 @@ the build id for no functional gain, or expands scope beyond the import:
 
 ## Power-management follow-ups (CH592 Tier 1, 2026-09-06)
 
-- **Heartbeat tax.** TMR3 is a 60 MHz counter whether the period is 1 ms or 200 ms;
-  the plumbing rung measured +0.29 mA before any idle. An exact-deadline mode (arm the
-  32 kHz RTC trigger to the next TMOS timeout, or read the next timeout under the mask)
-  could retire the heartbeat in the keyboard-absent and suspended states.
+- **Heartbeat tax: measured and retired.** The keyboard-absent A/B/C (1 ms heartbeat
+  10.931 mA, 10 ms 10.819 mA, none 10.796 mA, 2026-09-06) showed the cost is the
+  interrupt (~0.13 mA per 1000/s), not the 60 MHz counter (<= 0.01 mA). The
+  exact-deadline mode (`PM_EXACT_DEADLINE`, plan section 12) arms TMR3 to the next
+  application deadline and caps the sleep for library timers; no RTC trigger needed.
+  Left open: the cap default (20 ms) against the library timers' tolerance, and
+  whether the 500 ms/120 s HAL calibration would rather be bounded tighter.
 - **Clock gating cadence effect.** `PM_CLK_GATE=1` (mask 0x4DF6) saves ~0.25 mA but the
   morning A/B read the receive-restart rate 1.6 % low; the afternoon bisect (timers
   only 1123/s, UARTs only 1134/s, all-but-timers 1107-1115/s, ungated 1124-1139/s) was
