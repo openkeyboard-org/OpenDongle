@@ -44,6 +44,22 @@ MINICHLINK ?= minichlink
 WCHLINK_SERIAL ?=
 
 PYTHON := /usr/bin/python3 -I
+# The compiler's identity, folded into CONFIG_TEXT below and so into the build
+# id: a readable prefix (the first --version line sanitised to one token) plus
+# the first 16 hex digits of the SHA-256 of that whole line, so two vendor tags
+# that sanitise alike still yield different ids. A different compiler BUILD
+# therefore moves the build id instead of being refused: check-deps gates on
+# properties (GCC major + the WCH fast-interrupt ABI probe), not on the
+# driver's bytes. Empty when no compiler answers; refused below for any goal
+# that compiles, so an unidentified compiler can never produce a valid-looking
+# build id.
+COMPILER_ID := $(shell LC_ALL=C "$(CC)" --version 2>/dev/null | head -n 1 | $(PYTHON) -c 'import sys,re,hashlib; l=sys.stdin.readline().strip(); print(re.sub(r"[^A-Za-z0-9._-]", "_", l) + "-" + hashlib.sha256(l.encode()).hexdigest()[:16] if l else "")')
+# The driver's own digest, also folded into CONFIG_TEXT: a driver whose bytes
+# changed under an unchanged banner still moves the build id and recompiles
+# every object, so the factory manifest's app_compiler_sha256 always names the
+# driver that built the packaged application. Recorded, not gated: see
+# check_dependencies.py for the gate.
+COMPILER_SHA256 := $(shell $(PYTHON) -c 'import hashlib,sys; p=sys.argv[1]; print(hashlib.sha256(open(p,"rb").read()).hexdigest()) if __import__("os").path.isfile(p) else print("")' "$(CC)" 2>/dev/null)
 
 SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 # The OpenBoot revision this build is pinned to. Declared rather than read from
@@ -251,7 +267,25 @@ FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
 OPENBOOT_BIN := $(BUILD)/$(TARGET)-openboot.bin
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
-CONFIG_TEXT := schema=9||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
+# Goals that never compile the application must work on a checkout with no
+# application compiler at all: clean, the OpenBoot-only targets (OpenBoot builds
+# with its own GCC12) including the explicit bootloader binary, and check-deps
+# (which names the missing compiler itself, more precisely than this guard).
+# Placed after the output variables so the binary's path can be named. Both
+# fields are required INDEPENDENTLY: a readable driver with a blank banner, or a
+# banner over an unreadable driver, must not produce a valid-looking build id.
+NO_APP_CC_GOALS := clean openboot-image check-openboot-toolchain check-deps $(OPENBOOT_BIN)
+APP_CC_NEEDED := $(filter-out $(NO_APP_CC_GOALS),$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
+ifneq ($(APP_CC_NEEDED),)
+ifeq ($(strip $(COMPILER_ID)),)
+$(error cannot identify the compiler "$(CC)" (--version printed nothing): set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
+endif
+ifeq ($(strip $(COMPILER_SHA256)),)
+$(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
+endif
+endif
+
+CONFIG_TEXT := schema=10||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
@@ -265,11 +299,20 @@ BUILD_ID_INPUTS += $(OPENBOOT)/protocol/openboot_protocol.h $(FINALIZE_TOOL)
 #	This must stay ABOVE the -DDONGLE_BUILD_ID line below, or the id would feed
 #	its own input. Every codegen-affecting flag is already set by this point;
 #	only the build-id define comes after.
+#
+#	Only computed when a goal compiles the application: the inputs include SDK
+#	sources, so on a checkout whose submodules are not initialised the hash
+#	would fail before check-deps could name the missing SDK. The exempt goals
+#	(clean, the OpenBoot-only targets, check-deps) never use the id.
+ifneq ($(APP_CC_NEEDED),)
 BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
     --flags 'CFLAGS=$(CFLAGS)' --flags 'LDFLAGS=$(LDFLAGS)' \
     $(BUILD_ID_INPUTS))
 ifeq ($(BUILD_ID),)
 $(error failed to calculate firmware build identity)
+endif
+else
+BUILD_ID := 00000000
 endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
@@ -393,7 +436,8 @@ check-factory-slot:
 check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
-	    --tool-prefix "$(CROSS)"
+	    --tool-prefix "$(CROSS)" \
+	    --probe-flags "$(ARCH)"
 #	Assert the submodule IS the pinned revision and its worktree is clean.
 #	--skip-toolchain because OpenBoot's own recursive build checks its
 #	compiler; requiring GCC12 to be installed merely to verify a SHA would
@@ -462,7 +506,7 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(CONFIG_STAMP): Makefile | $(BUILD)
+$(CONFIG_STAMP): Makefile FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(CONFIG_TEXT)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
@@ -474,7 +518,7 @@ $(CONFIG_STAMP): Makefile | $(BUILD)
 # ELF, the ODG2 record and the factory image all kept the old flags and the
 # old id baked in, while the build system advertised the new one. The content
 # guard below still blocks propagation when the id has not actually moved.
-$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile | $(BUILD)
+$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(BUILD_ID)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
@@ -541,6 +585,16 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 	   exit 1; }
 	@cp "$(OPENBOOT_FACTORY_BIN)" "$(FACTORY_BIN)"
 	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
+#	The application side of the manifest: what compiled the app (identity line,
+#	driver SHA-256) and the build id it produced. Both compiler values are the
+#	parse-time ones that CONFIG_TEXT hashed into that id, so they name the driver
+#	that built these objects. This is the record the strict check-deps mode
+#	(--expect-compiler-sha256) is meant to be fed from.
+	@{ printf 'app_build_id=%s\n' "$(BUILD_ID)"; \
+	   printf 'app_compiler=%s\n' "$$(LC_ALL=C "$(CC)" --version | head -n 1)"; \
+	   printf 'app_compiler_id=%s\n' "$(COMPILER_ID)"; \
+	   printf 'app_compiler_sha256=%s\n' "$(COMPILER_SHA256)"; \
+	} >> "$(FACTORY_MANIFEST)"
 	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
 
 size: $(BUILD)/$(TARGET).elf

@@ -23,6 +23,27 @@ CH592_SDK ?= $(OPENWCH_ROOT)/ch592/EVT/EXAM
 OPENBOOT ?= $(abspath ../third_party/openboot)
 MINICHLINK ?= minichlink
 WCHLINK_SERIAL ?=
+# Every chip target below is a sub-make run FROM the chip directory, so a path
+# given relative to this directory has to be made absolute before it is
+# forwarded. Not $(abspath): that splits on whitespace, and the macOS MounRiver
+# install lives under a path with spaces. A directory that does not exist is
+# rooted at this directory all the same (an absolute one is kept as is), so the
+# chip's check-deps names the path that was meant rather than resolving the
+# relative one under the chip directory, where a same-named directory would be
+# checked instead. CDPATH is cleared because an exported one makes `cd` echo
+# the directory it resolved. The case patterns carry their optional opening
+# parenthesis on purpose: make matches parentheses to find the end of $(shell).
+#
+# Make re-sends a command-line variable to every sub-make with its ORIGINAL
+# value (through MAKEFLAGS), so the normalised value only reaches a chip
+# Makefile when it is forwarded explicitly, as every chip target below does.
+absdir = $(if $(1),$(shell unset CDPATH; if cd "$(1)" 2>/dev/null; then pwd; \
+    else case "$(1)" in (/*) printf '%s\n' "$(1)";; (*) printf '%s/%s\n' "$(CURDIR)" "$(1)";; esac; fi))
+override MRS_TOOLCHAIN := $(call absdir,$(MRS_TOOLCHAIN))
+override OPENBOOT_TOOLCHAIN := $(call absdir,$(OPENBOOT_TOOLCHAIN))
+override CH570_SDK := $(call absdir,$(CH570_SDK))
+override CH592_SDK := $(call absdir,$(CH592_SDK))
+override OPENBOOT := $(call absdir,$(OPENBOOT))
 # The -I is load-bearing, not decoration: the build tools insert their own
 # directory onto sys.path deliberately (see finalize_image.py), which only
 # behaves predictably when the interpreter starts isolated from the invoking
@@ -44,22 +65,22 @@ all: ch570 ch592
 ch570:
 	$(MAKE) -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" all
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" all
 
 ch592:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" all
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" all
 
 ch570-factory:
 	$(MAKE) -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" factory
 
 ch592-factory:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" factory
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" factory
 
 # Release artifacts: one .obb per chip carrying BOTH per-slot builds. OpenBoot
 # alternates its write target after every COMMIT and refuses an image whose base
@@ -68,12 +89,12 @@ ch592-factory:
 ch570-bundle:
 	$(MAKE) -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" bundle
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" bundle
 
 ch592-bundle:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" bundle
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" bundle
 
 bundles: ch570-bundle ch592-bundle
 
@@ -83,14 +104,14 @@ bundles: ch570-bundle ch592-bundle
 ch570-factory-flash:
 	$(MAKE) -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" \
 	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
 	    flash-factory
 
 ch592-factory-flash:
 	$(MAKE) -C ch592 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
-	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" \
 	    MINICHLINK="$(MINICHLINK)" WCHLINK_SERIAL="$(WCHLINK_SERIAL)" \
 	    flash-factory
 
@@ -143,15 +164,16 @@ openboot-test:
 	    --all-targets -- -D warnings
 	cargo test --manifest-path $(OPENBOOT)/tools/Cargo.toml
 
+# Delegated to the chip Makefiles: each one owns its SDK pin and passes its own
+# $(ARCH) as the fast-interrupt probe target, so this checks exactly what a
+# build of that chip checks (the bare script would probe a generic rv32imac).
 check-deps:
-	$(PYTHON) check_dependencies.py \
-	    --sdk "$(CH570_SDK)" \
-	    --sdk-revision 1e34c9450cd6df390153952c097cd09dd8a91aed \
-	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
-	$(PYTHON) check_dependencies.py \
-	    --sdk "$(CH592_SDK)" \
-	    --sdk-revision a46e0086f1ffb5e5502703970bff94888e67f4cb \
-	    --toolchain "$(MRS_TOOLCHAIN)" --tool-prefix "$(CROSS)"
+	$(MAKE) -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" check-deps
+	$(MAKE) -C ch592 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH592_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" check-deps
 
 # Host-side suite: no cross toolchain, no hardware. Covers the build-identity
 # contract and the factory composition. (OpenBoot's own host suite is separate
@@ -207,7 +229,9 @@ aes-hw-validate:
 	    --ch592-probe "$(AES_HW_CH592)" \
 	    $(AES_HW_ARGS)
 
+# OPENBOOT is forwarded here too: the chip Makefiles read the OpenBoot slot
+# geometry at parse time, for every goal.
 clean:
-	$(MAKE) -C ch570 clean
-	$(MAKE) -C ch592 clean
+	$(MAKE) -C ch570 OPENBOOT="$(OPENBOOT)" clean
+	$(MAKE) -C ch592 OPENBOOT="$(OPENBOOT)" clean
 	$(MAKE) -C validation clean
