@@ -288,6 +288,36 @@ defect to be fixed in this firmware — fixing it would break interoperability w
 the production keyboard. It is stated here so it is an explicit, accepted property
 rather than an implicit one.
 
+## USB suspend: mouse and consumer reports no longer replay on resume
+
+The suspend handler used to NAK only the boot-keyboard endpoint (EP1) when the
+host stopped SOF. A mouse (EP2) or consumer/media (EP3) report armed in the last
+poll interval before suspend stayed armed across the whole episode and was
+handed to the host on its first IN poll after resume. HID reports are
+change-driven, so the matching release, arriving over RF during suspend, was
+correctly dropped while the press survived: the host resumed with a stuck button
+or a held media key until the next real report from that device. The suspend
+branch now NAKs EP1, EP2 and EP3 alike, masking only the response bits so the
+data toggle is preserved (the host never received the NAK'd report, so its
+expected toggle is unchanged). The NAK alone would only trade the glitch for its
+mirror image (a *release* armed when SOF stopped would now be the report that
+never arrives), so on the resume edge the main loop also sends a mouse all-up
+report with zero motion and a consumer no-key report, the same reconciliation
+the keyboard gets from its keys-up flush; the next real report re-asserts
+whatever is still held. A fresh report that reaches the endpoint first, in the
+window between the resume interrupt and the main loop, cancels the flush for
+that endpoint (it carries the device's whole current state), so a press that
+lands right at resume is neither dropped nor released by the flush; the keyboard's
+own resume delivery (the stashed waking keystroke, or keys-up) is gated the same
+way, so a report armed after resume outranks the stash. On Linux the
+no-key report also resets the retained consumer report, which would otherwise
+suppress the next identical press; the one residual is a fresh consumer report
+of that same usage arriving inside the resume window, in which case the host
+never sees the no-key report and that press is suppressed until any other
+consumer report arrives. Mouse and consumer
+reports remain drop-on-suspend (no stash); only the keyboard's waking keystroke
+is preserved. Changes the image on both chips.
+
 ## Known issues
 
 **CH592: rare fatal fault under a reset during BLE activity.** Under a debug
