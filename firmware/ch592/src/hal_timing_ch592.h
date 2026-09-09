@@ -96,13 +96,14 @@ extern volatile uint8_t dongle_pm_ran;
  * only on success; stop: table first) rather than under a mask, so a
  * same-bit start and stop crossing between task context and the IRQ-tail
  * sink leaves the table consistent or holding a harmless phantom, never a
- * masked library call on the poll path; RF_ProcessEvent reports the
- * dispatched bits so due entries retire on evidence. The macros expand where
- * rf_taskID is in scope (rf_task.c), hence the task argument. */
+ * masked library call on the poll path. An entry retires when a sleep
+ * decision finds it already due at the previous decision's clock read with
+ * nothing dispatched since (pm_ch592.c); the dispatch path carries no
+ * evidence. The macros expand where rf_taskID is in scope (rf_task.c),
+ * hence the task argument. */
 void pm_tmos_start(uint8_t task, uint16_t bit, uint32_t units);
 void pm_tmos_stop(uint8_t task, uint16_t bit);
-void pm_deadline_dispatched(uint16_t events);
-#define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u, pm_deadline_dispatched((uint16_t)(ev)))
+#define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u)
 #define hal_event_cancel(bit) pm_tmos_stop(rf_taskID, (bit))
 #define hal_event_post_delayed(bit, delta_ticks) \
     pm_tmos_start(rf_taskID, (bit), hal_tmos_units_from_tsys(delta_ticks))

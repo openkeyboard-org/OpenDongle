@@ -13,8 +13,10 @@ proved on the same silicon; a plain masked WFI never wakes here), bounded by TMR
 the lowest interrupt priority, and woken by the radio (BLEB/BLEL), TMR0, USB and TMR3.
 TMR3 is armed per sleep to the next application TMOS deadline (`PM_EXACT_DEADLINE=1`,
 the default): the CH592 timing seam records every application timer start in a
-table on the RTC counter TMOS itself compares against, retires an entry when its
-event is dispatched, and the idle path programs TMR3 to fire one 625 us unit after
+table on the RTC counter TMOS itself compares against, retires an entry once a sleep
+decision finds it already due at the previous decision's clock read with nothing
+dispatched since (the scheduler passes between two decisions dispatch every expiry
+TMOS had posted), and the idle path programs TMR3 to fire one 625 us unit after
 the nearest entry, or at `PM_DEADLINE_CAP_US` (20 ms) when none is nearer, which
 bounds the library's own timers (its 1 s temperature sample, the 120 s calibration).
 An application timer therefore waits at most one TMOS unit of idle-induced wake
