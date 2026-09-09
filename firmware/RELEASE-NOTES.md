@@ -90,11 +90,12 @@ Findings folded in during validation:
   absolute receive-restart rate read 1.6 % lower with the gates on and an afternoon
   bisect could not name a block. Re-measured 2026-09-09 with the page-1 reply-ratio
   oracle (replies received over the keyboard's replies sent, 30 s runs, interleaved
-  flashes): the gates cost about 0.2 % of poll replies, not 1.6 % (the rest was the
-  downlink's own loss), and the same binary with an empty mask reads like the ungated
-  one, so the register write, not code layout, carries it; each half of the mask
-  (TMR1/2 + UARTs, and SPI0/PWMX/I2C/LCD) carries about 0.15 % on its own, so it is an
-  aggregate effect of the gated current rather than one block. A missed reply costs the
+  flashes): the gates cost about 0.2 % of poll replies, not 1.6 % (the old oracle
+  counted the downlink's own loss too, which is the likely rest), and the same binary
+  with an empty mask reads like the ungated one, so the register write, not code
+  layout, carries it; each half of the mask (TMR1/2 + UARTs, and SPI0/PWMX/I2C/LCD)
+  carries about 0.15 % on its own, so no single block explains it. The mechanism is
+  not established; a supply effect of the gated current is the guess. A missed reply costs the
   keyboard one 875 us poll of latency on that report; the 0.25 mA is 2.3 % of the
   connected draw. `PM_CLK_GATE=0` restores the ungated image.
 - On this Mac the CH592 OpenBoot USB bootloader attaches but never binds as an HID

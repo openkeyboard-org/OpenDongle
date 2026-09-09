@@ -602,9 +602,10 @@ the build id for no functional gain, or expands scope beyond the import:
   Left open: the cap default (20 ms) against the library timers' tolerance, and
   whether the 500 ms/120 s HAL calibration would rather be bounded tighter.
 - **Clock gating cadence effect: characterised, shipped on (2026-09-09).** The 1.6 %
-  the 09-06 absolute-rate A/B showed was mostly downlink loss; the reply-ratio oracle
-  puts the gates at ~0.2 % of poll replies (same binary, mask 0 vs 0x4DF6; both halves
-  of the mask carry ~0.15 % each, so it is the gated current, not a block). Default is
+  the 09-06 absolute-rate A/B showed is not what the reply-ratio oracle sees: it puts
+  the gates at ~0.2 % of poll replies (same binary, mask 0 vs 0x4DF6; both halves of
+  the mask carry ~0.15 % each, so no single block explains it; the old oracle also
+  counted downlink loss, the likely rest). Default is
   now `PM_CLK_GATE=1`; the mask knob stays for anyone who wants the ungated radio
   margin back at +0.25 mA. Open: the physical mechanism (supply ripple on the LDO
   changing the receiver's margin at the arm edge is the guess), which the cadence bench
