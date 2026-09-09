@@ -201,8 +201,12 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * became due inside the window is ambiguous (the dispatch may be an
  * immediate post of the same bit from before the deadline): it is left in
  * place, arms the floor, and the next window - which opens after this
- * apply, when it is already due - retires it on the expiry's own dispatch,
- * one short wake later. Evidence from an earlier occurrence of the same
+ * apply, when it is already due - retires it one short wake later on the
+ * carried evidence (the expiry's dispatch, or an earlier immediate post's
+ * bit; by then the floor wake's passes have dispatched the queued expiry
+ * either way, so the verdict is right in both cases). Evidence that retired
+ * an entry is consumed at the close; evidence for a live entry that was not
+ * retired is carried. Evidence from an earlier occurrence of the same
  * timer can never retire the next one (the adversarial review's sequence:
  * a PAIR_PREP dispatched 30 ms before its restart's expiry, the expiry
  * landing in the last quiet pass where TMOS queues the event internally,
@@ -305,6 +309,7 @@ static inline uint8_t pm_due_at_window_open(uint32_t deadline)
  * applied under the mask only if the entry still holds the value the plan
  * saw, so a fresh deadline written by the sink in between is never erased. */
 static uint32_t pm_plan_now;            /* the plan's RTC read: the next window opens here */
+static uint32_t pm_plan_carry;          /* evidence bits carried into the next window */
 static uint32_t pm_plan_best;           /* ticks to arm, PM_DEADLINE_MIN_RTC..cap */
 static uint32_t pm_plan_clear;          /* bit i: retire entry i if unchanged */
 static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired as stuck, not consumed */
@@ -321,7 +326,7 @@ static void pm_tmr3_plan(void)
      * is ignored and the next apply reopens it (codex: aged evidence). */
     uint32_t evid = (pm_rtc_dist(now, pm_evid_since) < PM_RTC_MOD / 4u) ? pm_evid_bits : 0u;
     uint32_t best = PM_CAP_RTC;
-    uint32_t clear = 0u, stale = 0u;
+    uint32_t clear = 0u, stale = 0u, live = 0u;
     uint8_t  hit = 0u;
     uint32_t i;
     pm_plan_now = now;
@@ -329,6 +334,7 @@ static void pm_tmr3_plan(void)
         uint32_t d = pm_deadline[i];
         uint32_t dist, cand;
         if (d == PM_DEADLINE_EMPTY) continue;
+        live |= 1u << i;
         dist = pm_rtc_dist(d, now);
         if (PM_RTC_PAST(dist)) {
             uint32_t overdue = PM_RTC_MOD - dist;
@@ -355,6 +361,15 @@ static void pm_tmr3_plan(void)
         if (cand < best) { best = cand; hit = 1u; }
     }
     if (best < PM_DEADLINE_MIN_RTC) best = PM_DEADLINE_MIN_RTC;
+    /* Evidence that retired an entry is consumed; evidence for a LIVE entry
+     * that was not retired (its deadline fell inside this window, so the
+     * dispatch was ambiguous) is carried into the next window, where the
+     * deadline is already due at the open and the floor wake's passes have
+     * dispatched the expiry if they had not yet: without the carry the bit
+     * was lost at the close, no second dispatch ever came, and the entry sat
+     * until the 100 ms guard dropped it (bench: hb_stale_drop 2 in an EV10
+     * scan). Bits for slots without an entry are dropped. */
+    pm_plan_carry = evid & ~clear & live;
     pm_plan_best = best; pm_plan_clear = clear; pm_plan_stale = stale; pm_plan_hit = hit;
 }
 
@@ -366,7 +381,7 @@ __HIGH_CODE
 static void pm_tmr3_arm(void)
 {
     uint32_t clear = pm_plan_clear;
-    pm_evid_bits = 0u;                    /* the window closes here, not at the plan: a veto keeps it */
+    pm_evid_bits = pm_plan_carry;         /* the window closes here, not at the plan: a veto keeps it */
     pm_evid_since = pm_plan_now;
     while (clear != 0u) {
         uint32_t i = __builtin_ctz(clear);
