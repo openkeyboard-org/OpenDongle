@@ -594,10 +594,13 @@ the build id for no functional gain, or expands scope beyond the import:
 
 ## Power-management follow-ups (CH592 Tier 1, 2026-09-06)
 
-- **Heartbeat tax.** TMR3 is a 60 MHz counter whether the period is 1 ms or 200 ms;
-  the plumbing rung measured +0.29 mA before any idle. An exact-deadline mode (arm the
-  32 kHz RTC trigger to the next TMOS timeout, or read the next timeout under the mask)
-  could retire the heartbeat in the keyboard-absent and suspended states.
+- **Heartbeat tax: measured and retired.** The keyboard-absent A/B/C (1 ms heartbeat
+  10.931 mA, 10 ms 10.819 mA, none 10.796 mA, 2026-09-06) showed the cost is the
+  interrupt (~0.13 mA per 1000/s), not the 60 MHz counter (<= 0.01 mA). The
+  exact-deadline mode (`PM_EXACT_DEADLINE`, plan section 12) arms TMR3 to the next
+  application deadline and caps the sleep for library timers; no RTC trigger needed.
+  Left open: the cap default (20 ms) against the library timers' tolerance, and
+  whether the 500 ms/120 s HAL calibration would rather be bounded tighter.
 - **Clock gating cadence effect.** `PM_CLK_GATE=1` (mask 0x4DF6) saves ~0.25 mA but the
   morning A/B read the receive-restart rate 1.6 % low; the afternoon bisect (timers
   only 1123/s, UARTs only 1134/s, all-but-timers 1107-1115/s, ungated 1124-1139/s) was
@@ -606,6 +609,31 @@ the build id for no functional gain, or expands scope beyond the import:
 - **USB NAK wakes.** ~3000 wakes/s from the 1 ms-interval HID IN endpoints while the
   host is awake. Raising `bInterval` on the mouse/consumer interfaces (keep the
   keyboard at 1 ms) is a product decision; measure before changing.
+- **USB IN-token wake rate is host-dependent: ~23 000 wakes/s on the bench Mac (2026-09-09).**
+  Page-5 attribution in the keyboard-absent camp with the host awake reads `wake_usb`
+  22 900-24 800/s in both heartbeat modes (fixed 1 ms and exact-deadline), against the
+  ~3000/s the R2a finding above recorded on 2026-09-06 before the bench was unplugged and
+  replugged that evening. The count is three HID IN endpoints (EP1/EP2/EP3, `bInterval`
+  1 ms) at about 8000 tokens/s each, i.e. one token per 125 us microframe, as if the host
+  scheduled the full-speed interrupt endpoints at the high-speed interval (EP5/EP6 are not
+  polled until a client opens the vendor interfaces). Idle duty in that state collapses to
+  8-13 % (it was ~86 % at 3000 wakes/s), which is what the meter shows as the camp reading
+  bouncing between ~10.45 and ~10.85 mA. Not a firmware defect and not part of PR #38
+  (the fixed image shows it too). To do: identify the host path (which port, hub or TT the
+  dongle sits behind; `system_profiler` is unavailable inside the sandbox), check whether
+  a USB 2.0 hub in between restores 1 ms polling, and decide whether a larger `bInterval`
+  on the boot interfaces is acceptable for the product. Every awake-host power figure in
+  the release notes for the camp state was taken in this host's polling regime.
+- **The poll reply ratio moves with code layout on the receive-arm path (2026-09-09).**
+  Interleaved A/B runs of `pollrate_phy.py` (dongle page-1 `rx_done` over the controller's
+  valid-poll count, 30 s each) put the fixed 1 ms heartbeat at 99.47-99.53 %, one
+  exact-deadline build at 99.80-99.83 % and the next (same rule, one extra conditional
+  pass, no change on the poll path) at 99.51-99.52 %; declaring the CH592 `rf_diag`
+  block `volatile`, which only reorders two stores, gave 99.22-99.35 %. The receive arm
+  after a TX completion has no slack, so where the flash fetches of `hal_rf_ch592.c` land
+  matters at the 0.3 % level. Any change near that path needs the interleaved A/B, not a
+  single run, and a byte-identical fixed-mode gate does not cover it. Candidate fix:
+  place the CH592 RF seam's hot functions in RAM (`__HIGH_CODE`) and re-measure.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
   the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
   remote-wake latency contract first.

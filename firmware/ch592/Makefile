@@ -188,7 +188,7 @@ CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
 
 # Tier-1 power management knobs (src/pm_ch592.c). Every one is a -D CFLAG
-# (hashed into the build id) AND a CONFIG_TEXT token (schema=11). "All off" is
+# (hashed into the build id) AND a CONFIG_TEXT token (schema=12). "All off" is
 # the six switches at 0 (PM_IDLE PM_IDLE_LEVEL PM_IDLE_IN_SUSPEND PM_GPIO_PARK
 # PM_USB_DIGIN_OFF PM_CLK_GATE) with the period and mask knobs at their defaults; that
 # image carries no PM code and is byte-identical to a tree without it (the
@@ -204,6 +204,15 @@ endif
 #   PM_USB_DIGIN_OFF   0/1  PB10/PB11 digital input buffers off
 #   PM_CLK_GATE        0/1  PWR_PeriphClkCfg(DISABLE, 0x4DF6)
 #   PM_HEARTBEAT_US    100..10000 TMR3 heartbeat period (the TMOS deadline bound)
+#                           in the fixed mode; the initial TMR3 period in the
+#                           exact-deadline mode
+#   PM_EXACT_DEADLINE  0/1  arm TMR3 to the next app TMOS deadline instead of a
+#                           fixed period (pm_ch592.c; bench 2026-09-06: the
+#                           heartbeat's cost is its interrupt, ~0.13 mA per
+#                           1000/s, the counter is free). Ignored when PM_IDLE=0.
+#   PM_DEADLINE_CAP_US 1000..50000 exact-deadline mode: the longest sleep when no
+#                           app deadline is nearer; bounds the library's own
+#                           timers (temperature sample, calibration)
 #   PM_EP0_QUIET_MS    0..5000 no idle this long after a USB SETUP
 PM_IDLE ?= 1
 PM_IDLE_LEVEL ?= 3
@@ -216,6 +225,8 @@ PM_CLK_GATE ?= 0
 # 0x4DF6 and any of TMR0/TMR3/USB/BLE.
 PM_CLK_GATE_MASK ?= 19958
 PM_HEARTBEAT_US ?= 1000
+PM_EXACT_DEADLINE ?= 1
+PM_DEADLINE_CAP_US ?= 20000
 PM_EP0_QUIET_MS ?= 200
 # Every value is handed verbatim to the C preprocessor (-DDONGLE_PM_x=...), so
 # each must be exactly ONE plain decimal token: digits only, no sign, no
@@ -239,6 +250,8 @@ $(call pm-require-in,PM_USB_DIGIN_OFF,0 1,0 or 1)
 $(call pm-require-in,PM_CLK_GATE,0 1,0 or 1)
 $(call pm-require-range,PM_CLK_GATE_MASK,0,65535)
 $(call pm-require-range,PM_HEARTBEAT_US,100,10000)
+$(call pm-require-in,PM_EXACT_DEADLINE,0 1,0 or 1)
+$(call pm-require-range,PM_DEADLINE_CAP_US,1000,50000)
 $(call pm-require-range,PM_EP0_QUIET_MS,0,5000)
 # Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
 # named before the compiler runs.
@@ -254,6 +267,8 @@ CFLAGS += -DDONGLE_PM_USB_DIGIN_OFF=$(strip $(PM_USB_DIGIN_OFF))
 CFLAGS += -DDONGLE_PM_CLK_GATE=$(strip $(PM_CLK_GATE))
 CFLAGS += -DDONGLE_PM_CLK_GATE_MASK=$(strip $(PM_CLK_GATE_MASK))u
 CFLAGS += -DDONGLE_PM_HEARTBEAT_US=$(strip $(PM_HEARTBEAT_US))
+CFLAGS += -DDONGLE_PM_EXACT_DEADLINE=$(strip $(PM_EXACT_DEADLINE))
+CFLAGS += -DDONGLE_PM_DEADLINE_CAP_US=$(strip $(PM_DEADLINE_CAP_US))
 CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
@@ -369,9 +384,9 @@ ifeq ($(strip $(COMPILER_SHA256)),)
 $(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
 endif
 endif
-# schema=11: the PM knob tokens (below) joined the compiler identity tokens
-# that schema 10 introduced; pm_idle was a fixed 0 through schema 10.
-CONFIG_TEXT := schema=11||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
+# schema=12: pm_exact/pm_cap_us joined the PM knob tokens (schema 11 = the PM
+# knobs + the compiler identity tokens of schema 10; pm_idle was a fixed 0 before).
+CONFIG_TEXT := schema=12||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_exact=$(strip $(PM_EXACT_DEADLINE))||pm_cap_us=$(strip $(PM_DEADLINE_CAP_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h

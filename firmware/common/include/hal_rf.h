@@ -128,7 +128,11 @@ typedef struct {
     uint32_t rx_crcerr;        /* HAL_RF_EV_RX_CRCERR forwarded */
     uint32_t rx_timeout;       /* HAL_RF_EV_RX_TIMEOUT forwarded */
     uint32_t tx_start;         /* hal_rf_start_tx calls */
-    uint32_t tx_fail;          /* ... that returned non-zero */
+    uint32_t tx_fail;          /* ... that returned non-zero, plus (CH59x) the
+                                * TX_MODE_TX_FAIL status events the basic-mode
+                                * library reports for a start that returned 0;
+                                * the CH570 radio reports no such event.
+                                * last_tx_rc changes only for the former. */
     uint32_t tx_done;          /* HAL_RF_EV_TX_DONE forwarded */
     uint32_t shut_calls;       /* hal_rf_shut calls */
     uint32_t last_rx_aa;       /* access address supplied to the last RX arm */

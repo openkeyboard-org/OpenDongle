@@ -9,11 +9,29 @@ leaves the bench.
 
 The CH592 product build no longer busy-spins its 60 MHz core. `Main_Circulation` now
 idles with a SEVONPEND/WFITOWFE wait under the global mask (the form OpenController
-proved on the same silicon; a plain masked WFI never wakes here), bounded by a 1 ms
-TMR3 heartbeat at the lowest interrupt priority so an expired TMOS software timer
-waits at most one heartbeat of idle-induced wake latency (plus the foreground and
-scheduler passes it always ran behind), and woken by the radio (BLEB/BLEL), TMR0, USB
-and TMR3.
+proved on the same silicon; a plain masked WFI never wakes here), bounded by TMR3 at
+the lowest interrupt priority, and woken by the radio (BLEB/BLEL), TMR0, USB and TMR3.
+TMR3 is armed per sleep to the next application TMOS deadline (`PM_EXACT_DEADLINE=1`,
+the default): the CH592 timing seam records every application timer start in a
+table on the RTC counter TMOS itself compares against, retires an entry once a sleep
+decision finds it already due at the previous decision's clock read with nothing
+dispatched since (the scheduler passes between two decisions dispatch every expiry
+TMOS had posted), and the idle path programs TMR3 to fire one 625 us unit after
+the nearest entry, or at `PM_DEADLINE_CAP_US` (20 ms) when none is nearer, which
+bounds the library's own timers (its 1 s temperature sample, the 120 s calibration).
+An application timer therefore waits at most one TMOS unit of idle-induced wake
+latency (plus the foreground and scheduler passes it always ran behind), a library
+timer at most the cap plus the same passes, and the heartbeat interrupt runs about fifty times a second
+instead of a thousand when no application deadline is nearer than the cap (an
+application timer due sooner arms it sooner; on a live link TMR0 wakes the core
+first and the heartbeat hardly fires at all). `PM_EXACT_DEADLINE=0` restores the fixed 1 ms period
+(`PM_HEARTBEAT_US`) byte for byte. Measured back to back on the devboard (inline
+meter on the probe rail, same hour, 60 s averages): keyboard absent with the host
+asleep, the overnight state, 9.910 -> 9.773 mA (-0.14 mA, the heartbeat ran at
+~50/s instead of 1000/s through the sleep); keyboard absent with the host awake
+10.907 -> 10.842 mA; connected, awake 10.836 -> 10.83 mA and connected, host
+asleep 10.694 -> 10.716 mA (equal within noise: there TMR0's 875 us poll cycle
+wakes the core whatever the heartbeat does).
 The radio is never slept, the protocol bytes and timer settings are unchanged (the
 measured poll cadence stays within 1 % of baseline), the flash stays powered, USB
 suspend and remote wake keep working, and the DC-DC is never enabled (the board has no
@@ -42,8 +60,11 @@ shifted 0.75 mA overnight:
 | Bonded, keyboard absent (search) | 15.90 | 15.64 | 15.68 | **10.41 (-35%)** | 10.39 | 10.13 |
 | Host USB suspended, link up | 13.23 (day 1) | | | | 10.71 | |
 
-What the rungs taught: the heartbeat's 60 MHz TMR3 counter plus the per-pass idle
-logic cost +0.29 mA while the core still spins; the GPIO park is worth -0.52 mA on the
+What the rungs taught: the heartbeat plus the per-pass idle logic cost +0.29 mA while
+the core still spins, and a later A/B/C in the keyboard-absent camp (1 ms heartbeat
+10.931 mA, 10 ms 10.819 mA, none at all 10.796 mA) showed that cost is the interrupt
+itself, about 0.13 mA per thousand a second, while TMR3's 60 MHz counter is free, which
+is why the exact-deadline mode keeps the timer and only stops firing it periodically; the GPIO park is worth -0.52 mA on the
 devboard (floating header pads); idle removes the core-spin share in every state;
 keystrokes cost nothing measurable. Per-rung gates (all pass on the shipped build):
 poll rate one per 875 us within 1% of baseline, 0 supervision lapses / EV10 entries /
@@ -240,6 +261,12 @@ the source records it as measurably worse for the Bridge75.
   and intervention ladder in the separate draft PR exist to characterise it
   when it recurs.
 ## Diagnostics: RF page (IAP `0x92`) and intervention ladder (`0x94`)
+
+Page 1 (PHY counters: RX arms and failures, RX done / CRC error / timeout, TX
+start / fail / done, shut calls, last status bytes) is now live on CH592 as well;
+it used to read as zeros there. The `tx_done` / `rx_done` pair is the poll
+reply-rate oracle: on CH592 a missed reply raises no event, so it shows only as
+`rx_done` falling behind `tx_done`.
 
 `opendongle --diag` reads five 62-byte pages over the vendor HID interface
 without arming a maintenance session: the runtime snapshot (state, channel,

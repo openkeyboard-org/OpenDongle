@@ -89,13 +89,37 @@ extern volatile uint8_t dongle_pm_ran;
 /* The post latch is accessed only through relaxed atomic builtins (see its
  * definition in pm_ch592.c). */
 #define hal_event_post(bits)  (__atomic_store_n(&dongle_pm_post, 1u, __ATOMIC_RELAXED), tmos_set_event(rf_taskID, (bits)))
+#if DONGLE_PM_EXACT_DEADLINE
+/* Exact-deadline heartbeat (pm_ch592.c): every app-task TMOS timer start and
+ * stop goes through pm_tmos_start / pm_tmos_stop, which pair the TMOS call
+ * with the deadline-table write in a fixed ORDER (start: TMOS first, publish
+ * only on success; stop: table first) rather than under a mask, so a
+ * same-bit start and stop crossing between task context and the IRQ-tail
+ * sink leaves the table consistent or holding a harmless phantom, never a
+ * masked library call on the poll path. An entry retires when a sleep
+ * decision finds it already due at the previous decision's clock read with
+ * nothing dispatched since (pm_ch592.c); the dispatch path carries no
+ * evidence. The macros expand where rf_taskID is in scope (rf_task.c),
+ * hence the task argument. */
+void pm_tmos_start(uint8_t task, uint16_t bit, uint32_t units);
+void pm_tmos_stop(uint8_t task, uint16_t bit);
 #define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u)
+#define hal_event_cancel(bit) pm_tmos_stop(rf_taskID, (bit))
+#define hal_event_post_delayed(bit, delta_ticks) \
+    pm_tmos_start(rf_taskID, (bit), hal_tmos_units_from_tsys(delta_ticks))
+#define RF_TMOS_START(bit, units) pm_tmos_start(rf_taskID, (bit), (units))
+#define RF_TMOS_STOP(bit)         pm_tmos_stop(rf_taskID, (bit))
+#else
+#define RF_PROCESS_EVENT_HOOK(ev) (dongle_pm_ran = 1u)
+#endif
 #else
 #define hal_event_post(bits)  tmos_set_event(rf_taskID, (bits))
 #endif
+#ifndef hal_event_cancel
 #define hal_event_cancel(bit) tmos_stop_task(rf_taskID, (bit))
 #define hal_event_post_delayed(bit, delta_ticks) \
     tmos_start_task(rf_taskID, (bit), hal_tmos_units_from_tsys(delta_ticks))
+#endif
 
 /* TMOS-task-context dispatch entry (defined in hal_timing_ch592.c): invokes
  * the slot's registered callback if the slot is still armed. rf_task's

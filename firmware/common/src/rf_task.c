@@ -1028,24 +1028,32 @@ static void rf_boot_window_cb(uint8_t slot)
  * transitional unit divergence from hal_timing.h's Tsys contract: these two
  * slots take 625 us TMOS units on CH592 until P3a. */
 #if RF_TASK_EXECUTOR_TMOS
+/* A port that tracks app deadlines (CH592 exact-deadline heartbeat,
+ * hal_timing_ch592.h) redirects these two pairs; the default is the bare
+ * TMOS call. These, plus hal_event_post_delayed / hal_event_cancel, are
+ * every timer start and stop for rf_taskID. */
+#ifndef RF_TMOS_START
+#define RF_TMOS_START(bit, units) tmos_start_task(rf_taskID, (bit), (units))
+#define RF_TMOS_STOP(bit)         tmos_stop_task(rf_taskID, (bit))
+#endif
 void rf_ev10_deadline_start(uint32_t tmos_ticks)
 {
-    tmos_start_task(rf_taskID, RF_EVT_TIMEOUT, tmos_ticks);
+    RF_TMOS_START(RF_EVT_TIMEOUT, tmos_ticks);
 }
 
 void rf_ev10_deadline_stop(void)
 {
-    tmos_stop_task(rf_taskID, RF_EVT_TIMEOUT);
+    RF_TMOS_STOP(RF_EVT_TIMEOUT);
 }
 
 void rf_boot_window_deadline_start(uint32_t tmos_ticks)
 {
-    tmos_start_task(rf_taskID, RF_EVT_BOOT_WINDOW, tmos_ticks);
+    RF_TMOS_START(RF_EVT_BOOT_WINDOW, tmos_ticks);
 }
 
 void rf_boot_window_deadline_stop(void)
 {
-    tmos_stop_task(rf_taskID, RF_EVT_BOOT_WINDOW);
+    RF_TMOS_STOP(RF_EVT_BOOT_WINDOW);
 }
 #endif /* RF_TASK_EXECUTOR_TMOS — the CH570 hal_timing serves these slots
         * natively (st_set/st_cancel); no rf_task-provided backing needed. */

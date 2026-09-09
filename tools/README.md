@@ -137,7 +137,13 @@ the read window). The ratio is a co-pending frequency, not a wake-failure
 rate; the radio-wake proof is the protocol around it: a keyboard-absent
 negative control must read `wake_radio == wake_both == 0`, then every
 reconnect/pair must advance `wake_radio`, and a radio that never ends the WFE
-shows as `wake_both` advancing with `wake_radio` flat. The page 6 remote-wake
+shows as `wake_both` advancing with `wake_radio` flat. In the exact-deadline heartbeat
+mode (page 5 flag `exact_deadline`, whose `deadline_cap_us` replaces `heartbeat_us`)
+page 6 also carries `hb_arm_deadline` / `hb_arm_cap`, how many sleeps armed TMR3 to an
+application timer's deadline versus to the cap; `hb_irqs` then runs at tens a second
+rather than a thousand when no application deadline is nearer than the cap (a nearer
+deadline arms the timer sooner, and on a live link TMR0 wakes the core before it
+fires). The page 6 remote-wake
 arm count is 16 bits on both sides and its rate wraps accordingly.
 
 Exit codes:

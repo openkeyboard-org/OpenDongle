@@ -169,6 +169,247 @@ static volatile uint32_t pm_wake_usb, pm_wake_other, pm_wake_none;
 static volatile uint32_t pm_veto_work, pm_veto_pending, pm_veto_usb, pm_veto_state;
 static volatile uint32_t pm_veto_ep0, pm_veto_alien, pm_veto_entry, pm_stale_tmr0;
 static volatile uint32_t pm_quiet_passes, pm_stale_adc;
+
+#if DONGLE_PM_EXACT_DEADLINE
+/* ---- Exact-deadline heartbeat (plan section 12, third revision) ----
+ * One word per RF_EVT_* bit: the RTC 32 kHz count at which that app timer
+ * is due, or PM_DEADLINE_EMPTY. TMOS keeps its timers on the same counter
+ * (HAL_TimeInit hands it SYS_GetClockValue and RTC_MAX_COUNT), so the table
+ * shares TMOS's clock and modulus: 1 unit = 625 us = 20 ticks at CAB_LSIFQ
+ * 32000, every sum and distance is taken modulo RTC_MAX_COUNT (0xA8C00000,
+ * the counter's wrap every 24.576 h).
+ *
+ * NO masks at the writers and NO compare-and-swap anywhere: this QingKe V4
+ * executes LR/SC as plain loads/stores (SC always succeeds), so a compiler
+ * CAS is not atomic against the IRQ-tail sink; the atomic tools here are
+ * single-instruction AMOs and the idle mask pm_idle_try already holds. The
+ * writers are ORDERED instead, so every cross-context interleaving of a
+ * same-bit start and stop leaves the table consistent or holding a PHANTOM
+ * entry (floor wakes until the stuck-entry guard drops it), never missing a
+ * live timer for longer than the cap: start = TMOS call first, publish only
+ * on TRUE; stop = EMPTY first, then the TMOS call. The one bit both contexts
+ * restart (supervision, per RX) rewrites its entry within 875 us anyway.
+ * Retirement is decided in pm_tmr3_plan and applied in pm_tmr3_arm with no
+ * evidence from the dispatch path at all: three stamp-based rules fell to
+ * the adversarial review, because a dispatch stamp cannot say WHICH
+ * occurrence of a timer it consumed (a same-bit immediate post dispatched
+ * near the deadline, a start delayed between its clock read and the TMOS
+ * call, a later dispatch overwriting the stamp across a long veto). The rule
+ * uses the scheduler's own shape instead. TMOS posts an expired timer's bit
+ * at the end of a pass that dispatched nothing (or that dispatched the last
+ * task), once the RTC has reached the deadline; a posted app bit is
+ * dispatched by one of the following passes and sets dongle_pm_ran, which
+ * vetoes the sleep. So if the RTC had already reached an entry's deadline
+ * when the PREVIOUS plan read it (pm_prev_now), and this iteration's
+ * ordinary pass and both quiet passes dispatched nothing (we would not be
+ * planning otherwise), no timer for that bit is still pending in TMOS: its
+ * expiry was posted and dispatched before this iteration, or the entry is a
+ * phantom. Either way it is retired. HAL and library dispatches do not set
+ * the app latch, so before applying a retirement pm_idle_try runs ONE more
+ * pass: with three tasks and one dispatch per pass, an expiry posted at the
+ * first poll of the iteration is dispatched by the fourth pass even behind
+ * both other tasks (the review's split-posting sequence: calibration and
+ * temperature sample dispatched in the ordinary and first quiet pass, the
+ * app expiry posted only at the second's end). The previous read persists
+ * across vetoed iterations: every pass since it ran with the timer expired,
+ * and an app dispatch in between vetoed that iteration without undoing
+ * itself, so more passes only strengthen the argument - but a read older
+ * than a quarter of the modulus is not used at all: after half a modulus
+ * of vetoes (12 h) a fresh deadline would alias as past. The age is NOT
+ * measured on the RTC, which would alias again after every whole modulus
+ * (the review's wrap sequence): it is bounded by the TMR3 fire count.
+ * TMR3 fires at most one cap plus the ISR's service latency apart whether
+ * or not sleeps are admitted (every arm is at most the cap; the ISR's
+ * fallback write restarts the count at the cap; TMR3 is never stopped),
+ * so fewer than (M/8)/cap fires since the previous plan prove it younger
+ * than a quarter modulus in true time with a twofold margin, and the
+ * modular distances are then exact. The ISR itself withdraws a read that
+ * reaches the limit, so a lap of the 32-bit fire count (2.7 years at the
+ * cap rate) cannot make it look fresh again. A plan with an older read
+ * refreshes it; the next plan retires. An entry
+ * the previous read had not reached stays; due now, it arms the 4-tick
+ * floor, whose wake's passes dispatch the queued expiry (two floor wakes
+ * at most while plans keep being admitted: the first plan after the
+ * deadline may itself carry a read from before it; a plan whose read ages
+ * out before the next plan costs one floor wake per such veto). The table deadline is read
+ * AFTER the TMOS call, so it is never earlier than TMOS's own (a start
+ * delayed by an IRQ tail between the call and the read only makes it later,
+ * which is conservative), and the 2-tick "due" window covers the tick the
+ * call may straddle. Same-bit immediate posts are irrelevant to the rule,
+ * and so is the RTC wrap: after a long veto an entry reads as a future
+ * deadline and costs cap-bounded arms until the counter reaches it.
+ * Residual (cap-bounded, once, self-healing): a task-context start whose
+ * post-call RTC read is preempted by an IRQ-tail restart of the same bit
+ * publishes the older, earlier deadline over the tail's; the entry wakes
+ * early, is retired as settled, and the tail's timer expires with no entry,
+ * dispatched at a cap wake, or at the one after it when both other tasks'
+ * events are dispatched ahead of it there (the quiet passes' own
+ * triple-expiry residual, which bounds the library's timers the same way:
+ * two caps plus the foreground). An entry is never dropped
+ * unretired: of any two admitted plans after it became due, the second
+ * settles it while the first's read is still usable (fewer than (M/8)/cap
+ * TMR3 fires since it, three hours at the 20 ms cap), unless a veto longer
+ * than half a modulus has meanwhile made it read as a future deadline, which
+ * costs nothing (cap arms, the same as no entry) until the counter comes
+ * round to it. hb_stale_drop counts settled retirements of entries
+ * more than 100 ms overdue: a phantom from a start/stop crossing, or a
+ * one-shot consumed just before a long idle veto (an EP0 window, an
+ * unconfigured port); a nonzero count is a pointer at those, not a defect
+ * (the overdue age is modular: an entry a whole modulus old reads young). */
+#define PM_RTC_MOD           ((uint32_t)RTC_MAX_COUNT)
+#define PM_DEADLINE_EMPTY    0xFFFFFFFFu            /* never a valid count (< PM_RTC_MOD) */
+#define PM_UNIT_RTC          20u                    /* 625 us */
+#define PM_DUE_WINDOW_RTC    2u                     /* 62 us: "due" for a dispatched bit */
+#define PM_DEADLINE_MIN_RTC  4u                     /* 125 us: the floor, chosen explicitly */
+#define PM_STALE_RTC         3200u                  /* 100 ms overdue with no dispatch: phantom */
+#define PM_CAP_RTC           ((uint32_t)DONGLE_PM_DEADLINE_CAP_US * 32u / 1000u)   /* us -> ticks at 32000 Hz */
+#define PM_TMR3_PER_RTC      1875u                  /* 60e6 / 32000, exact */
+#define PM_R0_MAX_FIRES      ((PM_RTC_MOD / 8u) / PM_CAP_RTC)   /* TMR3 fires that prove an age below M/4 (twofold margin) */
+#if RTC_MAX_COUNT != 0xA8C00000
+#error "pm_ch592.c assumes the CH59x RTC modulus 0xA8C00000 (RTC_MAX_COUNT)"
+#endif
+#if CAB_LSIFQ != 32000
+#error "pm_ch592.c assumes the LSI at 32000 Hz (CAB_LSIFQ): 1 TMOS unit = 20 ticks, 1 tick = 1875 TMR3 ticks"
+#endif
+static volatile uint32_t pm_deadline[16];
+static volatile uint32_t pm_hb_arm_deadline, pm_hb_arm_cap;
+static uint8_t pm_hb_stale_drop;              /* saturating: page 5 [59] high nibble */
+
+__HIGH_CODE
+static inline uint32_t pm_rtc_now(void)
+{
+    uint32_t i;
+    do {                                  /* SYS_GetClockValue's double read */
+        i = R32_RTC_CNT_32K;
+    } while (i != R32_RTC_CNT_32K);
+    return i;
+}
+/* now + d, modulo the RTC wrap (d < PM_RTC_MOD). */
+static inline uint32_t pm_rtc_add(uint32_t now, uint32_t d)
+{
+    uint32_t s = now + d;
+    return (s >= PM_RTC_MOD) ? s - PM_RTC_MOD : s;
+}
+/* Ticks from now to a deadline, modulo the wrap: < PM_RTC_MOD/2 (12 h) means
+ * that many ticks in the future; anything larger means the deadline is past,
+ * and (PM_RTC_MOD - dist) is how far past. */
+static inline uint32_t pm_rtc_dist(uint32_t deadline, uint32_t now)
+{
+    return (deadline >= now) ? deadline - now : deadline + PM_RTC_MOD - now;
+}
+#define PM_RTC_PAST(dist)  ((dist) >= (PM_RTC_MOD / 2u))
+
+__HIGH_CODE
+void pm_tmos_start(uint8_t task, uint16_t bit, uint32_t units)
+{
+    if (tmos_start_task(task, bit, units)) {
+        uint32_t now = pm_rtc_now();      /* AFTER the call: never earlier than TMOS's own deadline */
+        pm_deadline[__builtin_ctz((uint32_t)bit)] = pm_rtc_add(now, units * PM_UNIT_RTC);
+    }                                     /* refused (no timer available): keep the previous entry */
+}
+
+__HIGH_CODE
+void pm_tmos_stop(uint8_t task, uint16_t bit)
+{
+    pm_deadline[__builtin_ctz((uint32_t)bit)] = PM_DEADLINE_EMPTY;   /* EMPTY first, then TMOS */
+    tmos_stop_task(task, bit);
+}
+
+/* The arm is planned UNMASKED (after the quiet passes, before the mask) and
+ * only applied under the mask: the masked window before the WFE is on the
+ * poll critical path - a TX-done interrupt that lands inside it waits for it,
+ * and that wait delays the post-poll receive arm; the bench measured ~0.8 %
+ * of poll replies missed with the RTC read and the 16-entry scan inside the
+ * mask, none with them outside. What the plan reads can change before the
+ * WFE only through an IRQ-tail timer start, which cannot make an entry
+ * earlier than one unit and rarely shorter than the cap: a deadline that
+ * appears between plan and sleep is cap-bounded once (and in CONNECTED TMR0
+ * wakes the core every 875 us anyway). Retirement is decided in the plan and
+ * applied under the mask only if the entry still holds the value the plan
+ * saw, so a fresh deadline written by the sink in between is never erased. */
+static uint32_t pm_plan_best;           /* ticks to arm, PM_DEADLINE_MIN_RTC..cap */
+static uint32_t pm_plan_clear;          /* bit i: retire entry i if unchanged */
+static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired more than 100 ms overdue */
+static uint32_t pm_plan_seen[16];       /* the value the plan saw in a to-clear entry */
+static uint8_t  pm_plan_hit;
+static uint32_t pm_prev_now;            /* the previous plan's RTC read (task context only) */
+static volatile uint32_t pm_prev_hb;    /* ... the TMR3 fire count at that read (its non-modular age) */
+static volatile uint8_t  pm_prev_valid; /* ... and whether it is usable: set by the plan, withdrawn by the TMR3 ISR at the age limit */
+
+/* Had the RTC reached `deadline` at the previous plan's read? Then every
+ * pass since (this iteration's three) ran with the timer expired, and none
+ * dispatched: the entry is consumed or a phantom. */
+static inline uint8_t pm_settled(uint32_t deadline, uint32_t r0)
+{
+    uint32_t s = pm_rtc_dist(deadline, r0);
+    return (uint8_t)(s == 0u || PM_RTC_PAST(s));
+}
+
+__HIGH_CODE
+static void pm_tmr3_plan(void)
+{
+    uint32_t now = pm_rtc_now();
+    uint32_t r0 = pm_prev_now;
+    /* Usable only when younger than a quarter modulus, measured by TMR3
+     * fires (at most one cap apart, admitted or not): older reads alias. */
+    uint8_t  r0_ok = (uint8_t)(pm_prev_valid && (uint32_t)(pm_hb_irqs - pm_prev_hb) < PM_R0_MAX_FIRES);
+    uint32_t best = PM_CAP_RTC;
+    uint32_t clear = 0u, stale = 0u;
+    uint8_t  hit = 0u;
+    uint32_t i;
+    for (i = 0u; i < 16u; i++) {
+        uint32_t d = pm_deadline[i];
+        uint32_t dist, cand;
+        if (d == PM_DEADLINE_EMPTY) continue;
+        dist = pm_rtc_dist(d, now);
+        if (PM_RTC_PAST(dist)) {
+            uint32_t overdue = PM_RTC_MOD - dist;
+            if (r0_ok && pm_settled(d, r0)) {            /* expired before the previous plan: consumed or phantom */
+                clear |= 1u << i; pm_plan_seen[i] = d;
+                if (overdue > PM_STALE_RTC) stale |= 1u << i;   /* phantom, or a one-shot before a long veto */
+                continue;
+            }
+            cand = PM_DEADLINE_MIN_RTC;                   /* awaiting its dispatch: one short wake */
+        } else if (dist <= PM_DUE_WINDOW_RTC) {
+            /* Due now: TMOS's expiry test accepts equality, so its event may
+             * already be queued (codex: dist == 0 arms the floor, not a unit). */
+            if (r0_ok && pm_settled(d, r0)) {
+                clear |= 1u << i; pm_plan_seen[i] = d;   /* and already due at the previous plan */
+                continue;
+            }
+            cand = PM_DEADLINE_MIN_RTC;
+        } else {
+            cand = dist + PM_UNIT_RTC;                    /* land just after TMOS's own expiry */
+        }
+        if (cand < best) { best = cand; hit = 1u; }
+    }
+    if (best < PM_DEADLINE_MIN_RTC) best = PM_DEADLINE_MIN_RTC;
+    pm_plan_best = best; pm_plan_clear = clear; pm_plan_stale = stale; pm_plan_hit = hit;
+    pm_prev_now = now; pm_prev_hb = pm_hb_irqs; pm_prev_valid = 1u;
+}
+
+/* Under the mask, right before the real WFE: apply the plan. A handful of
+ * stores; nothing is read from the RTC or scanned here. Only this path
+ * re-arms; a veto leaves the last period running, so TMR3 keeps cycling at
+ * <= cap whenever the idle path is not reached. */
+__HIGH_CODE
+static void pm_tmr3_arm(void)
+{
+    uint32_t clear = pm_plan_clear;
+    while (clear != 0u) {
+        uint32_t i = __builtin_ctz(clear);
+        clear &= clear - 1u;
+        if (pm_deadline[i] == pm_plan_seen[i]) {          /* unchanged since the plan */
+            pm_deadline[i] = PM_DEADLINE_EMPTY;
+            if ((pm_plan_stale & (1u << i)) && pm_hb_stale_drop < 15u) pm_hb_stale_drop++;
+        }
+    }
+    if (pm_plan_hit) pm_hb_arm_deadline++; else pm_hb_arm_cap++;
+    R32_TMR3_CNT_END = pm_plan_best * PM_TMR3_PER_RTC;   /* <= 3.0M at a 50 ms cap: fits the 26 bits */
+    R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
+    R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
+}
+#endif /* DONGLE_PM_EXACT_DEADLINE */
 static volatile uint32_t pm_alien_ipr0, pm_alien_ipr1;
 static volatile uint32_t pm_last_wake_ipr0, pm_last_wake_ipr1;
 static volatile uint8_t  pm_last_wake_flags;
@@ -411,6 +652,20 @@ void pm_idle_try(uint8_t entry_work)
         pm_veto_state++;                /* a quiet pass may have moved the state */
         return;
     }
+#if DONGLE_PM_EXACT_DEADLINE
+    pm_tmr3_plan();                                     /* unmasked: the RTC read and the scan */
+    if (pm_plan_clear != 0u) {
+        /* A retirement is proposed: one more pass, so an expiry posted at
+         * this iteration's first poll is dispatched even behind the HAL and
+         * library tasks, whose dispatches the latch does not see (header). */
+        TMOS_SystemProcess();
+        pm_quiet_passes++;
+        if (PM_POST_PENDING() || dongle_pm_ran) {
+            pm_veto_work++;
+            return;
+        }
+    }
+#endif
 
     irq = __risc_v_disable_irq();                       /* csrrc 0x800, 0x88 */
     PFIC->SCTLR &= ~(1u << 2);                          /* SLEEPDEEP = 0 */
@@ -428,6 +683,9 @@ void pm_idle_try(uint8_t entry_work)
         pm_veto_pending++;
     } else {
         pm_wfe_count++;
+#if DONGLE_PM_EXACT_DEADLINE
+        pm_tmr3_arm();                                  /* apply the plan: a few stores */
+#endif
         t0 = hal_now();
         __asm__ volatile ("wfi");                       /* the real WFE; flash stays on */
         pm_idle_tsys += hal_now() - t0;
@@ -442,8 +700,12 @@ void pm_idle_try(uint8_t entry_work)
  * handler only clears the flag and counts: waking IS the point. */
 void pm_heartbeat_init(void)
 {
+#if DONGLE_PM_EXACT_DEADLINE
+    uint32_t i;
+    for (i = 0u; i < 16u; i++) pm_deadline[i] = PM_DEADLINE_EMPTY;
+#endif
     R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
-    R32_TMR3_CNT_END = (GetSysClock() / 1000000u) * DONGLE_PM_HEARTBEAT_US;   /* 60000 @ 1000 us */
+    R32_TMR3_CNT_END = (GetSysClock() / 1000000u) * DONGLE_PM_HEARTBEAT_US;   /* 60000 @ 1000 us; the exact-deadline mode re-arms per sleep */
     R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
     R8_TMR3_INTER_EN = RB_TMR_IE_CYC_END;
     R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
@@ -457,6 +719,19 @@ void TMR3_IRQHandler(void)
 {
     R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
     pm_hb_irqs++;
+#if DONGLE_PM_EXACT_DEADLINE
+    /* Fall back to the cap period after any fire: a short arm (a deadline
+     * that was due, the 125 us floor) must fire once and then settle, even
+     * if the idle path - the only other place that re-arms - is vetoed for
+     * a long time (the 200 ms window after a USB SETUP, an unconfigured
+     * bus). Writing CNT_END restarts the count; the next admitted sleep
+     * re-arms precisely anyway (codex design review). */
+    R32_TMR3_CNT_END = PM_CAP_RTC * PM_TMR3_PER_RTC;
+    /* The previous plan's read ages by fires (header): at the limit it is
+     * withdrawn here, not only tested at the next plan, so a lap of the
+     * fire count during a very long veto cannot make it look fresh again. */
+    if (pm_prev_valid && (uint32_t)(pm_hb_irqs - pm_prev_hb) >= PM_R0_MAX_FIRES) pm_prev_valid = 0u;
+#endif
 }
 
 static void pm_put32(uint8_t *p, uint32_t v)
@@ -483,7 +758,8 @@ static void pm_put32(uint8_t *p, uint32_t v)
  * quiet_passes, [34] last-wake IPR0, [38] last-wake IPR1, [42] last-wake raw
  * flags (b0 TMR0 CYC_END, b1 TMR3 CYC_END, b2 USB TRANSFER, b3 USB SUSPEND,
  * b4 USB BUS_RST), [43] pb15_boot (b0 PU, b1 PD, b2 DIR, b3 DEBUG_EN),
- * [44..45] usb_rw_arm_count (u16), [46] wake_none, [50] stale_adc, [54..61] reserved. */
+ * [44..45] usb_rw_arm_count (u16), [46] wake_none, [50] stale_adc, [54] hb_arm_deadline,
+ * [58] hb_arm_cap (exact-deadline mode; 0 otherwise). */
 void dongle_pm_diag_fill(uint8_t page, uint8_t *out)
 {
     if (page == 5u) {
@@ -513,10 +789,18 @@ void dongle_pm_diag_fill(uint8_t page, uint8_t *out)
 #endif
         if (R8_GLOB_CFG_INFO & RB_CFG_DEBUG_EN) f |= 0x20u;
         if (usb & USB_PM_RW_ARMED)              f |= 0x40u;
+#if DONGLE_PM_EXACT_DEADLINE
+        f |= 0x80u;                              /* exact-deadline mode: [60..61] is the cap */
+        out[58] = f;
+        out[59] = (uint8_t)(DONGLE_PM_IDLE_LEVEL | (pm_hb_stale_drop << 4));   /* level | stale drops (saturating nibble) */
+        out[60] = (uint8_t)DONGLE_PM_DEADLINE_CAP_US;
+        out[61] = (uint8_t)(DONGLE_PM_DEADLINE_CAP_US >> 8);
+#else
         out[58] = f;
         out[59] = (uint8_t)DONGLE_PM_IDLE_LEVEL;
         out[60] = (uint8_t)DONGLE_PM_HEARTBEAT_US;
         out[61] = (uint8_t)(DONGLE_PM_HEARTBEAT_US >> 8);
+#endif
     } else if (page == 6u) {
         /* One 16-bit load: the USB ISR increments it, and two byte-wise
          * volatile reads could tear across a 0x00FF -> 0x0100 carry. */
@@ -538,6 +822,10 @@ void dongle_pm_diag_fill(uint8_t page, uint8_t *out)
         out[45] = (uint8_t)(arms >> 8);
         pm_put32(&out[46], pm_wake_none);
         pm_put32(&out[50], pm_stale_adc);
+#if DONGLE_PM_EXACT_DEADLINE
+        pm_put32(&out[54], pm_hb_arm_deadline);
+        pm_put32(&out[58], pm_hb_arm_cap);
+#endif
     }
 }
 
