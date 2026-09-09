@@ -111,10 +111,12 @@ struct Cli {
     diag: bool,
 
     /// RF intervention ladder (command 0x94, arms a session): 1 = re-arm RX
-    /// from task context, 2 = shut + vendor re-init + re-arm. Diagnostic:
-    /// run it on a dongle that is deaf to its keyboard, rung 1 first; which
-    /// rung restores the link says whether the software loop or the PHY was
-    /// dead. Refused by the firmware while a link is up.
+    /// from task context, 2 = shut + vendor re-init + re-arm (CH570 only),
+    /// 3 = shut the radio and leave it deaf (fault injection: the terminal
+    /// camp's liveness watchdog must bring it back within its 200 ms tick).
+    /// Diagnostic: run it on a dongle that is deaf to its keyboard, rung 1
+    /// first; which rung restores the link says whether the software loop or
+    /// the PHY was dead. Refused by the firmware while a link is up.
     #[arg(long, value_name = "RUNG", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag"])]
     rf_poke: Option<u8>,
 
@@ -281,6 +283,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 0xE0 => "unknown rung",
                 0xE1 => "refused: not in the terminal camp (connected, EV10 scan, boot window/relisten or pair burst active)",
                 0xE2 => "refused: quiesced for reboot",
+                0xE3 => "unsupported on this chip (rung 2 on CH59x: a second vendor role init is not validated)",
                 _ => "?",
             },
             response[3]

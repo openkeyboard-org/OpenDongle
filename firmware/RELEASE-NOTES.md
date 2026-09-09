@@ -5,6 +5,35 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## Terminal-camp liveness watchdog
+
+Every terminal camp (EV10 give-up, closed boot window, unbonded start) armed RX once
+and then leaned on the radio's own events to re-drive it; the arm-status guard that
+was meant as the backstop never fires on either radio library, and CH59x basic-mode
+RX has no timeout at all, so a lost completion or a deaf PHY left the dongle in
+`waiting for reconnect` until a chip reset. The camp now keeps the boot-window timer
+slot, free in every terminal camp, as a 200 ms liveness tick. A tick that saw an
+RX-side event since the last one leaves the radio alone; a silent tick re-arms RX
+from task context (CH59x: every silent tick, since a silent camp is the normal state
+there; CH570: the 30 ms camp timeout keeps the counter moving, so a silent tick is a
+dead loop and the second in a row escalates to shut + vendor re-init + re-arm, rung 2
+of the 0x94 ladder's code path, not bench-verified on CH570 here). The tick self-disables outside the exact terminal camp, and a
+restart that lands in a terminal camp without it (the bond-clear tombstone paths) starts
+it. The same pass fixed the latent CH570 persist ordering (TODO): the record is validated
+before the radio is torn down, not after.
+`opendongle --rf-poke 3` is the fault injection (shut the radio, leave it deaf) and
+page 1 `camp_wd_rearms` counts the re-arms. Bench (CH592, 4AB7E07F): 5.0 re-arms/s in
+the silent keyboard-absent camp; five rung-3 fault injections each read `rx_armed`
+false right after and true 0.5 s later, then reconnected in 5 ms, and one left deaf for
+1.5 s reconnected the same; three induced EV10 scans at 71 PAIR_PREP runs each
+(`hb_stale_drop` 0); bonded reconnect 10/10; three fresh pairs through the unbonded
+camp (bond clear, cold boot, factory pair) at 69-71 ms to connected with two pair ACKs
+and one bond persist each. CH570 compiles; not bench-verified (no CH570 on this bench).
+Bounds: a lost completion is re-armed within two ticks (the tick after the loss may
+still read the event that preceded it); rung 3 resets the baseline and is re-armed at
+the next tick. Not covered: a CH570 PHY that keeps raising its 30 ms timeouts while
+receiving nothing looks alive to this test (TODO).
+
 ## Link order pins the CH592 radio path
 
 The poll reply ratio (replies received over the keyboard's replies sent, the page-1
