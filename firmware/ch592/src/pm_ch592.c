@@ -315,7 +315,11 @@ __HIGH_CODE
 static void pm_tmr3_plan(void)
 {
     uint32_t now = pm_rtc_now();
-    uint32_t evid = pm_evid_bits;         /* read only; the window closes in pm_tmr3_arm */
+    /* The window closes only when a plan is applied. Should one stay open
+     * past a quarter of the RTC modulus (6 h of vetoed sleeps), its opening
+     * time can no longer be placed on the wrapping counter, so its evidence
+     * is ignored and the next apply reopens it (codex: aged evidence). */
+    uint32_t evid = (pm_rtc_dist(now, pm_evid_since) < PM_RTC_MOD / 4u) ? pm_evid_bits : 0u;
     uint32_t best = PM_CAP_RTC;
     uint32_t clear = 0u, stale = 0u;
     uint8_t  hit = 0u;
@@ -337,11 +341,15 @@ static void pm_tmr3_plan(void)
                 continue;
             }
             cand = PM_DEADLINE_MIN_RTC;                   /* awaiting its dispatch: one short wake */
-        } else {
-            if (dist <= PM_DUE_WINDOW_RTC && (evid & (1u << i)) && pm_due_at_window_open(d)) {
-                clear |= 1u << i; pm_plan_seen[i] = d;   /* due, and dispatched after it was due */
+        } else if (dist <= PM_DUE_WINDOW_RTC) {
+            /* Due now: TMOS's expiry test accepts equality, so its event may
+             * already be queued (codex: dist == 0 arms the floor, not a unit). */
+            if ((evid & (1u << i)) && pm_due_at_window_open(d)) {
+                clear |= 1u << i; pm_plan_seen[i] = d;   /* and dispatched after it was due */
                 continue;
             }
+            cand = PM_DEADLINE_MIN_RTC;
+        } else {
             cand = dist + PM_UNIT_RTC;                    /* land just after TMOS's own expiry */
         }
         if (cand < best) { best = cand; hit = 1u; }
