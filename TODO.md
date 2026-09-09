@@ -12,15 +12,19 @@ should land together with a re-run of the hardware matrix and re-pinned digests.
 pending, then NAKed the endpoint unconditionally; the only re-ACK is in `USB_PollEP6()`,
 which runs only when a packet is pending, so a toggle mismatch with nothing pending
 (a retransmission of a packet already taken, or a bus error) left EP6 OUT NAKed until
-a power cycle: no `--info`, no bond operations, no `--enter-bootloader`. The case now
-judges the toggle from the interrupt-status sample already taken and re-ACKs when
-nothing was latched and nothing is pending; a latched packet, or a second OUT landing
-while one is pending (a pipelining host), keeps the NAK the poll re-ACKs. A conforming
-host cannot reach the wedge (the protocol is strict request/response, and the toggle
-mismatch needs a bus error or a host-side toggle reset the HID stack does not expose),
-so the bench check is the fix's non-regression: pipelined writes and the normal
-maintenance flows. Both chips' bytes change; the CH570 image is compiled, not
-bench-verified.
+a bus reset or a power cycle: no `--info`, no bond operations, no `--enter-bootloader`.
+The case now judges the toggle from the interrupt-status sample already taken and
+re-ACKs when nothing was latched and nothing is pending; a latched packet keeps the NAK
+the poll re-ACKs, and the pending-while-completed branch is defensive (the SIE's
+auto-busy holds NAK until the transfer flag is cleared, so ordinary traffic cannot
+reach it). The wedge IS reachable by a conforming host: a valid OUT whose ACK is lost
+is retried with the same DATA PID after the command has already run, which is exactly
+the toggle mismatch with nothing pending (USB 2.0 8.6.4); it needs a bus error, not a
+misbehaving host. Not host-reproducible on the bench, so the check is non-regression:
+pipelined writes and the normal maintenance flows. Pre-existing and separate: the
+bus-reset path re-ACKs EP6 OUT without cancelling a pending command, so an OUT admitted
+then can overwrite `EP6_Buf` under the old length. Both chips' bytes change; the CH570
+image is compiled, not bench-verified.
 
 ## Fixed 2026-09-09: the terminal reconnect camp has a liveness watchdog
 

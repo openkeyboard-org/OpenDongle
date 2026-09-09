@@ -9,12 +9,13 @@ leaves the bench.
 
 The vendor HID interface's OUT endpoint was NAKed unconditionally after every OUT
 completion, while only a latched IAP command ever re-ACKed it; a toggle mismatch with
-nothing pending (a retransmission or a bus error) therefore wedged the maintenance
-interface until a power cycle. The handler now re-ACKs when nothing was latched and
-nothing is pending, judging the toggle from the interrupt-status sample it already took;
-a latched command, or a second OUT arriving while one is pending, keeps the flow-control
-NAK that `USB_PollEP6` releases. Not host-reproducible on a conforming stack; verified as
-non-regression on the bench (pipelined writes answered in order, the maintenance flows
+nothing pending therefore wedged the maintenance interface until a bus reset or a power
+cycle. That case is reachable by a conforming host: a valid OUT whose ACK is lost on the
+bus is retried with the same DATA PID after the command has already run (USB 2.0 8.6.4).
+The handler now re-ACKs when nothing was latched and nothing is pending, judging the
+toggle from the interrupt-status sample it already took; a latched command keeps the
+flow-control NAK that `USB_PollEP6` releases. Not reproducible from the bench host, so
+verified as non-regression (pipelined writes answered in order, the maintenance flows
 unchanged). Both chips' bytes change; CH570 compiled, not bench-verified.
 
 ## Terminal-camp liveness watchdog

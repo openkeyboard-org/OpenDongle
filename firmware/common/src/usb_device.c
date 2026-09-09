@@ -698,18 +698,25 @@ void USB_IRQHandler(void)
                 /* Latched: NAK until USB_PollEP6 has run it and re-ACKs. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else if (iap_pkt_pending) {
-                /* A second OUT landed before the NAK above took effect while a
-                 * command is still pending (a host that pipelines requests):
-                 * dropped, and the NAK stays until the poll re-ACKs. */
+                /* Defensive: an OUT completed while a command is pending. The
+                 * SIE's auto-busy (RB_UC_INT_BUSY) NAKs until UIF_TRANSFER is
+                 * cleared below, and the explicit NAK then holds until the
+                 * poll re-ACKs, so ordinary traffic cannot get here; only the
+                 * bus-reset path, which re-ACKs EP6 OUT without cancelling a
+                 * pending command, can admit one, and its DMA has then already
+                 * overwritten EP6_Buf under the old iap_pkt_len (a pre-existing
+                 * exposure, codex). Keep the NAK. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else {
-                /* Toggle mismatch with nothing pending (a retransmission of a
-                 * packet already taken, or a bus error): the packet is dropped
-                 * and the endpoint must stay live. Before this branch the
-                 * unconditional NAK below left EP6 OUT NAKed with nothing to
-                 * re-ACK it, so the vendor interface was wedged until a power
-                 * cycle (TODO defect). The toggle is judged from the same
-                 * status sample as the token, not a re-read. */
+                /* Toggle mismatch with nothing pending: the host retried a
+                 * packet whose ACK it lost after we had already taken and run
+                 * it (USB 2.0 8.6.4), or a bus error. The duplicate is
+                 * dropped without advancing the toggle and the endpoint must
+                 * stay live. Before this branch the unconditional NAK left EP6
+                 * OUT NAKed with nothing to re-ACK it, so the vendor interface
+                 * was wedged until a bus reset or a power cycle (TODO defect).
+                 * The toggle is judged from the same status sample as the
+                 * token, not a re-read. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
             }
             break;
