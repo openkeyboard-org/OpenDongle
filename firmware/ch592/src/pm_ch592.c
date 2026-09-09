@@ -215,12 +215,19 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * and an app dispatch in between vetoed that iteration without undoing
  * itself, so more passes only strengthen the argument - but a read older
  * than a quarter of the modulus is not used at all: after half a modulus
- * of vetoes (12 h) a fresh deadline would alias as past (the review's
- * long-veto sequence), so such a plan refreshes the read and the next one
- * retires. An entry the previous read had not reached stays; due now, it
- * arms the 4-tick floor, whose wake's passes dispatch the queued expiry
- * (at most two floor wakes: the first plan after the deadline may itself
- * carry a read from before it). The table deadline is read
+ * of vetoes (12 h) a fresh deadline would alias as past. The age is NOT
+ * measured on the RTC, which would alias again after every whole modulus
+ * (the review's wrap sequence): it is bounded by the TMR3 fire count.
+ * TMR3 fires at most one cap apart whether or not sleeps are admitted
+ * (every arm is at most the cap, the ISR falls back to the cap), so fewer
+ * than (M/4)/cap fires since the previous plan prove it is younger than a
+ * quarter modulus in true time, and the modular distances are then exact.
+ * A plan with an older read refreshes it; the next plan retires. An entry
+ * the previous read had not reached stays; due now, it arms the 4-tick
+ * floor, whose wake's passes dispatch the queued expiry (two floor wakes
+ * at most while plans keep being admitted: the first plan after the
+ * deadline may itself carry a read from before it; a plan followed by a
+ * quarter-modulus veto costs one floor wake per such veto). The table deadline is read
  * AFTER the TMOS call, so it is never earlier than TMOS's own (a start
  * delayed by an IRQ tail between the call and the read only makes it later,
  * which is conservative), and the 2-tick "due" window covers the tick the
@@ -235,8 +242,8 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * events are dispatched ahead of it there (the quiet passes' own
  * triple-expiry residual, which bounds the library's timers the same way:
  * two caps plus the foreground). An entry is never dropped
- * unretired: the second plan after it became due settles it, whatever
- * vetoes came between. hb_stale_drop counts settled retirements of entries
+ * unretired: the second of any two admitted plans less than a quarter
+ * modulus apart after it became due settles it. hb_stale_drop counts settled retirements of entries
  * more than 100 ms overdue: a phantom from a start/stop crossing, or a
  * one-shot consumed just before a long idle veto (an EP0 window, an
  * unconfigured port); a nonzero count is a pointer at those, not a defect
@@ -249,6 +256,7 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
 #define PM_STALE_RTC         3200u                  /* 100 ms overdue with no dispatch: phantom */
 #define PM_CAP_RTC           ((uint32_t)DONGLE_PM_DEADLINE_CAP_US * 32u / 1000u)   /* us -> ticks at 32000 Hz */
 #define PM_TMR3_PER_RTC      1875u                  /* 60e6 / 32000, exact */
+#define PM_R0_MAX_FIRES      ((PM_RTC_MOD / 4u) / PM_CAP_RTC)   /* TMR3 fires that prove an age below M/4 */
 #if RTC_MAX_COUNT != 0xA8C00000
 #error "pm_ch592.c assumes the CH59x RTC modulus 0xA8C00000 (RTC_MAX_COUNT)"
 #endif
@@ -317,7 +325,8 @@ static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired more 
 static uint32_t pm_plan_seen[16];       /* the value the plan saw in a to-clear entry */
 static uint8_t  pm_plan_hit;
 static uint32_t pm_prev_now;            /* the previous plan's RTC read (task context only) */
-static uint8_t  pm_prev_valid;          /* ... and whether the previous pm_idle_try reached it */
+static uint32_t pm_prev_hb;             /* ... the TMR3 fire count at that read (its non-modular age) */
+static uint8_t  pm_prev_valid;          /* ... and whether a plan has run at all */
 
 /* Had the RTC reached `deadline` at the previous plan's read? Then every
  * pass since (this iteration's three) ran with the timer expired, and none
@@ -333,8 +342,9 @@ static void pm_tmr3_plan(void)
 {
     uint32_t now = pm_rtc_now();
     uint32_t r0 = pm_prev_now;
-    /* Usable only when younger than a quarter modulus: older reads alias. */
-    uint8_t  r0_ok = (uint8_t)(pm_prev_valid && pm_rtc_dist(now, r0) < PM_RTC_MOD / 4u);
+    /* Usable only when younger than a quarter modulus, measured by TMR3
+     * fires (at most one cap apart, admitted or not): older reads alias. */
+    uint8_t  r0_ok = (uint8_t)(pm_prev_valid && (uint32_t)(pm_hb_irqs - pm_prev_hb) < PM_R0_MAX_FIRES);
     uint32_t best = PM_CAP_RTC;
     uint32_t clear = 0u, stale = 0u;
     uint8_t  hit = 0u;
@@ -367,7 +377,7 @@ static void pm_tmr3_plan(void)
     }
     if (best < PM_DEADLINE_MIN_RTC) best = PM_DEADLINE_MIN_RTC;
     pm_plan_best = best; pm_plan_clear = clear; pm_plan_stale = stale; pm_plan_hit = hit;
-    pm_prev_now = now; pm_prev_valid = 1u;
+    pm_prev_now = now; pm_prev_hb = pm_hb_irqs; pm_prev_valid = 1u;
 }
 
 /* Under the mask, right before the real WFE: apply the plan. A handful of
