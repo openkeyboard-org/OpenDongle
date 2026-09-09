@@ -189,15 +189,23 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * live timer for longer than the cap: start = TMOS call first, publish only
  * on TRUE; stop = EMPTY first, then the TMOS call. The one bit both contexts
  * restart (supervision, per RX) rewrites its entry within 875 us anyway.
- * Retirement happens only in pm_tmr3_arm, under the mask, on dispatch
- * evidence from RF_ProcessEvent (pm_dispatched, task context only): an entry
- * whose bit was dispatched and whose deadline is past or within 2 ticks is
- * consumed. A dispatch cannot name the timer that posted its bit (TMOS
- * restarts a timer without clearing an already-posted event), so a restarted
- * same-bit timer sitting within 62 us of due at that dispatch is the one
+ * Retirement is decided in pm_tmr3_plan and applied in pm_tmr3_arm on
+ * dispatch evidence that carries TIME: RF_ProcessEvent records, per bit, the
+ * RTC count of its latest dispatch (pm_dispatched_at, task context only). An
+ * entry is consumed only if that dispatch happened at or after its deadline
+ * (2 ticks of tolerance before it). Evidence from an earlier occurrence of
+ * the same timer, or from an immediate post of the same bit before the
+ * deadline, is therefore never mistaken for the expiry: a timer that expires
+ * inside the last quiet pass (TMOS queues its event internally, bypassing the
+ * post latch) is found due and undispatched, arms the floor, and is
+ * dispatched one short wake later (the adversarial review's sequence: the
+ * previous occurrence's dispatch 30 ms earlier used to retire it and the core
+ * slept the cap over the queued event). A dispatch cannot name the timer that
+ * posted its bit (TMOS restarts a timer without clearing a posted event), so
+ * an immediate post dispatched within 62 us BEFORE the deadline is the one
  * residual: consumed early, cap-bounded, self-healing. An entry overdue by
- * more than 100 ms with no dispatch is a phantom (or a refused start): dropped
- * and counted in hb_stale_drop, the alarm. The guard bounds how long an entry
+ * more than 100 ms with no such dispatch is a phantom (or a refused start):
+ * dropped and counted in hb_stale_drop, the alarm. The guard bounds how long an entry
  * stays OVERDUE, checked at the next admitted sleep, not a phantom's whole
  * life: a phantom with a far deadline first produces deadline-timed wakes
  * (no worse than the cap), then floor wakes for up to 100 ms; the TMR3 ISR's
@@ -217,7 +225,7 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
 #error "pm_ch592.c assumes the LSI at 32000 Hz (CAB_LSIFQ): 1 TMOS unit = 20 ticks, 1 tick = 1875 TMR3 ticks"
 #endif
 static volatile uint32_t pm_deadline[16];
-static uint32_t pm_dispatched;                /* bits dispatched since the last arm; task context only */
+static uint32_t pm_dispatched_at[16];         /* RTC count of each bit's latest dispatch, PM_DEADLINE_EMPTY = never; task context only */
 static volatile uint32_t pm_hb_arm_deadline, pm_hb_arm_cap;
 static uint8_t pm_hb_stale_drop;              /* saturating: page 5 [59] high nibble */
 
@@ -261,12 +269,29 @@ void pm_tmos_stop(uint8_t task, uint16_t bit)
     tmos_stop_task(task, bit);
 }
 
-/* RF_ProcessEvent entry, task context only: record the dispatched bits.
- * Consumed and cleared by pm_tmr3_arm under the mask. */
+/* RF_ProcessEvent entry, task context only: stamp the dispatched bits with
+ * the RTC count. Read by pm_tmr3_plan in the same context. */
 __HIGH_CODE
 void pm_deadline_dispatched(uint16_t events)
 {
-    pm_dispatched |= events;
+    uint32_t now = pm_rtc_now();
+    uint32_t ev = events;
+    while (ev != 0u) {
+        uint32_t i = __builtin_ctz(ev);
+        ev &= ev - 1u;
+        pm_dispatched_at[i] = now;
+    }
+}
+
+/* Did the latest dispatch of slot i happen at or after `deadline` (2 ticks of
+ * tolerance before it)? Only such a dispatch can have consumed that timer. */
+static inline uint8_t pm_dispatch_consumed(uint32_t i, uint32_t deadline)
+{
+    uint32_t at = pm_dispatched_at[i];
+    uint32_t d;
+    if (at == PM_DEADLINE_EMPTY) return 0u;
+    d = pm_rtc_dist(at, deadline);            /* future = dispatched at/after the deadline */
+    return (uint8_t)(!PM_RTC_PAST(d) || (PM_RTC_MOD - d) <= PM_DUE_WINDOW_RTC);
 }
 
 /* The arm is planned UNMASKED (after the quiet passes, before the mask) and
@@ -291,8 +316,6 @@ __HIGH_CODE
 static void pm_tmr3_plan(void)
 {
     uint32_t now = pm_rtc_now();
-    uint32_t disp = pm_dispatched;        /* read only: consumed by pm_tmr3_arm when the plan
-                                           * is applied, so a veto keeps the evidence (codex) */
     uint32_t best = PM_CAP_RTC;
     uint32_t clear = 0u, stale = 0u;
     uint8_t  hit = 0u;
@@ -304,7 +327,7 @@ static void pm_tmr3_plan(void)
         dist = pm_rtc_dist(d, now);
         if (PM_RTC_PAST(dist)) {
             uint32_t overdue = PM_RTC_MOD - dist;
-            if (disp & (1u << i)) {                       /* consumed by its dispatch */
+            if (pm_dispatch_consumed(i, d)) {             /* dispatched at/after its deadline */
                 clear |= 1u << i; pm_plan_seen[i] = d;
                 continue;
             }
@@ -314,8 +337,8 @@ static void pm_tmr3_plan(void)
             }
             cand = PM_DEADLINE_MIN_RTC;                   /* awaiting its dispatch: one short wake */
         } else {
-            if ((disp & (1u << i)) && dist <= PM_DUE_WINDOW_RTC) {
-                clear |= 1u << i; pm_plan_seen[i] = d;   /* due: the dispatch consumed it */
+            if (dist <= PM_DUE_WINDOW_RTC && pm_dispatch_consumed(i, d)) {
+                clear |= 1u << i; pm_plan_seen[i] = d;   /* due and dispatched: consumed */
                 continue;
             }
             cand = dist + PM_UNIT_RTC;                    /* land just after TMOS's own expiry */
@@ -334,7 +357,6 @@ __HIGH_CODE
 static void pm_tmr3_arm(void)
 {
     uint32_t clear = pm_plan_clear;
-    pm_dispatched = 0u;                   /* the plan's evidence is consumed here, not before */
     while (clear != 0u) {
         uint32_t i = __builtin_ctz(clear);
         clear &= clear - 1u;
@@ -630,7 +652,7 @@ void pm_heartbeat_init(void)
 {
 #if DONGLE_PM_EXACT_DEADLINE
     uint32_t i;
-    for (i = 0u; i < 16u; i++) pm_deadline[i] = PM_DEADLINE_EMPTY;
+    for (i = 0u; i < 16u; i++) { pm_deadline[i] = PM_DEADLINE_EMPTY; pm_dispatched_at[i] = PM_DEADLINE_EMPTY; }
 #endif
     R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
     R32_TMR3_CNT_END = (GetSysClock() / 1000000u) * DONGLE_PM_HEARTBEAT_US;   /* 60000 @ 1000 us; the exact-deadline mode re-arms per sleep */
