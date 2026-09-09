@@ -609,6 +609,21 @@ the build id for no functional gain, or expands scope beyond the import:
 - **USB NAK wakes.** ~3000 wakes/s from the 1 ms-interval HID IN endpoints while the
   host is awake. Raising `bInterval` on the mouse/consumer interfaces (keep the
   keyboard at 1 ms) is a product decision; measure before changing.
+- **USB IN-token wake rate is host-dependent: ~23 000 wakes/s on the bench Mac (2026-09-09).**
+  Page-5 attribution in the keyboard-absent camp with the host awake reads `wake_usb`
+  22 900-24 800/s in both heartbeat modes (fixed 1 ms and exact-deadline), against the
+  ~3000/s the R2a finding above recorded on 2026-09-06 before the bench was unplugged and
+  replugged that evening. The count is three HID IN endpoints (EP1/EP2/EP3, `bInterval`
+  1 ms) at about 8000 tokens/s each, i.e. one token per 125 us microframe, as if the host
+  scheduled the full-speed interrupt endpoints at the high-speed interval (EP5/EP6 are not
+  polled until a client opens the vendor interfaces). Idle duty in that state collapses to
+  8-13 % (it was ~86 % at 3000 wakes/s), which is what the meter shows as the camp reading
+  bouncing between ~10.45 and ~10.85 mA. Not a firmware defect and not part of PR #38
+  (the fixed image shows it too). To do: identify the host path (which port, hub or TT the
+  dongle sits behind; `system_profiler` is unavailable inside the sandbox), check whether
+  a USB 2.0 hub in between restores 1 ms polling, and decide whether a larger `bInterval`
+  on the boot interfaces is acceptable for the product. Every awake-host power figure in
+  the release notes for the camp state was taken in this host's polling regime.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
   the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
   remote-wake latency contract first.
