@@ -639,7 +639,7 @@ static uint32_t rf_bond_default_aa = RF_DEFAULT_ACCESS_ADDR;
  * to this test, which measures event-loop progress, not reception (TODO). */
 #define RF_CAMP_WD_TICKS_TSYS          (320u * HAL_TMOS_UNIT_TICKS)   /* 200 ms */
 _Static_assert(RF_CAMP_WD_TICKS_TSYS < (1u << 26), "CH570 one-shot arms are 26-bit");
-static uint8_t  rf_camp_wd_active;        /* the boot-window slot is the camp tick */
+static volatile uint8_t rf_camp_wd_active; /* the boot-window slot is the camp tick; the radio sink clears it */
 static uint8_t  rf_camp_wd_silent;        /* consecutive silent ticks (saturating) */
 static uint32_t rf_camp_wd_seen;          /* PHY RX-side event count at the last tick */
 static volatile uint16_t rfd_camp_wd_rearms;    /* page 1 [60..61], u16 (the page is otherwise full) */
@@ -1418,7 +1418,14 @@ static void rf_camp_watchdog_tick(void)
         (void)__risc_v_enable_irq(irq);
         rf_arm_retry_if_failed();
     }
-    hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
+    /* Re-arm only while still the slot's owner: a beacon accepted in the
+     * radio sink meanwhile cancelled the slot and cleared the flag, and the
+     * trailing arm must not bring it back (Copilot). The window between this
+     * read and the arm is a few instructions; a sink accept inside it costs
+     * one expiry whose tick self-disables. */
+    if (rf_camp_wd_active) {
+        hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
+    }
 }
 
 /* P1' pair-ACK TX guard. Call with the hal_rf_start_tx() status right after a
