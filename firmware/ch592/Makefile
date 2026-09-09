@@ -202,7 +202,10 @@ endif
 #                           0 restores today's spin-while-suspended)
 #   PM_GPIO_PARK       0/1  park the CH592D no-connects (PB15 pull-DOWN)
 #   PM_USB_DIGIN_OFF   0/1  PB10/PB11 digital input buffers off
-#   PM_CLK_GATE        0/1  PWR_PeriphClkCfg(DISABLE, 0x4DF6)
+#   PM_CLK_GATE        0/1  PWR_PeriphClkCfg(DISABLE, 0x4DF6): -0.25 mA in every
+#                           state for ~0.2 % of poll replies (bench 2026-09-09,
+#                           an aggregate effect of the gated current, no single
+#                           block; RELEASE-NOTES). Default on.
 #   PM_HEARTBEAT_US    100..10000 TMR3 heartbeat period (the TMOS deadline bound)
 #                           in the fixed mode; the initial TMR3 period in the
 #                           exact-deadline mode
@@ -219,7 +222,7 @@ PM_IDLE_LEVEL ?= 3
 PM_IDLE_IN_SUSPEND ?= 1
 PM_GPIO_PARK ?= 1
 PM_USB_DIGIN_OFF ?= 0
-PM_CLK_GATE ?= 0
+PM_CLK_GATE ?= 1
 # Gate mask for PM_CLK_GATE=1 as a DECIMAL (19958 = 0x4DF6: TMR1 TMR2 UART0-3 SPI0 PWMX
 # I2C LCD). Subsets exist for bench bisection; pm_ch592.c refuses any bit outside
 # 0x4DF6 and any of TMR0/TMR3/USB/BLE.

@@ -601,11 +601,14 @@ the build id for no functional gain, or expands scope beyond the import:
   application deadline and caps the sleep for library timers; no RTC trigger needed.
   Left open: the cap default (20 ms) against the library timers' tolerance, and
   whether the 500 ms/120 s HAL calibration would rather be bounded tighter.
-- **Clock gating cadence effect.** `PM_CLK_GATE=1` (mask 0x4DF6) saves ~0.25 mA but the
-  morning A/B read the receive-restart rate 1.6 % low; the afternoon bisect (timers
-  only 1123/s, UARTs only 1134/s, all-but-timers 1107-1115/s, ungated 1124-1139/s) was
-  drowned by RF-environment variance. Redo as an interleaved A/B (3x each) with an RF
-  trace or the controller's own poll-receive counters as the oracle.
+- **Clock gating cadence effect: characterised, shipped on (2026-09-09).** The 1.6 %
+  the 09-06 absolute-rate A/B showed was mostly downlink loss; the reply-ratio oracle
+  puts the gates at ~0.2 % of poll replies (same binary, mask 0 vs 0x4DF6; both halves
+  of the mask carry ~0.15 % each, so it is the gated current, not a block). Default is
+  now `PM_CLK_GATE=1`; the mask knob stays for anyone who wants the ungated radio
+  margin back at +0.25 mA. Open: the physical mechanism (supply ripple on the LDO
+  changing the receiver's margin at the arm edge is the guess), which the cadence bench
+  cannot see.
 - **USB NAK wakes.** ~3000 wakes/s from the 1 ms-interval HID IN endpoints while the
   host is awake. Raising `bInterval` on the mouse/consumer interfaces (keep the
   keyboard at 1 ms) is a product decision; measure before changing.
