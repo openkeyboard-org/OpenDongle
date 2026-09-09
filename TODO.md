@@ -642,8 +642,10 @@ the build id for no functional gain, or expands scope beyond the import:
   `.text`: the library's addresses are identical across RAM-code and application
   perturbations (`RF_Rx` 0x3cee in every variant), and the pinned application functions move
   only when a function ahead of them in that list changes. Open: the flash-fetch period
-  itself (a `TEXT_PAD` sweep on a noisy afternoon bench could not resolve it), so an edit to
-  a radio-path function can still move the functions behind it; and the byte-identity gates
+  itself (a `TEXT_PAD` sweep on a noisy afternoon bench could not resolve it; `TEXT_PAD`
+  must be even and the effective shift is N rounded up to the first pinned section's
+  alignment, so read `RF_Rx` in the map), so an edit to a radio-path function can still
+  move the functions behind it; and the byte-identity gates
   no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.

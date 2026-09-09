@@ -55,10 +55,11 @@ SECTIONS
     .text :
     {
         . = ALIGN(4);
-        /* Bench knob (make TEXT_PAD=N): shift everything in flash .text by N
-         * bytes to measure code-placement sensitivity of the radio path. */
+        /* Bench knob (make TEXT_PAD=N, N even): shift everything in flash
+         * .text by N bytes to measure code-placement sensitivity of the
+         * radio path. The first pinned section's alignment (2 or 4) rounds
+         * the effective shift up; read RF_Rx in the map, not N. */
         . += DEFINED(DONGLE_TEXT_PAD) ? DONGLE_TEXT_PAD : 0;
-        KEEP(*(SORT_NONE(.handle_reset)))
         /* The radio path is linked FIRST, so an edit anywhere else in the
          * application never moves it: the BLE library (RF_Rx/RF_Tx/RF_Shut,
          * the receive and transmit processing, TMOS), then the application's
@@ -74,6 +75,12 @@ SECTIONS
         *(.text.hal_rf_shut)
         *(.text.hal_rf_set_channel)
         *(.text.hal_timing_ch592_dispatch)
+        /* The reset handler follows the pinned set (it is reached by a jump
+         * from the .init entry stub and has no placement requirement), so a
+         * startup edit cannot move the radio path either. Ahead of the
+         * radio path now sit only .init and the ODG2 header, whose sizes
+         * OpenBoot's hand-off fixes. */
+        KEEP(*(SORT_NONE(.handle_reset)))
         *(.text)
         *(.text.*)
         *(.rodata)

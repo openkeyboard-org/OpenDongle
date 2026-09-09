@@ -23,8 +23,9 @@ function ahead of them in that list changes. The image is 68 bytes smaller: the
 linker relaxes 22 library-internal calls to `c.jal` from the new proximity, which is
 also why the byte-identity gates do not apply across this change; the gate for a
 link-order change is the symbol set with sizes (identical) plus the bench oracles.
-`TEXT_PAD=N` (Makefile, default 0) shifts flash `.text` by N bytes for placement
-experiments; the flash-fetch period behind the effect is not established.
+`TEXT_PAD=N` (Makefile, default 0, N even) shifts flash `.text` by N bytes for
+placement experiments, rounded up to the first pinned section's alignment (read
+`RF_Rx` in the map); the flash-fetch period behind the effect is not established.
 
 ## Power management (CH592, Tier 1): main-loop idle, GPIO park, clock gates
 
