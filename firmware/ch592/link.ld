@@ -52,28 +52,28 @@ SECTIONS
         _dongle_id_end = .;
     } >FLASH
 
-    .highcodelalign :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_lma = .);
-    } >FLASH AT>FLASH
-
-    .highcode :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_start = .);
-        *(.vector);
-        KEEP(*(SORT_NONE(.vector_handler)))
-        *(.highcode);
-        *(.highcode.*);
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_end = .);
-    } >RAM AT>FLASH
-
     .text :
     {
         . = ALIGN(4);
+        /* Bench knob (make TEXT_PAD=N): shift everything in flash .text by N
+         * bytes to measure code-placement sensitivity of the radio path. */
+        . += DEFINED(DONGLE_TEXT_PAD) ? DONGLE_TEXT_PAD : 0;
         KEEP(*(SORT_NONE(.handle_reset)))
+        /* The radio path is linked FIRST, so an edit anywhere else in the
+         * application never moves it: the BLE library (RF_Rx/RF_Tx/RF_Shut,
+         * the receive and transmit processing, TMOS), then the application's
+         * flash-resident poll-path functions. The bench measures the poll
+         * reply ratio moving by ~0.3 % with the placement of this code
+         * (2026-09-09, TODO), and with the wildcard order every RAM-code or
+         * application edit shifted all of it. The RAM-code image is loaded
+         * AFTER .text for the same reason (see .highcode below). */
+        *LIBCH59xBLE.a:(.text .text.*)
+        *(.text.RF_ProcessEvent)
+        *(.text.rf_connected_poll_cb)
+        *(.text.rf_arm_connected_supervision)
+        *(.text.hal_rf_shut)
+        *(.text.hal_rf_set_channel)
+        *(.text.hal_timing_ch592_dispatch)
         *(.text)
         *(.text.*)
         *(.rodata)
@@ -93,6 +93,27 @@ SECTIONS
 
     PROVIDE( _etext = . );
     PROVIDE( _eitcm = . );
+
+    /* RAM-resident code, loaded from flash AFTER .text so that its size does
+     * not move the radio path linked above (it used to be loaded before it). */
+    .highcodelalign :
+    {
+        . = ALIGN(4);
+        PROVIDE(_highcode_lma = .);
+    } >FLASH AT>FLASH
+
+    .highcode :
+    {
+        . = ALIGN(4);
+        PROVIDE(_highcode_vma_start = .);
+        *(.vector);
+        KEEP(*(SORT_NONE(.vector_handler)))
+        *(.highcode);
+        *(.highcode.*);
+        . = ALIGN(4);
+        PROVIDE(_highcode_vma_end = .);
+    } >RAM AT>FLASH
+
 
     .preinit_array :
     {

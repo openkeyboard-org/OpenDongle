@@ -628,16 +628,25 @@ the build id for no functional gain, or expands scope beyond the import:
   a USB 2.0 hub in between restores 1 ms polling, and decide whether a larger `bInterval`
   on the boot interfaces is acceptable for the product. Every awake-host power figure in
   the release notes for the camp state was taken in this host's polling regime.
-- **The poll reply ratio moves with code layout on the receive-arm path (2026-09-09).**
-  Interleaved A/B runs of `pollrate_phy.py` (dongle page-1 `rx_done` over the controller's
-  valid-poll count, 30 s each) put the fixed 1 ms heartbeat at 99.47-99.53 %, one
-  exact-deadline build at 99.80-99.83 % and the next (same rule, one extra conditional
-  pass, no change on the poll path) at 99.51-99.52 %; declaring the CH592 `rf_diag`
-  block `volatile`, which only reorders two stores, gave 99.22-99.35 %. The receive arm
-  after a TX completion has no slack, so where the flash fetches of `hal_rf_ch592.c` land
-  matters at the 0.3 % level. Any change near that path needs the interleaved A/B, not a
-  single run, and a byte-identical fixed-mode gate does not cover it. Candidate fix:
-  place the CH592 RF seam's hot functions in RAM (`__HIGH_CODE`) and re-measure.
+- **The poll reply ratio moves with code layout on the receive-arm path: pinned (2026-09-09).**
+  Interleaved A/B runs of `pollrate_phy.py` put the fixed 1 ms heartbeat at 99.47-99.53 %,
+  one exact-deadline build at 99.80-99.83 % and the next (no change on the poll path) at
+  99.51-99.52 %; a `volatile` on the CH592 `rf_diag` block, which only reorders two stores,
+  gave 99.22-99.35 %. Cause, from the map: the RAM-code image was loaded ahead of flash
+  `.text`, so every RAM-code edit shifted the whole BLE library, and the library's sections
+  were linked after every application function, so every application edit shifted them too;
+  the poll path runs mostly from flash (`RF_Rx`/`RF_Tx`/`RF_Shut`, the library's receive and
+  transmit processing, TMOS, and the application's `RF_ProcessEvent`,
+  `rf_connected_poll_cb`, `rf_arm_connected_supervision`, `hal_rf_shut`). `link.ld` now links
+  the radio path first (library, then those functions) and loads the RAM-code image after
+  `.text`: the library's addresses are identical across RAM-code and application
+  perturbations (`RF_Rx` 0x3cee in every variant), and the pinned application functions move
+  only when a function ahead of them in that list changes. Open: the flash-fetch period
+  itself (a `TEXT_PAD` sweep on a noisy afternoon bench could not resolve it), so an edit to
+  a radio-path function can still move the functions behind it; and the byte-identity gates
+  no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
+  the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
+  set with sizes plus the bench oracles.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
   the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
   remote-wake latency contract first.

@@ -276,6 +276,10 @@ CFLAGS += -DDONGLE_PM_DEADLINE_CAP_US=$(strip $(PM_DEADLINE_CAP_US))
 CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
+# Bench knob: shift flash .text by TEXT_PAD bytes (link.ld) to probe placement
+# sensitivity of the radio path. 0 = no shift; hashed into the build id.
+TEXT_PAD ?= 0
+LDFLAGS += -Wl,--defsym=DONGLE_TEXT_PAD=$(strip $(TEXT_PAD))
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs

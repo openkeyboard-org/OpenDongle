@@ -5,6 +5,27 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## Link order pins the CH592 radio path
+
+The poll reply ratio (replies received over the keyboard's replies sent, the page-1
+oracle) moved by up to 0.3 % between builds that changed nothing on the poll path:
+a `volatile` on a diagnostics block, a comment-sized edit to the idle code. The map
+explained it: the RAM-code image was loaded ahead of flash `.text`, so every RAM-code
+edit shifted the whole BLE library, and the library's sections were linked after every
+application function, so every application edit shifted them too; the poll path runs
+mostly from flash (`RF_Rx`/`RF_Tx`/`RF_Shut`, the library's receive and transmit
+processing, TMOS, and the application's dispatch and poll functions). `link.ld` now
+links the radio path first, the BLE library and then the application's flash-resident
+poll-path functions, and loads the RAM-code image after `.text`. The library's
+addresses are then identical across RAM-code and application perturbations (`RF_Rx`
+at 0x3cee in every variant), and the pinned application functions move only when a
+function ahead of them in that list changes. The image is 68 bytes smaller: the
+linker relaxes 22 library-internal calls to `c.jal` from the new proximity, which is
+also why the byte-identity gates do not apply across this change; the gate for a
+link-order change is the symbol set with sizes (identical) plus the bench oracles.
+`TEXT_PAD=N` (Makefile, default 0) shifts flash `.text` by N bytes for placement
+experiments; the flash-fetch period behind the effect is not established.
+
 ## Power management (CH592, Tier 1): main-loop idle, GPIO park, clock gates
 
 The CH592 product build no longer busy-spins its 60 MHz core. `Main_Circulation` now
