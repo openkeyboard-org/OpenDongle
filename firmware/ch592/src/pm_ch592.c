@@ -230,8 +230,8 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * the previous read had not reached stays; due now, it arms the 4-tick
  * floor, whose wake's passes dispatch the queued expiry (two floor wakes
  * at most while plans keep being admitted: the first plan after the
- * deadline may itself carry a read from before it; a plan followed by a
- * quarter-modulus veto costs one floor wake per such veto). The table deadline is read
+ * deadline may itself carry a read from before it; a plan whose read ages
+ * out before the next plan costs one floor wake per such veto). The table deadline is read
  * AFTER the TMOS call, so it is never earlier than TMOS's own (a start
  * delayed by an IRQ tail between the call and the read only makes it later,
  * which is conservative), and the 2-tick "due" window covers the tick the
@@ -246,9 +246,10 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * events are dispatched ahead of it there (the quiet passes' own
  * triple-expiry residual, which bounds the library's timers the same way:
  * two caps plus the foreground). An entry is never dropped
- * unretired: the second of any two admitted plans less than a quarter
- * modulus apart after it became due settles it, unless a veto longer than
- * half a modulus has meanwhile made it read as a future deadline, which
+ * unretired: of any two admitted plans after it became due, the second
+ * settles it while the first's read is still usable (fewer than (M/8)/cap
+ * TMR3 fires since it, three hours at the 20 ms cap), unless a veto longer
+ * than half a modulus has meanwhile made it read as a future deadline, which
  * costs nothing (cap arms, the same as no entry) until the counter comes
  * round to it. hb_stale_drop counts settled retirements of entries
  * more than 100 ms overdue: a phantom from a start/stop crossing, or a
