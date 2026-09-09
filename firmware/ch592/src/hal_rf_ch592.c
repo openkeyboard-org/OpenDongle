@@ -178,7 +178,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
         ev = HAL_RF_EV_TX_DONE;
         break;
     case TX_MODE_TX_FAIL:
-        rf_diag.tx_fail++;
+        RF_DIAG_INC(tx_fail);           /* also written by hal_rf_start_tx: dual context */
         ev = HAL_RF_EV_TX_FAIL;
         break;
     default:
