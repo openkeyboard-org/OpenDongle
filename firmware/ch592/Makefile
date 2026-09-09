@@ -276,6 +276,17 @@ CFLAGS += -DDONGLE_PM_DEADLINE_CAP_US=$(strip $(PM_DEADLINE_CAP_US))
 CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
+# Bench knob: shift flash .text by TEXT_PAD bytes (link.ld) to probe placement
+# sensitivity of the radio path. 0 = no shift; hashed into the build id. Must be
+# an even decimal (functions are 2-byte aligned with the C extension); the
+# effective shift is TEXT_PAD rounded up to the alignment of the first pinned
+# section, so read the map (RF_Rx) rather than assuming N.
+TEXT_PAD ?= 0
+$(call pm-require-range,TEXT_PAD,0,65535)
+ifneq ($(shell test $$(( $(strip $(TEXT_PAD)) % 2 )) -eq 0 && echo ok),ok)
+$(error TEXT_PAD must be even, got '$(TEXT_PAD)')
+endif
+LDFLAGS += -Wl,--defsym=DONGLE_TEXT_PAD=$(strip $(TEXT_PAD))
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
