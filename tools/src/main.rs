@@ -283,6 +283,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                 0xE0 => "unknown rung",
                 0xE1 => "refused: not in the terminal camp (connected, EV10 scan, boot window/relisten or pair burst active)",
                 0xE2 => "refused: quiesced for reboot",
+                0xE3 => "unsupported on this chip (rung 2 on CH59x: a second vendor role init is not validated)",
                 _ => "?",
             },
             response[3]

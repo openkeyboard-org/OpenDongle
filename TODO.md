@@ -81,10 +81,16 @@ every other boot-window cancel end it. `--rf-poke 3` shuts the radio and leaves 
 deaf as the fault injection; page 1 `camp_wd_rearms` (u16, the page's last free bytes)
 counts the re-arms. Bench: see the release note.
 
-**Still open.** The pair-ACK burst has the TX-side twin (a `StartTx` that returns 0
-without a `TX_FINISH`), which needs a per-TX completion timer. The CH570 rung-2
-escalation count (`rfd_camp_wd_reinits`) has no page byte left and is debugger-only.
-CH570 is compiled, not bench-verified (no CH570 on this bench).
+**Still open.** A deaf-but-cycling CH570 PHY (its 30 ms camp timeouts keep firing while
+it receives nothing) looks alive to this test, which measures event-loop progress, not
+reception; it needs the separate policy the original entry named (a preventive re-init
+after a long interval with timeouts only), and the diagnostics to tell it apart are the
+0x94 ladder and page 1 `rx_timeout` against `rx_done`. The pair-ACK burst has the TX-side
+twin (a `StartTx` that returns 0 without a `TX_FINISH`), which needs a per-TX completion
+timer. The CH570 rung-2 escalation count (`rfd_camp_wd_reinits`) has no page byte left
+and is debugger-only. CH570 is compiled, not bench-verified (no CH570 on this bench).
+Bounds as shipped: a lost completion is re-armed within two ticks; rung 3 resets the
+tick's baseline and is re-armed at the next one.
 
 ## Defect: `IAP_Service()` bounds its reboot fail-safe with a clock that stops in the reconnect camp
 

@@ -25,7 +25,11 @@ false right after and true 0.5 s later, then reconnected in 5 ms, and one left d
 1.5 s reconnected the same; three induced EV10 scans at 71 PAIR_PREP runs each
 (`hb_stale_drop` 0); bonded reconnect 10/10; three fresh pairs through the unbonded
 camp (bond clear, cold boot, factory pair) at 69-71 ms to connected with two pair ACKs
-and the persist each. CH570 compiles; not bench-verified (no CH570 on this bench).
+and one bond persist each. CH570 compiles; not bench-verified (no CH570 on this bench).
+Bounds: a lost completion is re-armed within two ticks (the tick after the loss may
+still read the event that preceded it); rung 3 resets the baseline and is re-armed at
+the next tick. Not covered: a CH570 PHY that keeps raising its 30 ms timeouts while
+receiving nothing looks alive to this test (TODO).
 
 ## Link order pins the CH592 radio path
 

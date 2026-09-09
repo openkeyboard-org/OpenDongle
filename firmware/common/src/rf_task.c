@@ -631,7 +631,12 @@ static uint32_t rf_bond_default_aa = RF_DEFAULT_ACCESS_ADDR;
  * vendor re-init + re-arm (rung 2 of the ladder, CH570-validated; a second
  * RF_RoleInit is not validated on the TMOS radio and is not attempted).
  * The tick self-disables outside the exact terminal camp, and the burst
- * accept in the radio sink cancels the slot along with the boot window. */
+ * accept in the radio sink cancels the slot along with the boot window.
+ * Bounds: a lost completion is re-armed within two ticks (the tick after
+ * the loss may still read the event that preceded it); rung 3 resets the
+ * baseline, so it is re-armed at the next tick. Not covered: a CH570 PHY
+ * that keeps raising its 30 ms timeouts while receiving nothing looks alive
+ * to this test, which measures event-loop progress, not reception (TODO). */
 #define RF_CAMP_WD_TICKS_TSYS          (320u * HAL_TMOS_UNIT_TICKS)   /* 200 ms */
 _Static_assert(RF_CAMP_WD_TICKS_TSYS < (1u << 26), "CH570 one-shot arms are 26-bit");
 static uint8_t  rf_camp_wd_active;        /* the boot-window slot is the camp tick */
@@ -3417,6 +3422,7 @@ static void rf_persist_bond_task(void)
         rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
         rf_start_rx();
         rf_arm_retry_if_failed();   /* P4: this recamp arms no timer */
+        rf_camp_watchdog_arm();     /* a terminal camp too (codex: it was the one without the tick) */
     }
 #endif
     if (save_rc != 0) {
@@ -3853,8 +3859,12 @@ uint8_t RF_DiagIntervene(uint8_t rung)
     hal_event_cancel(RF_EVT_RX_RESTART);    /* a stale restart must not race us */
     if (rung == 3u) {
         /* Fault injection: shut the radio and leave it deaf. The camp
-         * watchdog must bring it back within its tick. */
+         * watchdog must bring it back at its next tick: reset its baseline
+         * here, or an event that landed between the last tick and this shut
+         * would make that tick read "alive" and cost a second one (codex). */
         hal_rf_shut();
+        rf_camp_wd_seen   = rf_camp_wd_events();
+        rf_camp_wd_silent = 0u;
         (void)__risc_v_enable_irq(irq);
         return 0u;
     }
