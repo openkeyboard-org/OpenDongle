@@ -264,7 +264,7 @@ pub fn clock_gate_verdict(sleep_control: u32) -> String {
 
 /// The counters that are 16 bits wide on the wire (widened to u32 in
 /// `counters`); their per-sample delta wraps at 2^16, not 2^32.
-const U16_COUNTERS: [&str; 1] = ["rw_arms"];
+const U16_COUNTERS: [&str; 2] = ["rw_arms", "camp_wd_rearms"];
 
 /// The wrapping delta of a counter between two samples, in the counter's own
 /// width: a u16 stepping 65535 -> 0 is +1, not 4_294_901_761.
@@ -286,6 +286,7 @@ pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
                 for (i, n) in PAGE1_NAMES.iter().enumerate() {
                     v.push((*n, le32(&p.raw, 4 + 4 * i)));
                 }
+                v.push(("camp_wd_rearms", u32::from(le16(&p.raw, 60))));
             }
             2 => {
                 for (i, n) in PAGE2_NAMES.iter().enumerate() {
@@ -425,6 +426,10 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     line.push_str(&format!(" {}={}", n, le32(r, 4 + 4 * i)));
                 }
                 out.push(line);
+                out.push(format!(
+                    "  camp watchdog   rearms={} (u16; ~5/s while a terminal camp is silent on CH59x, 0 while it hears)",
+                    le16(r, 60)
+                ));
                 out.push(format!(
                     "  dispatch        pending=0x{:04X} delay_slot0=0x{:04X} delay_slot1=0x{:04X} degraded={}",
                     le16(r, 40),

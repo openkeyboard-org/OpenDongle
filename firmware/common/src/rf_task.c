@@ -612,6 +612,33 @@ static uint32_t rf_bond_default_aa = RF_DEFAULT_ACCESS_ADDR;
  * is the TMOS-unit deadline expressed in Tsys -- an exact multiple, so the
  * armed TMOS value is bit-identical to the pre-P3a literal. */
 #define RF_BOOT_WINDOW_TICKS_TSYS      (RF_BOOT_WINDOW_TICKS * HAL_TMOS_UNIT_TICKS)
+
+/* Terminal-camp liveness watchdog. Every terminal camp (EV10 give-up, closed
+ * boot window, unbonded start) arms RX once and then leans on the radio's
+ * own events to re-drive it: a lost completion, or a PHY that went deaf,
+ * left the dongle in "waiting for reconnect" until a chip reset, because
+ * the arm-status guard (rf_arm_retry_if_failed) never fires on either radio
+ * library (TODO: "no time-based liveness backstop"; one such strand seen on
+ * the bench 2026-09-04). The camp now keeps the boot-window slot, free in
+ * every terminal camp, as a 200 ms tick. A tick that saw an RX-side event
+ * since the last one (data, CRC error or timeout, from the PHY counters)
+ * leaves the radio alone. A silent tick re-arms RX from task context under
+ * the same IRQ mask as the 0x94 ladder: on CH59x basic-mode RX has no
+ * timeout, so a silent camp is the normal state and every silent tick
+ * re-arms preventively (shut + config + RX, ~100 us of a 200 ms period);
+ * on CH570 the 30 ms camp timeout keeps the counter moving, so a silent
+ * tick means the loop died, and the second in a row escalates to shut +
+ * vendor re-init + re-arm (rung 2 of the ladder, CH570-validated; a second
+ * RF_RoleInit is not validated on the TMOS radio and is not attempted).
+ * The tick self-disables outside the exact terminal camp, and the burst
+ * accept in the radio sink cancels the slot along with the boot window. */
+#define RF_CAMP_WD_TICKS_TSYS          (320u * HAL_TMOS_UNIT_TICKS)   /* 200 ms */
+_Static_assert(RF_CAMP_WD_TICKS_TSYS < (1u << 26), "CH570 one-shot arms are 26-bit");
+static uint8_t  rf_camp_wd_active;        /* the boot-window slot is the camp tick */
+static uint8_t  rf_camp_wd_silent;        /* consecutive silent ticks (saturating) */
+static uint32_t rf_camp_wd_seen;          /* PHY RX-side event count at the last tick */
+static volatile uint16_t rfd_camp_wd_rearms;    /* page 1 [60..61], u16 (the page is otherwise full) */
+static volatile uint16_t rfd_camp_wd_reinits;   /* CH570 rung-2 escalations; no page byte left: debugger only */
 static uint8_t rf_bond_valid;          /* a valid, non-zero-AA bond loaded     */
 /* Deferred bond-persist state (see rf_request_bond_persist / rf_persist_bond_task).
  * Declared here (ahead of RF_ProcessEvent) since the RF_EVT_PERSIST_BOND handler
@@ -1198,6 +1225,7 @@ static void rf_return_to_fresh_pair(void)
     rf_boot_window_active = 1u;
     rf_pair_window_open   = 0u;
     rf_boot_window_step   = 0u;
+    rf_camp_wd_active     = 0u;   /* the window takes the slot back; its close re-arms the watchdog */
     rf_state = RF_STATE_PAIRING;
     rf_access_addr = rf_bond_aa;
     rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
@@ -1321,6 +1349,73 @@ static void rf_arm_retry_if_failed(void)
     }
 }
 
+static uint32_t rf_camp_wd_events(void)
+{
+    hal_rf_diag_t h;
+    hal_rf_diag_snapshot(&h);
+    return h.rx_done + h.rx_crcerr + h.rx_timeout;
+}
+
+/* The exact terminal camp the watchdog (and the 0x94 ladder) may act on:
+ * PAIRING, no EV10 scan, no boot window, no burst, not quiescing. */
+static uint8_t rf_camp_is_terminal(void)
+{
+    return (uint8_t)(rf_state == RF_STATE_PAIRING && !rf_supervision_ev10_active
+                     && !rf_boot_window_active && !rf_inject_burst_active
+                     && !rf_quiesced);
+}
+
+/* Task context, at every terminal-camp entry: start the liveness tick. */
+static void rf_camp_watchdog_arm(void)
+{
+    rf_camp_wd_seen   = rf_camp_wd_events();
+    rf_camp_wd_silent = 0u;
+    rf_camp_wd_active = 1u;
+    hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
+}
+
+/* Task context, one tick: RF_EVT_BOOT_WINDOW with the window closed. */
+static void rf_camp_watchdog_tick(void)
+{
+    uint32_t seen, irq;
+
+    if (!rf_camp_is_terminal()) {
+        rf_camp_wd_active = 0u;           /* the camp ended: self-disable */
+        return;
+    }
+    seen = rf_camp_wd_events();
+    if (seen != rf_camp_wd_seen) {
+        rf_camp_wd_seen   = seen;         /* alive: leave the radio alone */
+        rf_camp_wd_silent = 0u;
+    } else {
+        if (rf_camp_wd_silent < 0xFFu) {
+            rf_camp_wd_silent++;
+        }
+        /* Predicate and action under one IRQ mask (the 0x94 ladder's model):
+         * between an unmasked check and the re-arm the radio sink can accept
+         * a beacon and start a pair-ACK burst this must not tear through. */
+        irq = __risc_v_disable_irq();
+        if (!rf_camp_is_terminal()) {
+            (void)__risc_v_enable_irq(irq);
+            rf_camp_wd_active = 0u;
+            return;
+        }
+        hal_event_cancel(RF_EVT_RX_RESTART);   /* a stale restart must not race us */
+#if !RF_TASK_EXECUTOR_TMOS
+        if (rf_camp_wd_silent >= 2u) {     /* the timeout loop is dead: re-init */
+            hal_rf_shut();
+            hal_rf_init();
+            rfd_camp_wd_reinits++;
+        }
+#endif
+        rf_start_rx();
+        rfd_camp_wd_rearms++;
+        (void)__risc_v_enable_irq(irq);
+        rf_arm_retry_if_failed();
+    }
+    hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
+}
+
 /* P1' pair-ACK TX guard. Call with the hal_rf_start_tx() status right after a
  * pair-ACK burst TX. On CH570 a SYNCHRONOUS StartTx refusal (RFIP_StartTx returns
  * nonzero) raises no TX_FINISH, so the burst chain never advances and RX is never
@@ -1366,6 +1461,7 @@ static void rf_stock_reacquire_giveup(void)
     hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
     hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
     hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+    rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
     hal_event_cancel(RF_EVT_PAIR_PREP);
     hal_event_cancel(RF_EVT_SEND_PAIR_ACK);
     hal_event_cancel(RF_EVT_POLL);
@@ -1425,7 +1521,7 @@ static void rf_stock_reacquire_giveup(void)
     rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
     rf_start_rx();
     rf_arm_retry_if_failed();   /* P4: don't strand deaf on a failed arm */
-    
+    rf_camp_watchdog_arm();     /* and never on a lost completion or a deaf PHY */
 }
 
 /* ---------- RF status callback (runs in interrupt context) ---------- */
@@ -1633,6 +1729,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 rf_boot_window_active = 0;
                 rf_pair_window_open   = 0;
                 hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+                rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
                 /* Arm the burst state machine — the IRQ-side TX_FINISH
                  * for this first TX will then chain RF_EVT_TX_PAIR_15B
                  * to fire 5 more 15-byte TXes on session AA across the
@@ -2275,6 +2372,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * too. (Bonded already has the boot-window timer; the guard is a benign
          * faster backstop there.) */
         rf_arm_retry_if_failed();
+        if (rf_bond_valid) {
+            rf_camp_wd_active = 0u;     /* the boot-window timer owns the slot */
+        } else {
+            rf_camp_watchdog_arm();     /* the unbonded camp is terminal at once */
+        }
         return events ^ RF_EVT_START;
     }
 
@@ -2289,6 +2391,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * stops re-posting, so it self-disables without touching any promote
          * site. */
         if (!rf_boot_window_active) {
+            if (rf_camp_wd_active) {
+                rf_camp_watchdog_tick();   /* the closed camp's liveness tick */
+            }
             return events ^ RF_EVT_BOOT_WINDOW;
         }
         if (rf_state != RF_STATE_PAIRING || rf_supervision_ev10_active) {
@@ -2307,6 +2412,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             rf_start_rx();
             rf_arm_retry_if_failed();   /* P4: closed window has no re-arm
                                          * timer — don't strand deaf */
+            rf_camp_watchdog_arm();     /* the slot stays on as the liveness tick */
         } else {
             /* Alternate: odd step = pair AA (new pair), even = session AA
              * (reconnect). rf_start_rx() does RF_Shut + reconfigure + RF_Rx so
@@ -3278,6 +3384,7 @@ static void rf_persist_bond_task(void)
         hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
         hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
         hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+        rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
         hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL);
         hal_rf_shut();
     }
@@ -3652,6 +3759,8 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
             }
             rfd_put16(&out[48u + 2u * i], (uint16_t)(int16_t)ms);
         }
+        _Static_assert(48u + 2u * HAL_TIMING_DIAG_SLOTS <= 60u, "page 1 slot table overlaps the watchdog counter");
+        rfd_put16(&out[60], rfd_camp_wd_rearms);   /* camp watchdog re-arms (u16) */
     } else if (page == 2u) {
         const uint32_t v[15] = {
             rfd_len10_seen, rfd_len10_accept_known, rfd_len10_accept_fresh,
@@ -3714,17 +3823,19 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
  * link is up or a reboot quiesce is in progress. */
 uint8_t RF_DiagIntervene(uint8_t rung)
 {
-#if RF_TASK_EXECUTOR_TMOS
-    /* CH59x: a live second RF_RoleInit under a global IRQ mask is not
-     * validated on the TMOS radio, and its diagnostics are stubs anyway. */
-    (void)rung;
-    return 0xE3u;
-#else
     uint32_t irq;
 
-    if (rung != 1u && rung != 2u) {
+    if (rung != 1u && rung != 2u && rung != 3u) {
         return 0xE0u;
     }
+#if RF_TASK_EXECUTOR_TMOS
+    /* CH59x: a live second RF_RoleInit under a global IRQ mask is not
+     * validated on the TMOS radio; rung 1 (re-arm) and rung 3 (shut only,
+     * the camp watchdog's fault injection) are. */
+    if (rung == 2u) {
+        return 0xE3u;
+    }
+#endif
     /* Snapshot the predicate AND act under one IRQ mask (codex final review):
      * between an unmasked check and the mask a radio IRQ can accept a beacon
      * and start a pair-ACK burst, which the intervention would then tear
@@ -3735,12 +3846,18 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         (void)__risc_v_enable_irq(irq);
         return 0xE2u;
     }
-    if (rf_state != RF_STATE_PAIRING || rf_supervision_ev10_active
-        || rf_boot_window_active || rf_inject_burst_active) {
+    if (!rf_camp_is_terminal()) {
         (void)__risc_v_enable_irq(irq);
         return 0xE1u;
     }
     hal_event_cancel(RF_EVT_RX_RESTART);    /* a stale restart must not race us */
+    if (rung == 3u) {
+        /* Fault injection: shut the radio and leave it deaf. The camp
+         * watchdog must bring it back within its tick. */
+        hal_rf_shut();
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
     if (rung == 2u) {
         hal_rf_shut();
         hal_rf_init();
@@ -3749,7 +3866,6 @@ uint8_t RF_DiagIntervene(uint8_t rung)
     (void)__risc_v_enable_irq(irq);
     rf_arm_retry_if_failed();
     return 0u;
-#endif
 }
 
 uint8_t RF_GetConnectionStatus(void)

@@ -179,14 +179,17 @@ RSSI, so treat that column as a hint on that part.
 `--rf-poke RUNG` is the one diagnostic that changes device state. It arms a
 maintenance session (like the bond commands), sends IAP `0x94` with the rung,
 and always disarms. Rung `1` re-arms the receiver from task context; rung `2`
-shuts the radio, re-runs the vendor init and re-arms. The firmware refuses it
+shuts the radio, re-runs the vendor init and re-arms (CH570 only: CH592 answers
+"unsupported" for it, a second vendor role init is not validated on the TMOS
+radio); rung `3` shuts the radio and leaves it deaf, the fault injection for the
+terminal camp's liveness watchdog, which must re-arm it within its 200 ms tick
+(page 1 `camp_wd_rearms` advances by one). The firmware refuses every rung
 unless the dongle is in its exact terminal reconnect camp -- not connected, no
 EV10 reacquire scan, no boot window or relisten, no pair-ACK burst in flight
--- and while quiescing for a reboot; CH592 firmware answers "unsupported". Exit
-status is non-zero on any refusal, and the reply names the reason. Use it on a
-dongle that is deaf to its keyboard, rung 1 first: which rung restores the
-link says whether the software re-arm loop or the PHY was dead. It needs the
-firmware from the RF-diagnostics draft PR.
+-- and while quiescing for a reboot. Exit status is non-zero on any refusal,
+and the reply names the reason. Use it on a dongle that is deaf to its
+keyboard, rung 1 first: which rung restores the link says whether the software
+re-arm loop or the PHY was dead.
 
 The build id `--info` prints is the one to check against the tree that built
 the image: `make -C firmware ch592-print-build-id MRS_TOOLCHAIN=... <the same

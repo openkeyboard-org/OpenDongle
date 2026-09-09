@@ -58,51 +58,33 @@ Six other findings from the same pass alleged defects that the source does not
 have — the dispositions, with the evidence for each, are in the review comments
 on [#3](https://github.com/openkeyboard-org/OpenDongle/pull/3).*
 
-## Defect: the terminal reconnect camp has no time-based liveness backstop
+## Fixed 2026-09-09: the terminal reconnect camp has a liveness watchdog
 
-**Where:** `firmware/common/src/rf_task.c`, `rf_stock_reacquire_giveup()`, the closed
-boot window (`RF_EVT_BOOT_WINDOW`) and the unbonded `RF_EVT_START` camp; the guard
-`rf_arm_retry_if_failed()`.
+**What was wrong.** Every terminal camp (EV10 give-up, closed boot window, unbonded
+start) armed RX once and then leaned on the radio's own events to re-drive it. The
+intended backstop, `rf_arm_retry_if_failed()`, fires only on a non-zero arm status,
+which neither radio library ever returns for the static descriptor, and CH59x
+basic-mode RX has no timeout at all. A lost completion or a deaf PHY left the dongle
+in `waiting for reconnect` until a chip reset (seen once on the bench, 2026-09-04).
 
-**What is wrong.** Every terminal camp ends with no active soft-timer slot and arms
-RX once. From then on the only thing that re-arms the receiver is the radio's own
-30 ms RFIP timeout event (`hal_rf_ch570.c`, `hal_rf_start_rx` translates the
-"camp indefinitely" arm into a 30 ms window whose expiry the sink turns into
-`RF_EVT_RX_RESTART`). The intended backstop, `rf_arm_retry_if_failed()`, fires only
-when the arm status is non-zero -- and on this radio library that never happens:
-the linked `RFIP_SetRx` returns non-zero only for a NULL descriptor or a zero DMA
-address, both impossible for the static descriptor. So one RX arm whose
-completion event is never delivered, or a PHY that stays deaf while the timeout
-loop keeps cycling, leaves the dongle in `waiting for reconnect` until a chip
-reset. Nothing in the main loop checks radio liveness; USB suspend/resume and
-bus reset touch no radio state.
+**Fix.** The camp keeps the boot-window slot, free in every terminal camp, as a 200 ms
+liveness tick (`rf_camp_watchdog_tick`, dispatched through `RF_EVT_BOOT_WINDOW` with the
+window closed, so it costs no delayed-post slot on CH570). A tick that saw an RX-side
+event since the last one (data, CRC error or timeout, from the PHY counters) leaves the
+radio alone. A silent tick re-arms RX from task context under the 0x94 ladder's IRQ
+mask: on CH59x a silent camp is the normal state, so every silent tick re-arms
+preventively (shut + config + RX, ~100 µs per 200 ms); on CH570 the 30 ms camp timeout
+keeps the counter moving, so a silent tick means the loop died and the second in a row
+escalates to shut + vendor re-init + re-arm (rung 2, CH570-validated). The tick
+self-disables outside the exact terminal camp; the burst accept in the radio sink and
+every other boot-window cancel end it. `--rf-poke 3` shuts the radio and leaves it
+deaf as the fault injection; page 1 `camp_wd_rearms` (u16, the page's last free bytes)
+counts the re-arms. Bench: see the release note.
 
-**Evidence.** Structure confirmed by source reading (six independent reviews and
-a disassembly of the linked library, 2026-09-04). A failure of exactly this shape
-was observed once on the bench the same day (a dongle up since 2026-09-02 that
-answered neither keyboard build for >10 min and was cured only by a power cycle)
-but it predates the diagnostic page, so it is not yet characterised. The
-deterministic reconnect failure fixed by the companion OpenController branch (pair-ACK vs the
-keyboard's MR4 window) is a different mechanism and does not depend on this.
-
-**Fix sketch.** Give every terminal camp a slot-backed watchdog (the boot-window
-slot is free there): every ~200 ms compare the PHY event counter with the last
-value; on the first silent period re-arm RX from task context; on the second,
-shut + `hal_rf_init()` + re-arm; keep counting. Post the work as an event from
-the timer callback (callbacks run in TMR IRQ context; the vendor init must not
-run there). A deaf-but-cycling PHY needs a separate policy (e.g. a preventive
-re-init after a long interval with timeouts only). The pair-ACK burst has the
-same hole for a `StartTx` that returns 0 without a `TX_FINISH`; it needs a
-per-TX completion timer, not the `burst_active` flag (which legitimately stays
-set across the 50 ms inter-burst gap). Diagnostics to run first (firmware from the separate RF-diagnostics draft PR): IAP `0x92`
-pages 0, 1 and 4 (`rx_armed`, `rx_timeout` rate, `lle_irqs`, LLE mode) and the
-armed `0x94` ladder (rung 1 re-arm, rung 2 re-init), which tell a dead software
-loop from a deaf PHY in place.
-
-*Found by a multi-lens source analysis with adversarial verification and an
-independent codex review during the bonded-reconnect investigation; the camp
-chain and the inert guard were verified against the linked library's
-disassembly.*
+**Still open.** The pair-ACK burst has the TX-side twin (a `StartTx` that returns 0
+without a `TX_FINISH`), which needs a per-TX completion timer. The CH570 rung-2
+escalation count (`rfd_camp_wd_reinits`) has no page byte left and is debugger-only.
+CH570 is compiled, not bench-verified (no CH570 on this bench).
 
 ## Defect: `IAP_Service()` bounds its reboot fail-safe with a clock that stops in the reconnect camp
 
@@ -628,6 +610,10 @@ the build id for no functional gain, or expands scope beyond the import:
   a USB 2.0 hub in between restores 1 ms polling, and decide whether a larger `bInterval`
   on the boot interfaces is acceptable for the product. Every awake-host power figure in
   the release notes for the camp state was taken in this host's polling regime.
+  Update 2026-09-09 evening: a bench restart (replug) returned the rate to ~3000/s
+  (`wake_usb` 2970/s, camp idle duty 87 %), so the 8 kHz regime was host state that
+  re-enumeration clears, not the topology (the dongle sits on the same USB 2.1 hub
+  before and after). Worth knowing when a camp reading looks 0.4 mA high.
 - **The poll reply ratio moves with code layout on the receive-arm path: pinned (2026-09-09).**
   Interleaved A/B runs of `pollrate_phy.py` put the fixed 1 ms heartbeat at 99.47-99.53 %,
   one exact-deadline build at 99.80-99.83 % and the next (no change on the poll path) at
@@ -645,7 +631,12 @@ the build id for no functional gain, or expands scope beyond the import:
   itself (a `TEXT_PAD` sweep on a noisy afternoon bench could not resolve it; `TEXT_PAD`
   must be even, and the effective shift is N rounded up to the first pinned section's
   alignment, so read `RF_Rx` in the map), so an edit to a radio-path function can still
-  move the functions behind it; and the byte-identity gates
+  move the functions behind it. Re-run on a quiet bench after the pin (2026-09-09, once a
+  bench restart had cleared the host polling storm): plain 99.76-100.26 %, `volatile`
+  99.70-100.05 %, overlapping, where the same perturbation separated by 0.3 % with
+  non-overlapping pairs before the pin (the ratio's absolute value carries a few tenths
+  of a percent of window bookkeeping between the two counters, so only the comparison
+  means anything); and the byte-identity gates
   no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.
