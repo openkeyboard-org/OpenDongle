@@ -213,9 +213,14 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * app expiry posted only at the second's end). The previous read persists
  * across vetoed iterations: every pass since it ran with the timer expired,
  * and an app dispatch in between vetoed that iteration without undoing
- * itself, so more passes only strengthen the argument. An entry the
- * previous read had not reached stays; due now, it arms the 4-tick floor,
- * whose wake's passes dispatch the queued expiry. The table deadline is read
+ * itself, so more passes only strengthen the argument - but a read older
+ * than a quarter of the modulus is not used at all: after half a modulus
+ * of vetoes (12 h) a fresh deadline would alias as past (the review's
+ * long-veto sequence), so such a plan refreshes the read and the next one
+ * retires. An entry the previous read had not reached stays; due now, it
+ * arms the 4-tick floor, whose wake's passes dispatch the queued expiry
+ * (at most two floor wakes: the first plan after the deadline may itself
+ * carry a read from before it). The table deadline is read
  * AFTER the TMOS call, so it is never earlier than TMOS's own (a start
  * delayed by an IRQ tail between the call and the read only makes it later,
  * which is conservative), and the 2-tick "due" window covers the tick the
@@ -226,12 +231,16 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * post-call RTC read is preempted by an IRQ-tail restart of the same bit
  * publishes the older, earlier deadline over the tail's; the entry wakes
  * early, is retired as settled, and the tail's timer expires with no entry,
- * dispatched at a cap wake at the latest. An entry is never dropped
+ * dispatched at a cap wake, or at the one after it when both other tasks'
+ * events are dispatched ahead of it there (the quiet passes' own
+ * triple-expiry residual, which bounds the library's timers the same way:
+ * two caps plus the foreground). An entry is never dropped
  * unretired: the second plan after it became due settles it, whatever
  * vetoes came between. hb_stale_drop counts settled retirements of entries
  * more than 100 ms overdue: a phantom from a start/stop crossing, or a
  * one-shot consumed just before a long idle veto (an EP0 window, an
- * unconfigured port); a nonzero count is a pointer at those, not a defect. */
+ * unconfigured port); a nonzero count is a pointer at those, not a defect
+ * (the overdue age is modular: an entry a whole modulus old reads young). */
 #define PM_RTC_MOD           ((uint32_t)RTC_MAX_COUNT)
 #define PM_DEADLINE_EMPTY    0xFFFFFFFFu            /* never a valid count (< PM_RTC_MOD) */
 #define PM_UNIT_RTC          20u                    /* 625 us */
@@ -324,7 +333,8 @@ static void pm_tmr3_plan(void)
 {
     uint32_t now = pm_rtc_now();
     uint32_t r0 = pm_prev_now;
-    uint8_t  r0_ok = pm_prev_valid;       /* set by the first plan, never cleared */
+    /* Usable only when younger than a quarter modulus: older reads alias. */
+    uint8_t  r0_ok = (uint8_t)(pm_prev_valid && pm_rtc_dist(now, r0) < PM_RTC_MOD / 4u);
     uint32_t best = PM_CAP_RTC;
     uint32_t clear = 0u, stale = 0u;
     uint8_t  hit = 0u;

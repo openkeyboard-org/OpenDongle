@@ -21,7 +21,7 @@ the nearest entry, or at `PM_DEADLINE_CAP_US` (20 ms) when none is nearer, which
 bounds the library's own timers (its 1 s temperature sample, the 120 s calibration).
 An application timer therefore waits at most one TMOS unit of idle-induced wake
 latency (plus the foreground and scheduler passes it always ran behind), a library
-timer at most the cap, and the heartbeat interrupt runs about fifty times a second
+timer at most the cap plus the same passes, and the heartbeat interrupt runs about fifty times a second
 instead of a thousand when no application deadline is nearer than the cap (an
 application timer due sooner arms it sooner; on a live link TMR0 wakes the core
 first and the heartbeat hardly fires at all). `PM_EXACT_DEADLINE=0` restores the fixed 1 ms period
