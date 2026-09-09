@@ -5,7 +5,7 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
-## Power management (CH592, Tier 1): main-loop idle, GPIO park, opt-in clock gates
+## Power management (CH592, Tier 1): main-loop idle, GPIO park, clock gates
 
 The CH592 product build no longer busy-spins its 60 MHz core. `Main_Circulation` now
 idles with a SEVONPEND/WFITOWFE wait under the global mask (the form OpenController
@@ -36,7 +36,7 @@ The radio is never slept, the protocol bytes and timer settings are unchanged (t
 measured poll cadence stays within 1 % of baseline), the flash stays powered, USB
 suspend and remote wake keep working, and the DC-DC is never enabled (the board has no
 inductor). Build knobs (`firmware/ch592/Makefile`, all `-D` flags hashed into the
-build id and named in `CONFIG_TEXT` schema 10): `PM_IDLE` (1), `PM_IDLE_LEVEL`
+build id and named in `CONFIG_TEXT`, schema 12 as of the exact-deadline change): `PM_IDLE` (1), `PM_IDLE_LEVEL`
 (3 = idle in every RF state: 1 = keyboard-absent camp only, 2 = every pairing
 sub-mode + idle), `PM_IDLE_IN_SUSPEND` (1), `PM_GPIO_PARK` (1), `PM_CLK_GATE` (1, see
 below) with `PM_CLK_GATE_MASK` (19958 = 0x4DF6), `PM_USB_DIGIN_OFF` (0),
