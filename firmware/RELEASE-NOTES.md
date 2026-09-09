@@ -5,6 +5,18 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## EP6 OUT stays live after a dropped IAP packet
+
+The vendor HID interface's OUT endpoint was NAKed unconditionally after every OUT
+completion, while only a latched IAP command ever re-ACKed it; a toggle mismatch with
+nothing pending (a retransmission or a bus error) therefore wedged the maintenance
+interface until a power cycle. The handler now re-ACKs when nothing was latched and
+nothing is pending, judging the toggle from the interrupt-status sample it already took;
+a latched command, or a second OUT arriving while one is pending, keeps the flow-control
+NAK that `USB_PollEP6` releases. Not host-reproducible on a conforming stack; verified as
+non-regression on the bench (pipelined writes answered in order, the maintenance flows
+unchanged). Both chips' bytes change; CH570 compiled, not bench-verified.
+
 ## Terminal-camp liveness watchdog
 
 Every terminal camp (EV10 give-up, closed boot window, unbonded start) armed RX once

@@ -6,57 +6,21 @@ validation. Anything here that touches a firmware source, a linker script, or
 `dongle_image_id.py` / `finalize_image.py` changes the compiled build id, so it
 should land together with a re-run of the hardware matrix and re-pinned digests.
 
-## Defect: EP6 OUT can be left NAKed, wedging the vendor HID interface
+## Fixed 2026-09-09: EP6 OUT could be left NAKed, wedging the vendor HID interface
 
-**Where:** `firmware/common/src/usb_device.c`, the `UIS_TOKEN_OUT | 6` case
-(the unconditional NAK immediately after the packet-latching `if`).
-
-**What is wrong.** The handler latches an incoming IAP packet only when both
-conditions hold:
-
-```c
-if ((R8_USB_INT_ST & RB_UIS_TOG_OK) && !iap_pkt_pending) {
-    ...
-    iap_pkt_pending = 1;
-}
-R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;   /* unconditional */
-```
-
-The NAK is outside the guard, but the only place that re-ACKs EP6 OUT is
-`USB_PollEP6()`, which runs its body only when `iap_pkt_pending` is set. So when
-the guard fails — a toggle mismatch (`TOG_OK` clear), or an OUT arriving while a
-previous command is still pending — the packet is dropped, the flag is never
-set, nothing re-ACKs, and **EP6 OUT stays NAKed until the device is power
-cycled.**
-
-**Impact.** The vendor HID maintenance interface stops responding: no
-`--info`, no bond operations, no `--enter-bootloader`. The RF link and the
-keyboard/mouse HID interfaces are unaffected, nothing is corrupted, and a replug
-clears it. It is a wedge, not a brick.
-
-**Reachability.** A conforming host cannot trigger it. The IAP protocol is
-strict request/response, so the host waits for the EP6 IN reply before sending
-the next OUT, which is why the hardware campaign never hit it. It needs a USB
-error causing a toggle mismatch, or a host that pipelines requests.
-
-**Fix sketch.** Re-ACK when nothing was latched, and evaluate the toggle from
-the same interrupt-status sample already taken rather than re-reading the
-register:
-
-- if the packet was latched → leave EP6 OUT NAKed (current, correct behaviour —
-  it is the flow-control that keeps the host from overrunning the deferred
-  command);
-- if it was not latched → restore `UEP_R_RES_ACK` so the endpoint stays live.
-
-**Before merging the fix:** it changes firmware bytes on both chips, so re-run
-the update and maintenance cases on hardware and re-pin the artifact digests.
-Worth adding a regression check that drives two OUTs back-to-back without
-reading the reply in between.
-
-*Found by CodeRabbit during the import review; confirmed by reading the code.
-Six other findings from the same pass alleged defects that the source does not
-have — the dispositions, with the evidence for each, are in the review comments
-on [#3](https://github.com/openkeyboard-org/OpenDongle/pull/3).*
+`USB_IRQHandler`'s EP6 OUT case latched an IAP packet only on `TOG_OK` with nothing
+pending, then NAKed the endpoint unconditionally; the only re-ACK is in `USB_PollEP6()`,
+which runs only when a packet is pending, so a toggle mismatch with nothing pending
+(a retransmission of a packet already taken, or a bus error) left EP6 OUT NAKed until
+a power cycle: no `--info`, no bond operations, no `--enter-bootloader`. The case now
+judges the toggle from the interrupt-status sample already taken and re-ACKs when
+nothing was latched and nothing is pending; a latched packet, or a second OUT landing
+while one is pending (a pipelining host), keeps the NAK the poll re-ACKs. A conforming
+host cannot reach the wedge (the protocol is strict request/response, and the toggle
+mismatch needs a bus error or a host-side toggle reset the HID stack does not expose),
+so the bench check is the fix's non-regression: pipelined writes and the normal
+maintenance flows. Both chips' bytes change; the CH570 image is compiled, not
+bench-verified.
 
 ## Fixed 2026-09-09: the terminal reconnect camp has a liveness watchdog
 

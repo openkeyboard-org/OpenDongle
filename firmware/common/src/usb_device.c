@@ -690,13 +690,28 @@ void USB_IRQHandler(void)
              * running them here would starve the ~1 Hz RF EV10 supervision and
              * drop the keyboard link. One slot suffices — IAP is strict
              * request/response, so the host waits for our EP6-IN reply. */
-            if ((R8_USB_INT_ST & RB_UIS_TOG_OK) && !iap_pkt_pending) {
+            if ((raw_st & RB_UIS_TOG_OK) && !iap_pkt_pending) {
                 uint8_t rx_len = R8_USB_RX_LEN;
                 if (rx_len > 64u) rx_len = 64u;
                 iap_pkt_len = rx_len;
                 iap_pkt_pending = 1;
+                /* Latched: NAK until USB_PollEP6 has run it and re-ACKs. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+            } else if (iap_pkt_pending) {
+                /* A second OUT landed before the NAK above took effect while a
+                 * command is still pending (a host that pipelines requests):
+                 * dropped, and the NAK stays until the poll re-ACKs. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
+            } else {
+                /* Toggle mismatch with nothing pending (a retransmission of a
+                 * packet already taken, or a bus error): the packet is dropped
+                 * and the endpoint must stay live. Before this branch the
+                 * unconditional NAK below left EP6 OUT NAKed with nothing to
+                 * re-ACK it, so the vendor interface was wedged until a power
+                 * cycle (TODO defect). The toggle is judged from the same
+                 * status sample as the token, not a re-read. */
+                R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
             }
-            R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             break;
 
         default:
