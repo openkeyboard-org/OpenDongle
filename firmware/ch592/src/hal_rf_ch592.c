@@ -152,41 +152,49 @@ void hal_rf_shut(void)
 __HIGH_CODE
 void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 {
+    hal_rf_event_t ev;
+    uint8_t len = 0u;
+
     if (rxBuf) {
         rf_last_rx_frame = rxBuf;
     }
-    if (rf_event_cb == 0) {
-        return;
-    }
+    /* Diagnostic accounting first, for every event, whether or not a sink
+     * is registered (a status event during callback setup or teardown must
+     * still count and still end the armed-RX latch: CodeRabbit review). */
     switch (sta) {
     case RX_MODE_RX_DATA:
         rf_diag.rx_armed = 0u;
         if (rsr == 0) {
             rf_diag.rx_done++;
-            rf_event_cb(HAL_RF_EV_RX_DONE, rxBuf, rxBuf ? rxBuf[1] : 0u);
+            ev = HAL_RF_EV_RX_DONE;
+            len = rxBuf ? rxBuf[1] : 0u;
         } else {
             rf_diag.rx_crcerr++;
-            rf_event_cb(HAL_RF_EV_RX_CRCERR, rxBuf, 0u);
+            ev = HAL_RF_EV_RX_CRCERR;
         }
         break;
     case TX_MODE_TX_FINISH:
         rf_diag.tx_done++;
-        rf_event_cb(HAL_RF_EV_TX_DONE, rxBuf, 0u);
+        ev = HAL_RF_EV_TX_DONE;
         break;
     case TX_MODE_TX_FAIL:
-        RF_DIAG_INC(tx_fail);
-        rf_event_cb(HAL_RF_EV_TX_FAIL, rxBuf, 0u);
+        rf_diag.tx_fail++;
+        ev = HAL_RF_EV_TX_FAIL;
         break;
     default:
-        rf_diag.rx_timeout++;
-        rf_diag.rx_armed = 0u;          /* the timeout-shaped event ends the arm too */
         /* Auto-mode states this basic-mode firmware never arms. The legacy
          * callback's switch default posted a defensive RX restart for them;
          * forward as RX_TIMEOUT (CH59x has no real RX-timeout state, so the
          * slot is free) and the sink replicates the legacy default. */
-        rf_event_cb(HAL_RF_EV_RX_TIMEOUT, rxBuf, 0u);
+        rf_diag.rx_timeout++;
+        rf_diag.rx_armed = 0u;          /* the timeout-shaped event ends the arm too */
+        ev = HAL_RF_EV_RX_TIMEOUT;
         break;
     }
+    if (rf_event_cb == 0) {
+        return;
+    }
+    rf_event_cb(ev, rxBuf, len);
 }
 
 /* IAP 0x92 PHY diagnostics (page 1): the counters above. The radio-internal
