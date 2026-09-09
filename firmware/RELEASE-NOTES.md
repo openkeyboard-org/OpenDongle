@@ -5,7 +5,7 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
-## Power management (CH592, Tier 1): main-loop idle, GPIO park, opt-in clock gates
+## Power management (CH592, Tier 1): main-loop idle, GPIO park, clock gates
 
 The CH592 product build no longer busy-spins its 60 MHz core. `Main_Circulation` now
 idles with a SEVONPEND/WFITOWFE wait under the global mask (the form OpenController
@@ -36,9 +36,9 @@ The radio is never slept, the protocol bytes and timer settings are unchanged (t
 measured poll cadence stays within 1 % of baseline), the flash stays powered, USB
 suspend and remote wake keep working, and the DC-DC is never enabled (the board has no
 inductor). Build knobs (`firmware/ch592/Makefile`, all `-D` flags hashed into the
-build id and named in `CONFIG_TEXT` schema 10): `PM_IDLE` (1), `PM_IDLE_LEVEL`
+build id and named in `CONFIG_TEXT`, schema 12 as of the exact-deadline change): `PM_IDLE` (1), `PM_IDLE_LEVEL`
 (3 = idle in every RF state: 1 = keyboard-absent camp only, 2 = every pairing
-sub-mode + idle), `PM_IDLE_IN_SUSPEND` (1), `PM_GPIO_PARK` (1), `PM_CLK_GATE` (0, see
+sub-mode + idle), `PM_IDLE_IN_SUSPEND` (1), `PM_GPIO_PARK` (1), `PM_CLK_GATE` (1, see
 below) with `PM_CLK_GATE_MASK` (19958 = 0x4DF6), `PM_USB_DIGIN_OFF` (0),
 `PM_HEARTBEAT_US` (1000), `PM_EP0_QUIET_MS` (200). Building with the six switches at
 zero (`PM_IDLE=0 PM_IDLE_LEVEL=0 PM_IDLE_IN_SUSPEND=0 PM_GPIO_PARK=0
@@ -53,7 +53,7 @@ Bench ladder, 2026-09-06, WeAct CH592F devboard, meter inline on the probe's 3V3
 every rung compared against a same-day all-off baseline because the bench had
 shifted 0.75 mA overnight:
 
-| Scenario | all-off baseline | plumbing (level 0) | + GPIO park | idle level 1 | idle level 3 (shipped) | + clock gates (opt-in) |
+| Scenario | all-off baseline | plumbing (level 0) | + GPIO park | idle level 1 | idle level 3 | + clock gates (shipped) |
 |---|---:|---:|---:|---:|---:|---:|
 | Connected, idle | 13.26 | 13.55 | 13.03 | 13.16 | **10.87 (-18%)** | 10.62 |
 | Connected, ~9 keystrokes/s | = idle | | | | 10.93 | |
@@ -84,13 +84,20 @@ Findings folded in during validation:
 - The three OS-polled HID IN endpoints (1 ms interval) wake the core ~3000/s while the
   host is awake (NAKed IN tokens pulse the USB IRQ), capping awake idle duty near 86 %
   in the camp and ~38 % on a live link; gone during suspend.
-- Clock gating (`PWR_PeriphClkCfg(DISABLE, 0x4DF6)`) saves a further ~0.25 mA but a
-  morning A/B showed the receive-restart cadence 1.6 % lower with the gates on
-  (1121 vs 1139 per second, zero lapses); an afternoon bisect could not name a single
-  block (the RF environment added ±3-8 % dips to gated and ungated builds alike), but
-  the medians still separate: ~1136/s ungated against 1111-1123/s for every gated set
-  except UART-only. It ships opt-in (`PM_CLK_GATE=1`) with the mask knob for the
-  follow-up.
+- Clock gating (`PWR_PeriphClkCfg(DISABLE, 0x4DF6)`: TMR1/2, UART0-3, SPI0, PWMX, I2C,
+  LCD) saves a further ~0.25 mA in every state and ships on by default (`PM_CLK_GATE=1`,
+  mask knob `PM_CLK_GATE_MASK`). It first shipped opt-in because a morning A/B on the
+  absolute receive-restart rate read 1.6 % lower with the gates on and an afternoon
+  bisect could not name a block. Re-measured 2026-09-09 with the page-1 reply-ratio
+  oracle (replies received over the keyboard's replies sent, 30 s runs, interleaved
+  flashes): the gates cost about 0.2 % of poll replies, not 1.6 % (the old oracle
+  counted the downlink's own loss too, which is the likely rest), and the same binary
+  with an empty mask reads like the ungated one, so the register write, not code
+  layout, carries it; each half of the mask (TMR1/2 + UARTs, and SPI0/PWMX/I2C/LCD)
+  carries about 0.15 % on its own, so no single block explains it. The mechanism is
+  not established; a supply effect of the gated current is the guess. A missed reply costs the
+  keyboard one 875 us poll of latency on that report; the 0.25 mA is 2.3 % of the
+  connected draw. `PM_CLK_GATE=0` restores the ungated image.
 - On this Mac the CH592 OpenBoot USB bootloader attaches but never binds as an HID
   device, so `opendongle --enter-bootloader` + `openboot flash` cannot update the
   CH592 dongle from macOS; every rung was flashed over SWD (`make ch592-factory-flash
