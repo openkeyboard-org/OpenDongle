@@ -218,11 +218,15 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * of vetoes (12 h) a fresh deadline would alias as past. The age is NOT
  * measured on the RTC, which would alias again after every whole modulus
  * (the review's wrap sequence): it is bounded by the TMR3 fire count.
- * TMR3 fires at most one cap apart whether or not sleeps are admitted
- * (every arm is at most the cap, the ISR falls back to the cap), so fewer
- * than (M/4)/cap fires since the previous plan prove it is younger than a
- * quarter modulus in true time, and the modular distances are then exact.
- * A plan with an older read refreshes it; the next plan retires. An entry
+ * TMR3 fires at most one cap plus the ISR's service latency apart whether
+ * or not sleeps are admitted (every arm is at most the cap; the ISR's
+ * fallback write restarts the count at the cap; TMR3 is never stopped),
+ * so fewer than (M/8)/cap fires since the previous plan prove it younger
+ * than a quarter modulus in true time with a twofold margin, and the
+ * modular distances are then exact. The ISR itself withdraws a read that
+ * reaches the limit, so a lap of the 32-bit fire count (2.7 years at the
+ * cap rate) cannot make it look fresh again. A plan with an older read
+ * refreshes it; the next plan retires. An entry
  * the previous read had not reached stays; due now, it arms the 4-tick
  * floor, whose wake's passes dispatch the queued expiry (two floor wakes
  * at most while plans keep being admitted: the first plan after the
@@ -243,7 +247,10 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * triple-expiry residual, which bounds the library's timers the same way:
  * two caps plus the foreground). An entry is never dropped
  * unretired: the second of any two admitted plans less than a quarter
- * modulus apart after it became due settles it. hb_stale_drop counts settled retirements of entries
+ * modulus apart after it became due settles it, unless a veto longer than
+ * half a modulus has meanwhile made it read as a future deadline, which
+ * costs nothing (cap arms, the same as no entry) until the counter comes
+ * round to it. hb_stale_drop counts settled retirements of entries
  * more than 100 ms overdue: a phantom from a start/stop crossing, or a
  * one-shot consumed just before a long idle veto (an EP0 window, an
  * unconfigured port); a nonzero count is a pointer at those, not a defect
@@ -256,7 +263,7 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
 #define PM_STALE_RTC         3200u                  /* 100 ms overdue with no dispatch: phantom */
 #define PM_CAP_RTC           ((uint32_t)DONGLE_PM_DEADLINE_CAP_US * 32u / 1000u)   /* us -> ticks at 32000 Hz */
 #define PM_TMR3_PER_RTC      1875u                  /* 60e6 / 32000, exact */
-#define PM_R0_MAX_FIRES      ((PM_RTC_MOD / 4u) / PM_CAP_RTC)   /* TMR3 fires that prove an age below M/4 */
+#define PM_R0_MAX_FIRES      ((PM_RTC_MOD / 8u) / PM_CAP_RTC)   /* TMR3 fires that prove an age below M/4 (twofold margin) */
 #if RTC_MAX_COUNT != 0xA8C00000
 #error "pm_ch592.c assumes the CH59x RTC modulus 0xA8C00000 (RTC_MAX_COUNT)"
 #endif
@@ -325,8 +332,8 @@ static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired more 
 static uint32_t pm_plan_seen[16];       /* the value the plan saw in a to-clear entry */
 static uint8_t  pm_plan_hit;
 static uint32_t pm_prev_now;            /* the previous plan's RTC read (task context only) */
-static uint32_t pm_prev_hb;             /* ... the TMR3 fire count at that read (its non-modular age) */
-static uint8_t  pm_prev_valid;          /* ... and whether a plan has run at all */
+static volatile uint32_t pm_prev_hb;    /* ... the TMR3 fire count at that read (its non-modular age) */
+static volatile uint8_t  pm_prev_valid; /* ... and whether it is usable: set by the plan, withdrawn by the TMR3 ISR at the age limit */
 
 /* Had the RTC reached `deadline` at the previous plan's read? Then every
  * pass since (this iteration's three) ran with the timer expired, and none
@@ -719,6 +726,10 @@ void TMR3_IRQHandler(void)
      * bus). Writing CNT_END restarts the count; the next admitted sleep
      * re-arms precisely anyway (codex design review). */
     R32_TMR3_CNT_END = PM_CAP_RTC * PM_TMR3_PER_RTC;
+    /* The previous plan's read ages by fires (header): at the limit it is
+     * withdrawn here, not only tested at the next plan, so a lap of the
+     * fire count during a very long veto cannot make it look fresh again. */
+    if (pm_prev_valid && (uint32_t)(pm_hb_irqs - pm_prev_hb) >= PM_R0_MAX_FIRES) pm_prev_valid = 0u;
 #endif
 }
 
