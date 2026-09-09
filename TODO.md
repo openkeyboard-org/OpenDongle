@@ -624,6 +624,16 @@ the build id for no functional gain, or expands scope beyond the import:
   a USB 2.0 hub in between restores 1 ms polling, and decide whether a larger `bInterval`
   on the boot interfaces is acceptable for the product. Every awake-host power figure in
   the release notes for the camp state was taken in this host's polling regime.
+- **The poll reply ratio moves with code layout on the receive-arm path (2026-09-09).**
+  Interleaved A/B runs of `pollrate_phy.py` (dongle page-1 `rx_done` over the controller's
+  valid-poll count, 30 s each) put the fixed 1 ms heartbeat at 99.47-99.53 %, one
+  exact-deadline build at 99.80-99.83 % and the next (same rule, one extra conditional
+  pass, no change on the poll path) at 99.51-99.52 %; declaring the CH592 `rf_diag`
+  block `volatile`, which only reorders two stores, gave 99.22-99.35 %. The receive arm
+  after a TX completion has no slack, so where the flash fetches of `hal_rf_ch592.c` land
+  matters at the 0.3 % level. Any change near that path needs the interleaved A/B, not a
+  single run, and a byte-identical fixed-mode gate does not cover it. Candidate fix:
+  place the CH592 RF seam's hot functions in RAM (`__HIGH_CODE`) and re-measure.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
   the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
   remote-wake latency contract first.

@@ -211,7 +211,7 @@ pub const PAGE5_NAMES: [&str; 14] = [
 /// heartbeat mode (page 5 flag 0x80), how many sleeps armed TMR3 to an app timer's
 /// deadline versus to the cap; both stay 0 in the fixed-period mode. Page 5 [59] is
 /// the idle level in its low nibble and, in that mode, a saturating count of
-/// deadline-table entries dropped as stuck (`hb_stale_drop`) in its high nibble:
+/// deadline-table entries retired more than 100 ms overdue (`hb_stale_drop`) in its high nibble:
 /// any nonzero value is a finding.
 ///
 /// `veto_entry` counts a post that landed after the previous masked idle

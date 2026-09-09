@@ -204,22 +204,34 @@ static volatile uint32_t pm_quiet_passes, pm_stale_adc;
  * ordinary pass and both quiet passes dispatched nothing (we would not be
  * planning otherwise), no timer for that bit is still pending in TMOS: its
  * expiry was posted and dispatched before this iteration, or the entry is a
- * phantom. Either way it is retired. An entry the previous read had not
- * reached (or with no previous plan: a call that returned early leaves
- * pm_prev_valid clear) stays; due now, it arms the 4-tick floor, whose
- * wake's passes dispatch the queued expiry. The table deadline is read
+ * phantom. Either way it is retired. HAL and library dispatches do not set
+ * the app latch, so before applying a retirement pm_idle_try runs ONE more
+ * pass: with three tasks and one dispatch per pass, an expiry posted at the
+ * first poll of the iteration is dispatched by the fourth pass even behind
+ * both other tasks (the review's split-posting sequence: calibration and
+ * temperature sample dispatched in the ordinary and first quiet pass, the
+ * app expiry posted only at the second's end). The previous read persists
+ * across vetoed iterations: every pass since it ran with the timer expired,
+ * and an app dispatch in between vetoed that iteration without undoing
+ * itself, so more passes only strengthen the argument. An entry the
+ * previous read had not reached stays; due now, it arms the 4-tick floor,
+ * whose wake's passes dispatch the queued expiry. The table deadline is read
  * AFTER the TMOS call, so it is never earlier than TMOS's own (a start
  * delayed by an IRQ tail between the call and the read only makes it later,
  * which is conservative), and the 2-tick "due" window covers the tick the
  * call may straddle. Same-bit immediate posts are irrelevant to the rule,
  * and so is the RTC wrap: after a long veto an entry reads as a future
  * deadline and costs cap-bounded arms until the counter reaches it.
- * Residual: expiries of all three tasks posted at the same pass end leave
- * the app's queued for one cap-bounded sleep, the scheduler-shape residual
- * of the quiet passes themselves. An entry overdue by more than 100 ms that
- * the rule has not retired cannot occur (two consecutive plans see it), so
- * the guard that drops and counts such an entry (hb_stale_drop) is the alarm
- * for the assumptions above, not a working part. */
+ * Residual (cap-bounded, once, self-healing): a task-context start whose
+ * post-call RTC read is preempted by an IRQ-tail restart of the same bit
+ * publishes the older, earlier deadline over the tail's; the entry wakes
+ * early, is retired as settled, and the tail's timer expires with no entry,
+ * dispatched at a cap wake at the latest. An entry is never dropped
+ * unretired: the second plan after it became due settles it, whatever
+ * vetoes came between. hb_stale_drop counts settled retirements of entries
+ * more than 100 ms overdue: a phantom from a start/stop crossing, or a
+ * one-shot consumed just before a long idle veto (an EP0 window, an
+ * unconfigured port); a nonzero count is a pointer at those, not a defect. */
 #define PM_RTC_MOD           ((uint32_t)RTC_MAX_COUNT)
 #define PM_DEADLINE_EMPTY    0xFFFFFFFFu            /* never a valid count (< PM_RTC_MOD) */
 #define PM_UNIT_RTC          20u                    /* 625 us */
@@ -292,7 +304,7 @@ void pm_tmos_stop(uint8_t task, uint16_t bit)
  * saw, so a fresh deadline written by the sink in between is never erased. */
 static uint32_t pm_plan_best;           /* ticks to arm, PM_DEADLINE_MIN_RTC..cap */
 static uint32_t pm_plan_clear;          /* bit i: retire entry i if unchanged */
-static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired as stuck, not consumed */
+static uint32_t pm_plan_stale;          /* subset of pm_plan_clear retired more than 100 ms overdue */
 static uint32_t pm_plan_seen[16];       /* the value the plan saw in a to-clear entry */
 static uint8_t  pm_plan_hit;
 static uint32_t pm_prev_now;            /* the previous plan's RTC read (task context only) */
@@ -308,10 +320,11 @@ static inline uint8_t pm_settled(uint32_t deadline, uint32_t r0)
 }
 
 __HIGH_CODE
-static void pm_tmr3_plan(uint8_t r0_ok)
+static void pm_tmr3_plan(void)
 {
     uint32_t now = pm_rtc_now();
     uint32_t r0 = pm_prev_now;
+    uint8_t  r0_ok = pm_prev_valid;       /* set by the first plan, never cleared */
     uint32_t best = PM_CAP_RTC;
     uint32_t clear = 0u, stale = 0u;
     uint8_t  hit = 0u;
@@ -325,10 +338,7 @@ static void pm_tmr3_plan(uint8_t r0_ok)
             uint32_t overdue = PM_RTC_MOD - dist;
             if (r0_ok && pm_settled(d, r0)) {            /* expired before the previous plan: consumed or phantom */
                 clear |= 1u << i; pm_plan_seen[i] = d;
-                continue;
-            }
-            if (overdue > PM_STALE_RTC) {                 /* cannot happen (see the header): the alarm */
-                clear |= 1u << i; stale |= 1u << i; pm_plan_seen[i] = d;
+                if (overdue > PM_STALE_RTC) stale |= 1u << i;   /* phantom, or a one-shot before a long veto */
                 continue;
             }
             cand = PM_DEADLINE_MIN_RTC;                   /* awaiting its dispatch: one short wake */
@@ -569,10 +579,6 @@ void pm_idle_try(uint8_t entry_work)
 {
     uint32_t irq, t0;
     uint8_t usb, v, n;
-#if DONGLE_PM_EXACT_DEADLINE
-    uint8_t r0_ok = pm_prev_valid;      /* the previous call reached the plan; only the plan sets it */
-    pm_prev_valid = 0u;
-#endif
 
     if (PM_POST_PENDING() || dongle_pm_ran) {
         pm_veto_work++;
@@ -619,7 +625,18 @@ void pm_idle_try(uint8_t entry_work)
         return;
     }
 #if DONGLE_PM_EXACT_DEADLINE
-    pm_tmr3_plan(r0_ok);                                /* unmasked: the RTC read and the scan */
+    pm_tmr3_plan();                                     /* unmasked: the RTC read and the scan */
+    if (pm_plan_clear != 0u) {
+        /* A retirement is proposed: one more pass, so an expiry posted at
+         * this iteration's first poll is dispatched even behind the HAL and
+         * library tasks, whose dispatches the latch does not see (header). */
+        TMOS_SystemProcess();
+        pm_quiet_passes++;
+        if (PM_POST_PENDING() || dongle_pm_ran) {
+            pm_veto_work++;
+            return;
+        }
+    }
 #endif
 
     irq = __risc_v_disable_irq();                       /* csrrc 0x800, 0x88 */
