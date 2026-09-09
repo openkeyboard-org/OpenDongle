@@ -20,7 +20,9 @@ bounds the library's own timers (its 1 s temperature sample, the 120 s calibrati
 An application timer therefore waits at most one TMOS unit of idle-induced wake
 latency (plus the foreground and scheduler passes it always ran behind), a library
 timer at most the cap, and the heartbeat interrupt runs about fifty times a second
-instead of a thousand. `PM_EXACT_DEADLINE=0` restores the fixed 1 ms period
+instead of a thousand when no application deadline is nearer than the cap (an
+application timer due sooner arms it sooner; on a live link TMR0 wakes the core
+first and the heartbeat hardly fires at all). `PM_EXACT_DEADLINE=0` restores the fixed 1 ms period
 (`PM_HEARTBEAT_US`) byte for byte. Measured back to back on the devboard (inline
 meter on the probe rail, same hour, 60 s averages): keyboard absent with the host
 asleep, the overnight state, 9.910 -> 9.773 mA (-0.14 mA, the heartbeat ran at

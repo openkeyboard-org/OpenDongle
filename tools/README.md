@@ -141,7 +141,9 @@ shows as `wake_both` advancing with `wake_radio` flat. In the exact-deadline hea
 mode (page 5 flag `exact_deadline`, whose `deadline_cap_us` replaces `heartbeat_us`)
 page 6 also carries `hb_arm_deadline` / `hb_arm_cap`, how many sleeps armed TMR3 to an
 application timer's deadline versus to the cap; `hb_irqs` then runs at tens a second
-rather than a thousand. The page 6 remote-wake
+rather than a thousand when no application deadline is nearer than the cap (a nearer
+deadline arms the timer sooner, and on a live link TMR0 wakes the core before it
+fires). The page 6 remote-wake
 arm count is 16 bits on both sides and its rate wraps accordingly.
 
 Exit codes:

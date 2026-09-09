@@ -91,11 +91,14 @@ extern volatile uint8_t dongle_pm_ran;
 #define hal_event_post(bits)  (__atomic_store_n(&dongle_pm_post, 1u, __ATOMIC_RELAXED), tmos_set_event(rf_taskID, (bits)))
 #if DONGLE_PM_EXACT_DEADLINE
 /* Exact-deadline heartbeat (pm_ch592.c): every app-task TMOS timer start and
- * stop goes through pm_tmos_start / pm_tmos_stop, which mask interrupts
- * around the TMOS call AND the deadline-table write so the table always
- * matches TMOS (the IRQ-tail sink preempts task context); RF_ProcessEvent
- * reports the dispatched bits so due entries retire on evidence. The macros
- * expand where rf_taskID is in scope (rf_task.c), hence the task argument. */
+ * stop goes through pm_tmos_start / pm_tmos_stop, which pair the TMOS call
+ * with the deadline-table write in a fixed ORDER (start: TMOS first, publish
+ * only on success; stop: table first) rather than under a mask, so a
+ * same-bit start and stop crossing between task context and the IRQ-tail
+ * sink leaves the table consistent or holding a harmless phantom, never a
+ * masked library call on the poll path; RF_ProcessEvent reports the
+ * dispatched bits so due entries retire on evidence. The macros expand where
+ * rf_taskID is in scope (rf_task.c), hence the task argument. */
 void pm_tmos_start(uint8_t task, uint16_t bit, uint32_t units);
 void pm_tmos_stop(uint8_t task, uint16_t bit);
 void pm_deadline_dispatched(uint16_t events);

@@ -129,6 +129,7 @@ uint8_t hal_rf_start_tx(uint8_t channel, uint32_t access_addr,
     }
     rc = RF_Tx((uint8_t *)buf, len, 0xFF, 0xFF);
     RF_DIAG_INC(tx_start);
+    rf_diag.rx_armed = 0u;          /* a TX start ends any armed RX (hal_rf.h contract) */
     rf_diag.last_tx_rc = rc;
     if (rc != 0u) RF_DIAG_INC(tx_fail);
     return rc;
@@ -178,6 +179,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
         break;
     default:
         rf_diag.rx_timeout++;
+        rf_diag.rx_armed = 0u;          /* the timeout-shaped event ends the arm too */
         /* Auto-mode states this basic-mode firmware never arms. The legacy
          * callback's switch default posted a defensive RX restart for them;
          * forward as RX_TIMEOUT (CH59x has no real RX-timeout state, so the
