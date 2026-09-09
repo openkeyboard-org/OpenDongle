@@ -75,7 +75,8 @@ radio alone. A silent tick re-arms RX from task context under the 0x94 ladder's 
 mask: on CH59x a silent camp is the normal state, so every silent tick re-arms
 preventively (shut + config + RX, ~100 µs per 200 ms); on CH570 the 30 ms camp timeout
 keeps the counter moving, so a silent tick means the loop died and the second in a row
-escalates to shut + vendor re-init + re-arm (rung 2, CH570-validated). The tick
+escalates to shut + vendor re-init + re-arm (rung 2 of the 0x94 ladder's code path, not
+bench-verified on CH570 here). The tick
 self-disables outside the exact terminal camp; the burst accept in the radio sink and
 every other boot-window cancel end it. A restart that lands in a terminal camp without
 the tick (the bond-clear tombstone paths) starts it from the `RF_EVT_RX_RESTART` handler,

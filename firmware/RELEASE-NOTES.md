@@ -16,8 +16,8 @@ slot, free in every terminal camp, as a 200 ms liveness tick. A tick that saw an
 RX-side event since the last one leaves the radio alone; a silent tick re-arms RX
 from task context (CH59x: every silent tick, since a silent camp is the normal state
 there; CH570: the 30 ms camp timeout keeps the counter moving, so a silent tick is a
-dead loop and the second in a row escalates to shut + vendor re-init + re-arm, the
-bench-validated rung 2). The tick self-disables outside the exact terminal camp, and a
+dead loop and the second in a row escalates to shut + vendor re-init + re-arm, rung 2
+of the 0x94 ladder's code path, not bench-verified on CH570 here). The tick self-disables outside the exact terminal camp, and a
 restart that lands in a terminal camp without it (the bond-clear tombstone paths) starts
 it. The same pass fixed the latent CH570 persist ordering (TODO): the record is validated
 before the radio is torn down, not after.

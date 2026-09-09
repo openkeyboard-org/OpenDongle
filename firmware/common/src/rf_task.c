@@ -628,8 +628,9 @@ static uint32_t rf_bond_default_aa = RF_DEFAULT_ACCESS_ADDR;
  * re-arms preventively (shut + config + RX, ~100 us of a 200 ms period);
  * on CH570 the 30 ms camp timeout keeps the counter moving, so a silent
  * tick means the loop died, and the second in a row escalates to shut +
- * vendor re-init + re-arm (rung 2 of the ladder, CH570-validated; a second
- * RF_RoleInit is not validated on the TMOS radio and is not attempted).
+ * vendor re-init + re-arm (rung 2 of the 0x94 ladder, the same code path,
+ * instrumented on CH570 but not bench-verified here; a second RF_RoleInit is
+ * not validated on the TMOS radio and is not attempted).
  * The tick self-disables outside the exact terminal camp, and the burst
  * accept in the radio sink cancels the slot along with the boot window.
  * Bounds: a lost completion is re-armed within two ticks (the tick after
