@@ -77,7 +77,9 @@ preventively (shut + config + RX, ~100 µs per 200 ms); on CH570 the 30 ms camp 
 keeps the counter moving, so a silent tick means the loop died and the second in a row
 escalates to shut + vendor re-init + re-arm (rung 2, CH570-validated). The tick
 self-disables outside the exact terminal camp; the burst accept in the radio sink and
-every other boot-window cancel end it. `--rf-poke 3` shuts the radio and leaves it
+every other boot-window cancel end it. A restart that lands in a terminal camp without
+the tick (the bond-clear tombstone paths) starts it from the `RF_EVT_RX_RESTART` handler,
+so no camp depends on its entry site remembering to. `--rf-poke 3` shuts the radio and leaves it
 deaf as the fault injection; page 1 `camp_wd_rearms` (u16, the page's last free bytes)
 counts the re-arms. Bench: see the release note.
 
@@ -326,60 +328,15 @@ hardware matrix and re-pin the digests.
 *Filed by CodeRabbit with the wrong mechanism and the wrong remedy; the real
 route was found by adversarial review and then reproduced independently.*
 
-## Defect: an invalid bond record can leave the CH570 radio shut down
+## Fixed 2026-09-09: an invalid bond record could leave the CH570 radio shut down
 
-**Where:** `firmware/common/src/rf_task.c`, the bond-persist path — the
-`#if !RF_TASK_EXECUTOR_TMOS` teardown block sits *above* the
-`bond_record_semantic_valid()` check that can return early.
-
-**What is wrong.** On the not-currently-connected path the block cancels all
-four timer slots (`PAIR_ACK`, `EV10_REKEY`, `BOOT_WINDOW`, `CONNECTED_POLL`) and
-calls `hal_rf_shut()`. Only *after* that does the record get validated:
-
-```c
-#if !RF_TASK_EXECUTOR_TMOS
-    if (!was_connected) {
-        hal_timer_cancel(...);      /* all four slots */
-        hal_rf_shut();
-    }
-#endif
-    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
-        return;                      /* radio still shut, timers still cancelled */
-    }
-    /* hal_rf_init(), rf_state = RF_STATE_PAIRING, rf_start_rx(),
-       rf_arm_retry_if_failed() all live BELOW this point */
-```
-
-The restoring half never runs. The dongle is left with the radio powered down,
-no timers, no re-camp and no re-arm driver — **deaf until replug or reset**.
-`rf_bond_persist_pending` was cleared earlier, so nothing retries. This directly
-contradicts the comment a few lines below it, which promises that leaving
-`rf_bond_persisted = 0` "keeps the session usable this boot".
-
-**Scope: CH570 only.** The block is inside `#if !RF_TASK_EXECUTOR_TMOS`, and the
-macro is 0 in `ch570/src/dongle_target.h` and 1 in `ch592/src/dongle_target.h`,
-so the code does not exist in the CH592 build.
-
-**Reachability: currently none — this is latent.** `want` is built by
-`rf_commit_bond_ram()` from values that cannot fail the check today: the session
-AA comes from `rf_generate_session_aa()` (never 0, `0xFFFFFFFF`, or the pair AA),
-the interval and timeout come from our own compiled pair-ACK template, and the
-peer MAC has already been screened by `rf_accept_peer_mac()` against exactly the
-zero / all-FF / own-MAC cases `bond_record_semantic_valid()` rejects. The check
-is defence in depth that should not fire. The ordering is still wrong, and the
-consequence if it ever does fire is severe enough that it should not stay wrong.
-
-**Fix sketch.** Hoist the `bond_record_semantic_valid()` check above the
-`#if !RF_TASK_EXECUTOR_TMOS` teardown so an invalid record returns before any
-radio state changes. The sibling `if (save_rc != 0) return;` is already correctly
-placed after the restore, so this is the only site with the problem.
-
-**Before merging the fix:** it changes CH570 firmware bytes, so re-run the
-hardware matrix and re-pin the digests.
-
-*Found by CodeRabbit during the import review; the ordering was confirmed by
-reading the code, and the reachability analysis is what downgraded it from
-"bricks the radio" to "latent".*
+The bond-persist path's `#if !RF_TASK_EXECUTOR_TMOS` teardown (cancel all four timer
+slots, `hal_rf_shut()`) ran before `bond_record_semantic_valid()`, whose early return
+then left the radio shut with no timer and no re-arm driver, deaf until a reset. Latent
+(the producer cannot build a record the check rejects today), CH570 only. The check is
+now hoisted above the teardown, as the entry's fix sketch said, so an invalid record
+returns before any radio state changes; found again by the codex pass on the camp
+watchdog, which the teardown also cancelled.
 
 ## Follow-up: bench case for the mouse/consumer suspend replay fix (needs a controller harness)
 

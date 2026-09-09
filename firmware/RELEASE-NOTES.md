@@ -17,7 +17,10 @@ RX-side event since the last one leaves the radio alone; a silent tick re-arms R
 from task context (CH59x: every silent tick, since a silent camp is the normal state
 there; CH570: the 30 ms camp timeout keeps the counter moving, so a silent tick is a
 dead loop and the second in a row escalates to shut + vendor re-init + re-arm, the
-bench-validated rung 2). The tick self-disables outside the exact terminal camp.
+bench-validated rung 2). The tick self-disables outside the exact terminal camp, and a
+restart that lands in a terminal camp without it (the bond-clear tombstone paths) starts
+it. The same pass fixed the latent CH570 persist ordering (TODO): the record is validated
+before the radio is torn down, not after.
 `opendongle --rf-poke 3` is the fault injection (shut the radio, leave it deaf) and
 page 1 `camp_wd_rearms` counts the re-arms. Bench (CH592, 4AB7E07F): 5.0 re-arms/s in
 the silent keyboard-absent camp; five rung-3 fault injections each read `rx_armed`

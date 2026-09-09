@@ -2557,6 +2557,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * re-drive us never fires, so reschedule ourselves off the guard. */
         rf_arm_retry_if_failed();
         rfd_rx_restart_handled++;
+        /* A restart that lands in a terminal camp without the liveness tick
+         * (the bond-clear tombstone paths reach their camp this way, with no
+         * timer left) starts it here, so no camp depends on its entry site
+         * remembering to (codex). One compare on the connected path. */
+        if (rf_state == RF_STATE_PAIRING && !rf_camp_wd_active && rf_camp_is_terminal()) {
+            rf_camp_watchdog_arm();
+        }
 #if RF_CONFIRM_BEFORE_PERSIST
         /* Only NOW (after a SUCCESSFUL post-confirm arm) commit the durable bond,
          * so the flash erase/write never runs while RX is deaf (RF_EVT_PERSIST_BOND
@@ -3382,6 +3389,22 @@ static void rf_persist_bond_task(void)
         return;
     }
 
+    /* N08 defense-in-depth: never durably persist a tuple the next boot's
+     * validator would reject (the accept-site guards are the primary fix; this
+     * catches anything that slips a future path). Producer invariant worth
+     * knowing: interval/timeout here always come from OUR pair-ACK template
+     * (rf_pair_ack15, compiled 28/600) — the air-decoded broadcast values are
+     * logged but never enter the durable tuple, so this check can only fire
+     * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
+     * session usable this boot; the record simply never becomes durable. */
+    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
+        rfd_persist_last_reason = RFD_PERSIST_SEMANTIC;
+        return;
+    }
+    /* The validation above sits BEFORE the CH570 teardown below on purpose:
+     * an invalid record must return before any radio state changes, or the
+     * shut radio and cancelled timers were never restored (TODO defect,
+     * latent: the producer cannot build a record the check rejects today). */
 #if !RF_TASK_EXECUTOR_TMOS
     /* CX4 (codex, hardware-forced CH570 delta), root-cause-revised 2026-07-07.
      * This runs ONCE per session — the first promote of a fresh pair, before
@@ -3401,18 +3424,6 @@ static void rf_persist_bond_task(void)
         hal_rf_shut();
     }
 #endif
-    /* N08 defense-in-depth: never durably persist a tuple the next boot's
-     * validator would reject (the accept-site guards are the primary fix; this
-     * catches anything that slips a future path). Producer invariant worth
-     * knowing: interval/timeout here always come from OUR pair-ACK template
-     * (rf_pair_ack15, compiled 28/600) — the air-decoded broadcast values are
-     * logged but never enter the durable tuple, so this check can only fire
-     * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
-     * session usable this boot; the record simply never becomes durable. */
-    if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
-        rfd_persist_last_reason = RFD_PERSIST_SEMANTIC;
-        return;
-    }
     rfd_persist_attempts++;
     int save_rc = bond_save(&want);
     rfd_last_save_rc = (uint8_t)save_rc;
