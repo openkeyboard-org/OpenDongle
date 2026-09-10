@@ -556,10 +556,19 @@ the build id for no functional gain, or expands scope beyond the import:
   receiver on. The R3a spike settled the silicon question (56,986
   halts, all returned, no library restoration needed), and the shipped entry adds what a spike may
   omit: an RTC periodic-timer backstop, a last look that also re-checks USB, both RTC flags cleared
-  at entry, exact paired SysTick correction, and a 250 ms suspend cap. Outstanding before the knob
-  can default on: a bus reset taken while halted, a remote wake out of a halt, clock continuity
-  across halts, resume without re-enumeration measured rather than inferred, and a shipped-default
-  suspend soak. Known residual: the vendor halt primitive takes its wait with interrupts enabled,
+  at entry, exact paired SysTick correction, and a 250 ms suspend cap. Gates run on the merged code
+  (2026-09-10, E514E4F0): clock continuity 99.93 % of wall across a 47-minute sleep; resume with
+  the USB node identity unchanged; a shipped-default soak of 14,049 halts, 67 % of the wall clock,
+  zero abandoned, 1,366 catches on 1,368 phase windows, no reset; and a USB replug taken while
+  halted with the probe still powering the board, after which the boot count was unmoved, the
+  device enumerated fresh as expected and the link returned in a second. Outstanding before the
+  knob can default on: a remote wake driven out of a halt, which this bench cannot produce because
+  the only keystroke source is the module's UART driven by the sleeping host; it needs a physical
+  key source or an accepted risk decision. Observed and benign: the detector unlocked and
+  re-engaged 131 times in those 47 minutes, every one a failed acquisition answering no polls, each
+  costing one continuous-scan cycle with the grace correctly not replenished. The run also
+  confirmed the production keyboard's thirty-minute stage in the wild: it stopped probing entirely
+  and returned only on its host's transport select. Known residual: the vendor halt primitive takes its wait with interrupts enabled,
   so a resume arriving inside its prologue is serviced and then slept through; the 1 s backstop
   bounds it, and closing it needs either a hardware guarantee about pending interrupts and WFI on
   this part or an entry that does not delegate the wait. Note the RAM ceiling this hit: the vendor halt primitive is 328 B of RAM-resident

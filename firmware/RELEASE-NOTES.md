@@ -38,9 +38,19 @@ phase windows, one give-up, no reset. Awake behaviour unchanged: poll replies 11
 10-slot hop gaps held, and windowing never engages against a keyboard that holds its link.
 That is an operating point, not a compliance claim: it is the 3V3 rail rather than VBUS, one
 keyboard resting, and neither the unbonded camp nor a continuously connected keyboard windows at
-all. Ships opt-in (`PM_HALT=0`) pending the remaining gates: bus reset taken while halted, remote
-wake from a halt, clock continuity across halts, resume without re-enumeration measured rather
-than inferred, and a shipped-default suspend soak; the 395-window sample above is not that soak.
+all. Ships opt-in (`PM_HALT=0`). Four of the five gates have since run on the merged code
+(E514E4F0, production keyboard resting). A 47-minute host sleep: the clock advanced 2843.6 s of
+2845.6 s of wall time; the device resumed with its USB node identity unchanged rather than
+re-enumerating; and the soak recorded 14,049 halts totalling 1917.6 s, 67 % of the wall clock,
+with zero abandoned entries, 1,622 reconnects at about one a second, 1,366 catches on 1,368 phase
+windows, two misses, one give-up and no reset. Separately, the USB data cable was pulled and
+replaced while the host slept and the dongle was halting, with the debug probe still powering the
+board: the boot count did not move, there was no watchdog recovery, the device enumerated fresh as
+a replug should, and the link returned in a second. The fifth gate, a remote wake driven out of a
+halt, is not testable on this bench, because the only keystroke source is the keyboard module's
+UART and that is driven by the host which must be asleep for a halt to happen. The runs do show
+the halt never blocking the link, so a keystroke arriving in a window meets a core that is awake
+by construction; what stays unevidenced is the wake pulse itself after a halt.
 The entry also carries a known residual: the vendor primitive takes its wait with interrupts
 enabled, so a resume arriving inside its prologue is serviced and then slept through, bounded by
 the backstop at one second. With the knob off the image is byte-identical and
