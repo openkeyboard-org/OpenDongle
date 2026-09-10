@@ -3012,8 +3012,9 @@ static void rf_send_pair_ack(void)
  * et al) so the burst-promote branch can initialize it. The formula
  * itself is implemented below in rf_send_poll. */
 
-/* CONNECTED-mode LEN=1 poll TX using the stock hop formula on the hop clock
- * (HSE-derived protocol ticks). */
+/* CONNECTED-mode LEN=1 poll TX on the channel the shared connected hop model
+ * picks (rf_protocol.h: edge anchor, whole-interval advance) from the hop
+ * clock (HSE-derived protocol ticks). */
 static void rf_send_poll(void)
 {
     /* Defense-in-depth (v0.95 half-open finding): every legitimate caller is

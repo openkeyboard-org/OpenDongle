@@ -123,7 +123,8 @@ struct Cli {
     /// the request plus that phase.
     /// Diagnostic: run it on a dongle that is deaf to its keyboard, rung 1
     /// first; which rung restores the link says whether the software loop or
-    /// the PHY was dead. Refused by the firmware while a link is up.
+    /// the PHY was dead. The firmware refuses rungs 1-3 while a link is up
+    /// and rungs 40-79 unless one is; every rung is refused while quiescing.
     #[arg(long, value_name = "RUNG", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag"])]
     rf_poke: Option<u8>,
 
