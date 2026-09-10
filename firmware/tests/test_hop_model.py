@@ -8,7 +8,6 @@ rf_proto_hop_step() is compiled with the host C compiler behind a tiny stdin
 driver and exercised against the keyboard's hop model, the seeding contract
 and the modulus arithmetic. Skipped when no C compiler is on PATH."""
 
-import os
 import re
 import shutil
 import subprocess
@@ -17,7 +16,6 @@ import unittest
 from pathlib import Path
 
 INCLUDE = Path(__file__).resolve().parents[1] / "common" / "include"
-HEADER = INCLUDE / "rf_protocol.h"
 
 DRIVER = r"""
 #include <stdio.h>
@@ -71,8 +69,8 @@ class HopModel(unittest.TestCase):
 
     @classmethod
     def _run(cls, script):
-        """script: list of ('S', last, idx) / ('P', now, interval). Returns the
-        constants tuple first, then one (last, idx) per 'P'."""
+        """script: list of ('S', last, idx) / ('P', now, interval), one driver run.
+        Returns the constants tuple first, then one (last, idx) per 'P'."""
         text = "".join("%s %x %d\n" % (op, a, b) for op, a, b in script)
         out = subprocess.run([str(cls.exe)], input=text, capture_output=True,
                              text=True, check=True).stdout.split("\n")
@@ -84,11 +82,12 @@ class HopModel(unittest.TestCase):
     def wrap(self, t):
         return t % self.WRAP
 
-    # -- the keyboard's model, as the header documents it: anchor 12 ticks before
+    # -- the keyboard's model, as the header documents it: an anchor 12 ticks before
     # the poll it expects (it seeds at 13, its servo and one-tick rollback settle at
-    # 12), one edge per whole interval, an edge counts once elapsed EXCEEDS the
-    # interval. Returns the number of edges the keyboard has counted at time t
-    # (t relative to the poll-grid origin, t >= 0).
+    # 12), one edge per whole interval, an edge once elapsed EXCEEDS the interval.
+    # Returns the edges the keyboard has counted at time t (t relative to the
+    # poll-grid origin, t >= 0): floor((t + 11) / 28), against the dongle's
+    # floor((t + 13) / 28); they differ, by exactly one, at remainders 15 and 16.
     @staticmethod
     def keyboard_steps(t):
         return (t + 12 - 1) // INTERVAL if t + 12 - 1 >= 0 else 0
@@ -101,18 +100,24 @@ class HopModel(unittest.TestCase):
     def test_seed_contract_first_poll_is_seed_plus_one(self):
         """Seed = (grid origin - lead, S); a first poll anywhere from 15 to 42 ticks
         after the origin (one slot, a tick early or late, or half a slot early) computes
-        step 1 -> S+1, the keyboard's first connected listen channel."""
+        step 1 -> S+1, the keyboard's first connected listen channel. (15 and 16 are
+        the dongle's edge only; the keyboard model hops at 17, the two-tick window.)"""
+        script, expect = [], []
         for origin in (0, 1000, self.WRAP - 20, self.WRAP - 1):
             for seed in range(self.NCH):
                 for first in (15, 27, 28, 29, 42):
-                    r = self._run([("S", self.wrap(origin - self.LEAD), seed),
-                                   ("P", self.wrap(origin + first), INTERVAL)])
-                    self.assertEqual(r[1][1], (seed + 1) % self.NCH, (origin, seed, first))
-                    self.assertEqual(r[1][0], self.wrap(origin - self.LEAD + INTERVAL))
+                    script += [("S", self.wrap(origin - self.LEAD), seed),
+                               ("P", self.wrap(origin + first), INTERVAL)]
+                    expect.append(((self.wrap(origin - self.LEAD + INTERVAL), (seed + 1) % self.NCH),
+                                   (origin, seed, first)))
                 for first in (13, 14):   # not yet an edge: step 0, index and anchor unchanged
-                    r = self._run([("S", self.wrap(origin - self.LEAD), seed),
-                                   ("P", self.wrap(origin + first), INTERVAL)])
-                    self.assertEqual(r[1], (self.wrap(origin - self.LEAD), seed))
+                    script += [("S", self.wrap(origin - self.LEAD), seed),
+                               ("P", self.wrap(origin + first), INTERVAL)]
+                    expect.append(((self.wrap(origin - self.LEAD), seed), (origin, seed, first)))
+        res = self._run(script)[1:]
+        self.assertEqual(len(res), len(expect))
+        for got, (want, why) in zip(res, expect):
+            self.assertEqual(got, want, why)
 
     def test_steady_grid_never_drifts(self):
         """100k on-grid polls with +-1 tick read jitter, crossing the modulus: every
@@ -130,43 +135,45 @@ class HopModel(unittest.TestCase):
             self.assertEqual(last, self.wrap(origin - self.LEAD + INTERVAL * (k + 1)), k)
 
     def test_coalesced_gaps_track_the_keyboard(self):
-        """After K on-grid polls, one poll arrives late by N slots + r ticks (the
+        """After k on-grid polls, one poll arrives n_slots slots + r ticks late (the
         first poll after a coalesced gap is off-grid; masked IRQs on the bench), then
         the grid resumes. The dongle's index must equal the keyboard's everywhere
-        except the two-tick window where the two ends' edges differ (there it may be
-        one ahead), and the next on-grid poll must agree for every r: neither end
-        resets its anchor to the poll time, so a window hit costs one poll only.
-        N = 5, 10, 15 and r = 0 are the gaps the recovered stock rule dropped."""
+        except the two-tick window where the two ends' edges differ (there it is
+        exactly one ahead), and the very next on-grid poll must agree for every r:
+        neither end resets its anchor to the poll time, so a window hit costs one
+        poll only. Gaps of 5, 10, 15 and 20 intervals (n_slots 4, 9, 14, 19) are the
+        ones the recovered stock rule dropped."""
         seed = 4
+        k = 3
+        cases = []
+        script = []
         for origin in (0, self.WRAP - 3 * INTERVAL):
             for n_slots in range(0, 21):
                 for r in range(INTERVAL):
-                    k = 3
                     gap_t = INTERVAL * (k + 1 + n_slots) + r        # the off-grid poll
-                    next_t = INTERVAL * (k + 2 + n_slots)             # back on the grid
-                    if r == 0:
-                        next_t += INTERVAL  # r=0 IS the grid; the next slot is one later
-                    script = [("S", self.wrap(origin - self.LEAD), seed)]
+                    next_t = INTERVAL * (k + 2 + n_slots)             # the very next slot
+                    script.append(("S", self.wrap(origin - self.LEAD), seed))
                     script += [("P", self.wrap(origin + INTERVAL * (i + 1)), INTERVAL) for i in range(k)]
                     script += [("P", self.wrap(origin + gap_t), INTERVAL),
                                ("P", self.wrap(origin + next_t), INTERVAL)]
-                    res = self._run(script)
-                    d_gap = res[k + 1][1]
-                    d_next = res[k + 2][1]
-                    kb_gap = (seed + self.keyboard_steps(gap_t)) % self.NCH
-                    kb_next = (seed + self.keyboard_steps(next_t)) % self.NCH
-                    diff = (d_gap - kb_gap) % self.NCH
-                    if r in (15, 16):
-                        self.assertIn(diff, (0, 1), (origin, n_slots, r))
-                    else:
-                        self.assertEqual(diff, 0, (origin, n_slots, r))
-                    self.assertEqual(d_next, kb_next, (origin, n_slots, r))
-                    # the old rule's signature: after a 5k-slot gap the index landed back on
-                    # the previous one and the repeat-correction forced a channel the
-                    # keyboard is not on; here it must simply be the next edge's index
-                    if n_slots % self.NCH == 0 and r < 15:
-                        self.assertEqual(d_gap, (seed + k + 1) % self.NCH, (origin, n_slots, r))
-                        self.assertNotEqual(d_gap, (seed + k) % self.NCH)
+                    cases.append((origin, n_slots, r, gap_t, next_t))
+        res = self._run(script)[1:]          # one driver run; k + 2 results per case
+        self.assertEqual(len(res), (k + 2) * len(cases))
+        for c, (origin, n_slots, r, gap_t, next_t) in enumerate(cases):
+            d_gap = res[c * (k + 2) + k][1]
+            d_next = res[c * (k + 2) + k + 1][1]
+            kb_gap = (seed + self.keyboard_steps(gap_t)) % self.NCH
+            kb_next = (seed + self.keyboard_steps(next_t)) % self.NCH
+            diff = (d_gap - kb_gap) % self.NCH
+            # the models are deterministic: exactly one edge apart at r = 15, 16
+            self.assertEqual(diff, 1 if r in (15, 16) else 0, (origin, n_slots, r))
+            self.assertEqual(d_next, kb_next, (origin, n_slots, r))
+            # the gap is n_slots + 1 intervals; when that is a multiple of 5 the
+            # keyboard has cycled all five channels and the correct index is the
+            # PREVIOUS one again. The old rule refused that repeat and forced a slot
+            # forward: the defect. Here the repeat must stand.
+            if (n_slots + 1) % self.NCH == 0 and r < 15:
+                self.assertEqual(d_gap, (seed + k) % self.NCH, (origin, n_slots, r))
 
     def test_modular_add_does_not_overflow(self):
         """The anchor advance is (last + step*interval) mod WRAP. With last near WRAP
