@@ -50,6 +50,10 @@
 #ifndef DONGLE_RX_WINDOW
 #define DONGLE_RX_WINDOW 0
 #endif
+/* Tier 2 R3b: Halt between receiver windows while USB is suspended (CH592). */
+#ifndef DONGLE_PM_HALT
+#define DONGLE_PM_HALT 0
+#endif
 
 #ifndef DONGLE_BUILD_PROFILE
 #define DONGLE_BUILD_PROFILE DONGLE_PROFILE_UNKNOWN

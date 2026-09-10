@@ -1515,6 +1515,23 @@ static uint8_t rf_win_camp_tick(void)
     return 1u;
 }
 
+/* True only when the radio is genuinely shut with nothing to serve: windowed mode,
+ * no window open, and NO LIVE LINK. The connected state also has no window open
+ * (its receiver is armed by the poll cycle, not by a window), so without the state
+ * test this would report "radio off" between two 875 us polls and let a caller stop
+ * the clocks across the grid. */
+__HIGH_CODE
+uint8_t RF_WinRadioOff(void)
+{
+    return (uint8_t)(rf_win_mode && !rf_win_open && !rf_win_accepted
+                     && rf_state != RF_STATE_CONNECTED);
+}
+
+#if DONGLE_PM_HALT
+void pm_halt_diag(uint32_t *halts, uint32_t *ticks, uint16_t *usb_wakes);   /* pm_ch592.c */
+void pm_halt_diag2(uint32_t *attempts, uint32_t *rtc_wakes);                /* pm_ch592.c */
+#endif
+
 static void rf_win_diag_fill(uint8_t *out)
 {
     rfd_put32(&out[2],  rfd_win_opens);
@@ -1534,6 +1551,18 @@ static void rf_win_diag_fill(uint8_t *out)
     rfd_put32(&out[44], rfd_win_faults);
     out[48] = rfd_win_unsched_rx; out[49] = rfd_win_unsched_long;
     out[50] = rfd_win_unsched_late; out[51] = rfd_win_uncadenced;
+#if DONGLE_PM_HALT
+    {
+        uint32_t h, tk, at, rw; uint16_t uw;
+        pm_halt_diag(&h, &tk, &uw); pm_halt_diag2(&at, &rw);
+        rfd_put32(&out[52], h);                    /* halts that returned */
+        rfd_put32(&out[56], tk);                   /* RTC ticks actually halted */
+        rfd_put16(&out[60], (uint16_t)((at > 0xFFFFu) ? 0xFFFFu : at));   /* abandoned at the last look */
+        /* The page is full at 62 bytes; the abandon reasons and the backstop/USB counts ride
+         * page 5's spare high nibble is taken, so they stay debugger-only for now. */
+        (void)rw; (void)uw;
+    }
+#endif
 }
 #endif /* DONGLE_RX_WINDOW */
 

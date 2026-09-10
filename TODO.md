@@ -549,6 +549,18 @@ the build id for no functional gain, or expands scope beyond the import:
   no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.
+- **Tier 2 R3b: Halt between windows in suspend (2026-09-10, opt-in `PM_HALT`).** 1.347 mA with
+  the host asleep and a resting production keyboard, against 10.13 mA before Tier 2, so the USB
+  suspend budget of 2.5 mA is met with room. The R3a spike settled the silicon question (56,986
+  halts, all returned, no library restoration needed), and the shipped entry adds what a spike may
+  omit: an RTC periodic-timer backstop, a last look that also re-checks USB, both RTC flags cleared
+  at entry, exact paired SysTick correction, and a 250 ms suspend cap. Outstanding before the knob
+  can default on: a bus reset taken while halted, a remote wake out of a halt, and a shipped-default
+  suspend soak. Note the RAM ceiling this hit: the vendor halt primitive is 328 B of RAM-resident
+  code and the product links at ~93 % of RAM against the fault-retention block, which was only
+  resolved by forcing the deadline planner out of line into flash in halt builds. There is ~2 KB of
+  unused RAM between the fault block and the stack, and the BLE library heap is 6144 B in a dongle
+  that opens no BLE connection; either would give real headroom and both are owner decisions.
 - **Tier 2 R1 shipped: windowed receiver (2026-09-10).** The production keyboard rests by
   stopping its session 5 s after the last key and reconnecting once a second (1.010 s,
   sd 15 ms, each connection ~10 ms); the dongle used to spend the whole second in the
