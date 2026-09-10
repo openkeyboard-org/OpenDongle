@@ -3847,9 +3847,10 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
  * task context; rung 2 additionally re-runs the vendor init that only
  * hal_rf_init otherwise performs. Both end on the P4 guard. Refused while a
  * link is up or a reboot quiesce is in progress. */
-/* Bench facility (rf-poke rungs 40..59, armed session): mask every IRQ for
- * (rung - 40) poll slots of 875 us on a live link, so the TMR0 poll events
- * coalesce into one gap of that many intervals. This is how the hop
+/* Bench facility (rf-poke rungs 40..79, armed session): mask every IRQ for
+ * a nominal (rung - 40) poll slots of 875 us on a live link (60..79: a 5- or
+ * 6-slot gap plus a remainder), so the TMR0 poll events coalesce into one
+ * gap of about that many intervals. This is how the hop
  * repeat-correction defect was reproduced and its fix validated (gaps of 5
  * and 10 slots dropped the link every time on the old rule, never on the
  * new one; rf_protocol.h). CONNECTED only. */
@@ -3866,9 +3867,10 @@ uint8_t RF_DiagIntervene(uint8_t rung)
     if (rung >= 40u && rung < 80u) {
         /* 40..59: (rung-40) whole slots; 60..69: 5 slots + 3*(rung-60) ticks;
          * 70..79: 6 slots + 3*(rung-70) ticks (the remainder bands). The
-         * masking starts asynchronously to the previous poll, so the actual
-         * coalesced step is around the nominal, not exactly it (read page 2
-         * rx_restart_handled / a page-1 trace for the realised gap); it is a
+         * masking starts asynchronously to the previous poll, at whatever
+         * phase of the slot the command is dispatched, so the realised gap is
+         * the request plus that phase and the coalesced step is around the
+         * nominal, not exactly it (nothing reports the realised gap); it is a
          * regression stimulus, not a precise input. */
         uint32_t ticks = (rung < 60u) ? ((uint32_t)rung - 40u) * 28u
                        : (rung < 70u) ? 5u * 28u + 3u * ((uint32_t)rung - 60u)

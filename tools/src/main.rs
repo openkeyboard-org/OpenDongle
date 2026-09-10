@@ -114,11 +114,13 @@ struct Cli {
     /// from task context, 2 = shut + vendor re-init + re-arm (CH570 only),
     /// 3 = shut the radio and leave it deaf (fault injection: the terminal
     /// camp's liveness watchdog must bring it back within its 200 ms tick),
-    /// 40+N (N = 0..19) = on a live link, mask every interrupt for N poll
-    /// slots so the polls coalesce into one gap of N intervals (the hop
-    /// repeat-correction regression check: 5 and 10 must not drop the link);
-    /// 60+M and 70+M (M = 0..9) = a 5- or 6-slot gap plus 3*M ticks, the
-    /// remainder bands.
+    /// 40+N (N = 0..19) = on a live link, mask every interrupt for a nominal
+    /// N poll slots so the polls coalesce into one gap of about N intervals
+    /// (the hop repeat-correction regression check: 5 and 10 must not drop
+    /// the link); 60+M and 70+M (M = 0..9) = a nominal 5- or 6-slot gap plus
+    /// 3*M ticks, the remainder bands. Requested durations: the mask starts
+    /// at an arbitrary phase within the current slot, so the realised gap is
+    /// the request plus that phase.
     /// Diagnostic: run it on a dongle that is deaf to its keyboard, rung 1
     /// first; which rung restores the link says whether the software loop or
     /// the PHY was dead. Refused by the firmware while a link is up.

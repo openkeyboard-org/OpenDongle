@@ -76,7 +76,7 @@ class HopModel(unittest.TestCase):
                              text=True, check=True).stdout.split("\n")
         m = re.match(r"C ([0-9a-f]+) (\d+) (\d+)", out[0])
         consts = (int(m.group(1), 16), int(m.group(2)), int(m.group(3)))
-        steps = [(int(l.split()[0], 16), int(l.split()[1])) for l in out[1:] if l]
+        steps = [(int(line.split()[0], 16), int(line.split()[1])) for line in out[1:] if line]
         return [consts] + steps
 
     def wrap(self, t):

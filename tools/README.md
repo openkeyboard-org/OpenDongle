@@ -186,11 +186,15 @@ terminal camp's liveness watchdog, which re-arms it at its next 200 ms tick on
 both chips (rung 3 resets the tick's baseline; page 1 `camp_wd_rearms` advances
 by one; on CH570 the escalation to a vendor re-init needs a second silent tick).
 Rungs `40` to `59` are the opposite kind of injection: on a live link they mask
-every interrupt for `rung - 40` poll slots of 875 µs, so the polls coalesce into
-one gap of that many intervals; a gap of 5 or 10 slots is the regression check
-for the hop repeat-correction fix (the link must survive it). Rungs `60` to `69`
-add `3 * (rung - 60)` ticks of 31.25 µs to a 5-slot gap and `70` to `79` to a
-6-slot gap, sweeping the remainder within the slot. The firmware
+every interrupt for a nominal `rung - 40` poll slots of 875 µs, so the polls
+coalesce into one gap of about that many intervals; a nominal gap of 5 or 10
+slots is the regression check for the hop repeat-correction fix (the link must
+survive it). Rungs `60` to `69` add `3 * (rung - 60)` ticks of 31.25 µs to a
+5-slot gap and `70` to `79` to a 6-slot gap, sweeping the remainder within the
+slot. Every figure is the requested duration: the mask starts whenever the
+command is dispatched, at an arbitrary phase within the current slot, so the
+gap the link actually sees is the requested length plus that phase, and the
+remainder rungs sweep the remainder in aggregate over repeats, not per call. The firmware
 refuses rungs 1 to 3 unless the dongle is in its exact terminal reconnect camp
 -- not connected, no EV10 reacquire scan, no boot window or relisten, no
 pair-ACK burst in flight -- refuses rungs 40 to 79 unless a link is up, and
