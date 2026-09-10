@@ -146,7 +146,8 @@ deadline arms the timer sooner, and on a live link TMR0 wakes the core before it
 fires). The page 6 remote-wake
 arm count is 16 bits on both sides and its rate wraps accordingly.
 
-Page 7 `rx window` (CH592 with `PM_RX_WINDOW=1`, the Tier 2 windowed receiver) counts the
+Page 7 `rx window` (CH592 built with `PM_IDLE=1` and `PM_RX_WINDOW=1`, the Tier 2 windowed
+receiver; the page count rises to 8 only with both) counts the
 receiver windows the reacquire scan and the terminal camp open instead of keeping RX on:
 `win_opens` / `win_closes` (a close is a window that ended with nothing accepted; opens
 minus closes minus catches is the window in flight), `win_catches` (a beacon accepted

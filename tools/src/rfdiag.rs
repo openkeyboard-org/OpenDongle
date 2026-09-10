@@ -18,7 +18,8 @@ pub const PAGE_LEN: usize = 62;
 /// on the current firmware of both chips but tolerated missing (an earlier
 /// firmware answers it with an empty payload and it is skipped, see
 /// `REQUIRED_PAGES`); 5 ("power") and 6 ("power detail") exist only on CH592
-/// firmware built with PM_IDLE=1 and are skipped otherwise.
+/// firmware built with PM_IDLE=1 and are skipped otherwise; 7 ("rx window") exists only
+/// with PM_IDLE=1 and PM_RX_WINDOW=1 (the Tier 2 windowed receiver) and is skipped otherwise.
 pub const PAGE_COUNT: u8 = 8;
 const PAGE_VERSION: u8 = 1;
 

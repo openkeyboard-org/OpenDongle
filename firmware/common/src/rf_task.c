@@ -1259,8 +1259,9 @@ static void rf_return_to_fresh_pair(void)
  *     measured 2026-09-10 with the scan pinned to each), RF_EVT_RX_WIN_CLOSE
  *     shuts the radio W ms later unless a beacon was accepted meanwhile, and
  *     the next open follows at P - W;
- *   - once the scheduled-drop detector is locked (confirmed traffic, a drop
- *     within 100 ms of the promote, twice at ~1 s cadence) one window per
+ *   - once the scheduled-drop detector is locked (confirmed traffic on a
+ *     link no longer than 2 s of grid periods, a drop within 300 ms of the
+ *     promote, twice at ~1 s cadence) one window per
  *     second is phase-locked to the predicted probe (RF_EVT_RX_WIN_PHASE);
  *     a miss widens the next one, two misses fall back to the continuous
  *     scan until the next promote, because the keyboard's THIRD unanswered
