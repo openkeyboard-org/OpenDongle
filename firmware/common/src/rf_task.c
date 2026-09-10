@@ -3846,8 +3846,10 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
 /* IAP 0x94: the intervention ladder (task context, armed session). Rung 1 is
  * the camp's own re-arm (rf_start_rx: shut + reconfigure + arm) issued from
  * task context; rung 2 additionally re-runs the vendor init that only
- * hal_rf_init otherwise performs. Both end on the P4 guard. Refused while a
- * link is up or a reboot quiesce is in progress. */
+ * hal_rf_init otherwise performs. Both end on the P4 guard. Rungs 1-3 are
+ * refused while a link is up (they belong to the terminal camp), rungs 40-79
+ * below are refused unless one is, and every rung is refused while a reboot
+ * quiesce is in progress. */
 /* Bench facility (rf-poke rungs 40..79, armed session): mask every IRQ for
  * a nominal (rung - 40) poll slots of 875 us on a live link (60..79: a 5- or
  * 6-slot gap plus a remainder), so the TMR0 poll events coalesce into one
