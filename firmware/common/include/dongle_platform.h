@@ -46,6 +46,10 @@
 #ifndef DONGLE_PM_IDLE
 #define DONGLE_PM_IDLE 0
 #endif
+/* Tier 2: windowed receiver in the reacquire scan and terminal camp (CH592 only). */
+#ifndef DONGLE_RX_WINDOW
+#define DONGLE_RX_WINDOW 0
+#endif
 
 #ifndef DONGLE_BUILD_PROFILE
 #define DONGLE_BUILD_PROFILE DONGLE_PROFILE_UNKNOWN

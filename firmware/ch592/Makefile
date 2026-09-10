@@ -224,6 +224,12 @@ PM_IDLE_IN_SUSPEND ?= 1
 PM_GPIO_PARK ?= 1
 PM_USB_DIGIN_OFF ?= 0
 PM_CLK_GATE ?= 1
+# Tier 2 R1: windowed receiver (0 = today's continuous scan/camp, byte-identical)
+PM_RX_WINDOW ?= 1
+PM_RX_WINDOW_MS ?= 30
+PM_RX_PERIOD_MS ?= 200
+PM_RX_GRACE_S ?= 60
+PM_RX_PHASE_MS ?= 120
 # Gate mask for PM_CLK_GATE=1 as a DECIMAL (19958 = 0x4DF6: TMR1 TMR2 UART0-3 SPI0 PWMX
 # I2C LCD). Subsets exist for bench bisection; pm_ch592.c refuses any bit outside
 # 0x4DF6 and any of TMR0/TMR3/USB/BLE.
@@ -257,6 +263,11 @@ $(call pm-require-range,PM_HEARTBEAT_US,100,10000)
 $(call pm-require-in,PM_EXACT_DEADLINE,0 1,0 or 1)
 $(call pm-require-range,PM_DEADLINE_CAP_US,1000,50000)
 $(call pm-require-range,PM_EP0_QUIET_MS,0,5000)
+$(call pm-require-in,PM_RX_WINDOW,0 1,0 or 1)
+$(call pm-require-range,PM_RX_WINDOW_MS,10,1000)
+$(call pm-require-range,PM_RX_PERIOD_MS,20,5000)
+$(call pm-require-range,PM_RX_GRACE_S,0,3600)
+$(call pm-require-range,PM_RX_PHASE_MS,10,2000)
 # Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
 # named before the compiler runs.
 ifneq ($(strip $(PM_IDLE_LEVEL)),0)
@@ -274,6 +285,9 @@ CFLAGS += -DDONGLE_PM_HEARTBEAT_US=$(strip $(PM_HEARTBEAT_US))
 CFLAGS += -DDONGLE_PM_EXACT_DEADLINE=$(strip $(PM_EXACT_DEADLINE))
 CFLAGS += -DDONGLE_PM_DEADLINE_CAP_US=$(strip $(PM_DEADLINE_CAP_US))
 CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
+CFLAGS += -DDONGLE_RX_WINDOW=$(strip $(PM_RX_WINDOW)) -DDONGLE_RX_WINDOW_MS=$(strip $(PM_RX_WINDOW_MS))u
+CFLAGS += -DDONGLE_RX_PERIOD_MS=$(strip $(PM_RX_PERIOD_MS))u -DDONGLE_RX_GRACE_S=$(strip $(PM_RX_GRACE_S))u
+CFLAGS += -DDONGLE_RX_PHASE_MS=$(strip $(PM_RX_PHASE_MS))u
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 # Bench knob: shift flash .text by TEXT_PAD bytes (link.ld) to probe placement
@@ -399,9 +413,9 @@ ifeq ($(strip $(COMPILER_SHA256)),)
 $(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
 endif
 endif
-# schema=12: pm_exact/pm_cap_us joined the PM knob tokens (schema 11 = the PM
+# schema=13: rxwin* (Tier 2 windowed receiver) joined the tokens; schema=12: pm_exact/pm_cap_us joined the PM knob tokens (schema 11 = the PM
 # knobs + the compiler identity tokens of schema 10; pm_idle was a fixed 0 before).
-CONFIG_TEXT := schema=12||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_exact=$(strip $(PM_EXACT_DEADLINE))||pm_cap_us=$(strip $(PM_DEADLINE_CAP_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
+CONFIG_TEXT := schema=13||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_exact=$(strip $(PM_EXACT_DEADLINE))||pm_cap_us=$(strip $(PM_DEADLINE_CAP_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)||rxwin=$(strip $(PM_RX_WINDOW))||rxwin_w=$(strip $(PM_RX_WINDOW_MS))||rxwin_p=$(strip $(PM_RX_PERIOD_MS))||rxwin_t=$(strip $(PM_RX_GRACE_S))||rxwin_ph=$(strip $(PM_RX_PHASE_MS))
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
