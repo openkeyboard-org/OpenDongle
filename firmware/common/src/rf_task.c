@@ -1297,7 +1297,9 @@ static void rf_return_to_fresh_pair(void)
 #define RF_WIN_PHASE_LEAD_MS     45u     /* 3 sigma of the measured jitter (15 ms) */
 #define RF_WIN_PHASE_WIDEN_MS    15u     /* per miss */
 #define RF_WIN_MAX_MISSES        2u      /* the third probe must be caught continuously */
-#define RF_WIN_MIN_LINK_RX       4u      /* answered polls that make a drop "confirmed traffic" (a ~10 ms resting link answers 8-11) */
+#define RF_WIN_MIN_LINK_RX       1u      /* answered polls that make a drop "confirmed traffic": the keyboard was on the
+                                          * data channel (a failed acquisition answers none; a ~10 ms resting link 4-11,
+                                          * occasionally fewer); the lock still needs two such drops at the 1 s cadence */
 #define RF_WIN_MAX_LINK_TICKS    64000u  /* TMR0 periods elapsed on the link times the negotiated interval, in hop
                                           * ticks of 31.25 us: 2 s. An elapsed-time bound from the dongle's own poll
                                           * grid, so a qualifying link cannot have wrapped hal_now() (71.6 s) at
@@ -1399,10 +1401,12 @@ static void rf_win_on_lapse(void)
             }
         }
     } else {
-        /* an unscheduled loss, or the cadence broke: today's continuous scan, and the
-         * grace is replenished, since the user may be typing */
+        /* an unscheduled loss, or the cadence broke: today's continuous scan. The grace
+         * is replenished only by a genuine session (a link past the grid bound: the user
+         * was typing); a short drop that merely missed the traffic or timing test is
+         * still the resting signature and must not keep restarting the grace. */
         if (rf_win_locked) { rf_win_locked = 0u; rfd_win_unlocks++; }
-        if (!scheduled) { rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u; }
+        if (!short_link) { rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u; }
         rf_win_mode = 0u;
     }
     if (rf_win_mode && rf_win_locked) {
