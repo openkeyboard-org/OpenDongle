@@ -5,6 +5,27 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## Connected hop counts the keyboard's edges
+
+The connected data-hop reproduced the recovered dongle rule: reset the anchor to
+the poll time, step by elapsed / interval, and when the index landed back on the
+previous one force a slot forward and forward-date the anchor. That repeat-correction
+is right for a poll a tick early and wrong after a coalesced gap of exactly 5k poll
+slots, where the keyboard is already on that channel: the forced slot misses it, the
+next poll hops two, and supervision drops the link. Reproduced on the bench by masking
+the dongle's interrupts for whole poll slots on a live link (`opendongle --rf-poke
+40+N`): 5 and 10 slots dropped the link every time, 1-4, 6-8 and 12 never. The
+dongle now keeps the keyboard's model instead: an edge anchor 13 ticks before the
+poll it expects, seeded at every re-key, advanced by whole intervals only, the index
+by the same count, no correction branch; the modular add subtracts before it adds,
+which also closes the 32-bit overflow the old branch had (TODO). Both ends count the
+same edges however the polls are spaced. A host test (`firmware/tests/test_hop_model.py`)
+pins the model against the keyboard's for every gap of 0..20 slots and 0..27 ticks.
+Bench (CH592, 664BA4F5, OpenController as the keyboard): masked gaps of 1..15 slots
+and the 5- and 6-slot remainder bands all held the link with 0 lapses; 30 alternating
+5/10-slot gaps, 0 lapses; EV10 cadence, reconnect 10/10 at 5 ms, fresh pair and the
+poll reply ratio unchanged. Both chips' bytes change; CH570 compiled, not bench-verified.
+
 ## EP6 OUT stays live after a dropped IAP packet
 
 The vendor HID interface's OUT endpoint was NAKed unconditionally after every OUT

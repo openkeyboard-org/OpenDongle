@@ -209,26 +209,53 @@ static inline uint8_t rf_proto_is_pair_broadcast_from_peer(
                      && rf_proto_frame_peer_mac_match(frame, peer_mac));
 }
 
-/* ---- Connected-state data-channel hop (the stock formula) ----
- * Validated against the stock firmware (runtime 0x20000ff6..0x20001016 and
- * PROTOCOL.md "Connected data-hop"): each poll measures the elapsed protocol
- * ticks (1/32000 s) since the previous poll on the HOP CLOCK -- a per-chip
- * counter wrapping at RF_PROTO_HOP_WRAP (the stock RTC32K modulus; the HSE-
- * derived hop clocks reproduce it so this arithmetic is chip-agnostic) --
- * advances the channel index by elapsed/interval, and applies the stock
- * repeat-correction: when the computed index lands back on prev_idx, force
- * one slot forward and back-date the anchor by (interval - elapsed mod ...)
- * via last = (now + elapsed - interval) mod WRAP, so the NEXT poll's delta
- * lands one slot away instead of repeating. Time-based (not TX-count-based):
- * a skipped or failed poll TX does not desync the index from the keyboard's
- * elapsed-time hop. The caller maps the returned index through the data LUT.
+/* Connected data-hop (PROTOCOL.md "Connected data-hop"): the channel index
+ * advances by whole hop intervals of the HOP CLOCK -- a per-chip counter of
+ * protocol ticks (1/32000 s) wrapping at RF_PROTO_HOP_WRAP (the stock RTC32K
+ * modulus; the HSE-derived hop clocks reproduce it, so this arithmetic is
+ * chip-agnostic). The model mirrors the KEYBOARD's, which is the peer that
+ * must agree: the keyboard keeps an anchor at its hop EDGE (13 ticks before
+ * the poll it expects, RF_PROTO_HOP_EDGE_LEAD; its phase servo holds it
+ * there), and at every tick advances the anchor by the whole intervals
+ * consumed and the index by the same count. So does this: h->last is the
+ * edge anchor (every seed backdates the grid origin by the lead), each poll
+ * computes step = elapsed / interval from it, moves the anchor forward by
+ * step whole intervals (the remainder, the poll's jitter, stays in the
+ * phase instead of resetting it), and advances the index by step mod 5.
+ * Both ends then count the same edges, however the polls are spaced: a poll
+ * a tick early or late, or a coalesced gap of any number of slots, lands on
+ * the keyboard's channel. The one exception is structural: the keyboard's
+ * servo settles its anchor 12 ticks before the poll (it seeds at 13, then
+ * the servo and its one-tick rollback hold 12), so the two ends' edges sit
+ * a tick or two apart, and a poll that lands inside that window counts one
+ * edge more than the keyboard. On-grid polls land 13 ticks past the edge,
+ * nowhere near it; only the first poll after a coalesced gap is off-grid,
+ * and if it hits the window that single poll is one channel off and the
+ * next poll agrees again, because neither end resets its anchor to the
+ * poll time (codex). On CH570 the acquisition-time grid shifts stay in the
+ * anchor's phase remainder, so the lead there is 13 up to those shifts.
+ *
+ * The recovered stock dongle rule was different: it reset the anchor to the
+ * poll time, took step = elapsed / interval, and when the index landed back
+ * on prev_idx forced one slot forward and forward-dated the anchor by
+ * elapsed - interval. That corrects a poll a tick early (step 0, the case
+ * it was written for) but ALSO fires after a coalesced gap of exactly 5k
+ * intervals, forcing a channel the keyboard is not on, and its next poll
+ * takes the wrap arm and hops two slots: on the bench a masked gap of 5 or
+ * 10 poll slots dropped the link every time while 1-4, 6-8 and 12 never did.
+ * Restricting the correction to step == 0 only moved the failure to the
+ * remainder band [15, 27] after a 5k gap (the keyboard, 13 ticks ahead, has
+ * already hopped there; codex). Counting edges from a whole-interval anchor
+ * is what removes the band altogether.
  *
  * Seeding contract (both chips): after a promote/re-key with hop seed S
  * (= pair-ACK byte [4] % RF_PROTO_DATA_CHANNEL_COUNT, the same value both
- * ends consume), set h->prev_idx = S and h->last = <hop clock at the seed
- * instant> (optionally back-dated, e.g. the 13-tick first-burst rule); the
- * next poll one interval later then computes S+1 -- the keyboard's first
- * connected listen channel. */
+ * ends consume), set h->prev_idx = S and h->last = <hop clock at the poll
+ * grid's origin> - RF_PROTO_HOP_EDGE_LEAD, the edge the keyboard anchors on
+ * (it backdates its anchor by the same 13 at the frame it seeds from). The
+ * first poll one interval later then computes step 1 -> S+1, the keyboard's
+ * first connected listen channel, and the anchor stays a lead ahead of the
+ * grid from then on. */
 /* ---- Shared decision helpers (R2) ---- */
 
 /* The stock tx_ctrl feedback formula (PROTOCOL.md:324): synchronise bit 1
@@ -300,6 +327,7 @@ static inline uint8_t rf_proto_hop_seed(uint8_t type_tag)
 }
 
 #define RF_PROTO_HOP_WRAP 0xA8C00000u
+#define RF_PROTO_HOP_EDGE_LEAD 13u  /* ticks the keyboard's hop edge leads the poll it expects (its 12+1 seed backdate) */
 
 typedef struct {
     uint32_t last;      /* hop-clock value anchoring the next delta          */
@@ -314,6 +342,14 @@ static inline uint32_t rf_proto_hop_delta(uint32_t now, uint32_t last)
     return RF_PROTO_HOP_WRAP - last + now;
 }
 
+/* (t + d) mod WRAP for t, d < WRAP. Subtract before adding: the 32-bit sum
+ * t + d can exceed 2^32 when both are large (WRAP is 0xA8C00000), and a
+ * truncated sum below WRAP would slip past a single reduction (codex). */
+static inline uint32_t rf_proto_hop_add(uint32_t t, uint32_t d)
+{
+    uint32_t room = RF_PROTO_HOP_WRAP - t;
+    return (d >= room) ? d - room : t + d;
+}
 static inline uint8_t rf_proto_hop_step(rf_proto_hop_t *h, uint32_t now,
                                         uint16_t interval)
 {
@@ -321,19 +357,14 @@ static inline uint8_t rf_proto_hop_step(rf_proto_hop_t *h, uint32_t now,
     uint32_t step;
     uint8_t idx;
 
-    h->last = now;
-    step = (interval == 0u) ? 1u : (elapsed / interval);
-    idx = (uint8_t)((h->prev_idx + step) % RF_PROTO_DATA_CHANNEL_COUNT);
-    if (idx == h->prev_idx) {
-        uint32_t ci = interval;
-        uint32_t sum = h->last + elapsed;
-
-        idx = (uint8_t)((h->prev_idx + 1u) % RF_PROTO_DATA_CHANNEL_COUNT);
-        if (sum >= RF_PROTO_HOP_WRAP) {
-            sum -= RF_PROTO_HOP_WRAP;
-        }
-        h->last = (sum >= ci) ? (sum - ci) : (RF_PROTO_HOP_WRAP - (ci - sum));
+    if (interval == 0u) {
+        step = 1u;
+        h->last = now;
+    } else {
+        step = elapsed / interval;
+        h->last = rf_proto_hop_add(h->last, step * interval);   /* whole intervals only */
     }
+    idx = (uint8_t)((h->prev_idx + step) % RF_PROTO_DATA_CHANNEL_COUNT);
     h->prev_idx = idx;
     return idx;
 }
