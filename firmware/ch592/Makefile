@@ -277,6 +277,22 @@ $(call pm-require-range,PM_RX_GRACE_S,0,3600)
 $(call pm-require-range,PM_RX_PHASE_MS,10,2000)
 $(call pm-require-in,PM_HALT,0 1,0 or 1)
 $(call pm-require-range,PM_SUSPEND_CAP_US,20000,1000000)
+# Coherence: PM_HALT=1 against a configuration that cannot reach the halt branch builds an
+# image whose identity says halt=1 and whose behaviour is the ordinary idle (CodeRabbit).
+ifeq ($(strip $(PM_HALT)),1)
+ifneq ($(strip $(PM_IDLE)),1)
+$(error PM_HALT=1 needs PM_IDLE=1 - pm_idle_try and the halt path compile out otherwise)
+endif
+ifneq ($(strip $(PM_IDLE_IN_SUSPEND)),1)
+$(error PM_HALT=1 needs PM_IDLE_IN_SUSPEND=1 - pm_usb_veto refuses every idle while suspended, so the halt branch is unreachable)
+endif
+ifneq ($(strip $(PM_EXACT_DEADLINE)),1)
+$(error PM_HALT=1 needs PM_EXACT_DEADLINE=1 - the halt sleeps to the planner's deadline)
+endif
+ifneq ($(strip $(PM_RX_WINDOW)),1)
+$(error PM_HALT=1 needs PM_RX_WINDOW=1 - the halt is admitted only between receiver windows)
+endif
+endif
 # Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
 # named before the compiler runs.
 ifneq ($(strip $(PM_IDLE_LEVEL)),0)

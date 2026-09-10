@@ -450,6 +450,12 @@ static void pm_tmr3_plan(void)
 #define PM_HALT_LEAD_RTC  96u     /* 3 ms: wake ahead of the deadline for the HSE start-up */
 #define PM_HALT_GUARD_RTC 32u     /* 1 ms: abandon the halt if the trigger is this close, or past */
 #define PM_HALT_BACKSTOP  Period_1_S   /* bounds a lost trigger; never the normal wake */
+/* Ownership: the RTC trigger (R32_RTC_TRIG / RB_RTC_TRIG_EN), the periodic timer
+ * (RB_RTC_TMR_EN) and the HAL's RTCTigFlag belong to this path alone in this build. The SDK
+ * arms them only from SLEEP.c, which is not linked (HAL_SLEEP is FALSE and HAL_SRC carries
+ * MCU.c and RTC.c only), and no application or HAL caller of RTC_SetTignTime, RTC_TRIGFunCfg
+ * or RTC_TMRFunCfg exists; RTC_IRQn is enabled only across a halt. If that ever stops being
+ * true this path must coordinate rather than assume (CodeRabbit). */
 /* Counters kept deliberately small: .bss ends a few bytes below the fault-retention block. */
 static volatile uint32_t pm_halts;        /* halts that returned */
 static volatile uint32_t pm_halt_ticks;   /* RTC ticks actually halted */
@@ -489,7 +495,7 @@ void pm_halt_diag2(uint32_t *abandons, uint32_t *reasons)
 
 static void pm_halt(uint32_t irq)
 {
-    uint32_t r_in, r_out, elapsed, awake, sys_in, sys_out, deadline;
+    uint32_t r_in, r_out, elapsed, awake, sys_in, sys_out, deadline, setup_in;
     uint32_t ticks = (pm_plan_best > PM_HALT_LEAD_RTC + PM_HALT_MIN_RTC / 2u)
                      ? pm_plan_best - PM_HALT_LEAD_RTC : PM_HALT_MIN_RTC / 2u;
     uint8_t usb_flag;
@@ -501,6 +507,7 @@ static void pm_halt(uint32_t irq)
     RTCTigFlag = 0u;
     r_in = pm_rtc_now();
     sys_in = (uint32_t)SysTick->CNT;
+    setup_in = usb_last_setup_tsys;
     /* Program the absolute trigger here rather than through RTC_TRIGFunCfg: that helper
      * normalises with `> RTC_MAX_COUNT`, so a target landing exactly on the modulus is never
      * wrapped (codex). Same two registers, correct arithmetic, and the deadline we keep is
@@ -528,7 +535,15 @@ static void pm_halt(uint32_t irq)
     PFIC->SCTLR &= ~((1u << 4) | (1u << 3));              /* plain-WFI semantics for the deep wait */
     (void)__risc_v_enable_irq(irq);                       /* the deep WFI needs an acceptable interrupt */
     /* Last look, unmasked and immediately before the vendor call: never halt on a trigger that
-     * already fired or is about to. Only the vendor's own prologue is left unguarded. */
+     * already fired or is about to, and never on a USB state that has moved.
+     * KNOWN RESIDUAL (codex, not closed): the vendor primitive takes its WFI with interrupts
+     * enabled, so a resume or bus reset arriving after this check, including inside the vendor
+     * prologue, is serviced and its flag cleared, and the WFI then sleeps with reconciliation
+     * owed. The wait cannot be made conditional without abandoning the vendor primitive, since
+     * WFE mode plus SLEEPDEEP wedges this core. The backstop bounds the consequence at one
+     * period (1 s), not zero; closing it needs either a hardware guarantee about pending
+     * interrupts and WFI on this part, or an entry that does not delegate the wait. This is why
+     * the knob ships off and why a bus reset taken while halted is a gate before it can ship on. */
     {
         uint32_t left = pm_rtc_dist(deadline, pm_rtc_now());
         uint8_t  fired = (uint8_t)(RTCTigFlag != 0u);
@@ -565,15 +580,26 @@ static void pm_halt(uint32_t irq)
         uint32_t total_sys = elapsed * PM_TMR3_PER_RTC;
         awake = sys_out - sys_in;
         if (total_sys > awake) {
-            SysTick->CNT += (uint64_t)(total_sys - awake);
-            pm_halt_ticks += (total_sys - awake) / PM_TMR3_PER_RTC;
+            uint32_t corr = total_sys - awake;
+            SysTick->CNT += (uint64_t)corr;
+            pm_halt_ticks += corr / PM_TMR3_PER_RTC;
+            /* A SETUP serviced by the wake ISR stamped the clock BEFORE this correction, so the
+             * correction would age it by the halted time and shorten, or erase, the EP0 quiet
+             * window the idle admission depends on. Carry it forward by the same amount (codex). */
+            if (usb_last_setup_tsys != setup_in) {
+                usb_last_setup_tsys += corr;
+            }
         }
     }
     pm_halts++;
+    /* Attribution is best-effort and cannot prove a trigger was never consumed: the USB flags are
+     * sampled after the wake ISR may have cleared them, and a rescue by the backstop AFTER a
+     * consumed trigger looks exactly like a wake at the deadline. What the counters do show is
+     * how many halts returned early, which is the shape a lost trigger would change (codex). */
     if (usb_flag) {
         if (pm_halt_usb_wakes < 0xFFu) pm_halt_usb_wakes++;
     } else if (!PM_RTC_PAST(pm_rtc_dist(deadline, r_out))) {
-        if (pm_halt_backstops < 0xFFu) pm_halt_backstops++;   /* the periodic timer cut it short */
+        if (pm_halt_backstops < 0xFFu) pm_halt_backstops++;   /* returned before its own deadline */
     }
     PFIC->SCTLR |= (1u << 4) | (1u << 3);                 /* back to the WFE idiom the caller disarms */
 }
@@ -592,7 +618,9 @@ static void pm_tmr3_arm(void)
         }
     }
     if (pm_plan_hit) pm_hb_arm_deadline++; else pm_hb_arm_cap++;
-    R32_TMR3_CNT_END = pm_plan_best * PM_TMR3_PER_RTC;   /* <= 3.0M at a 50 ms cap: fits the 26 bits */
+    /* At the 1 s ceiling of PM_SUSPEND_CAP_US the plan is 32,000 RTC ticks and the product is
+     * 60,000,000, inside both uint32_t and the 26-bit CNT_END field (67,108,863) (CodeRabbit). */
+    R32_TMR3_CNT_END = pm_plan_best * PM_TMR3_PER_RTC;
     R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
     R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
 }

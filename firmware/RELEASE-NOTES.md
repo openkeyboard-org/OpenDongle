@@ -20,8 +20,8 @@ The entry is admitted only when USB is suspended, the receiver is windowed with 
 no accepted window and no live link, and the next deadline is at least 5 ms away, on top of every
 existing idle veto. Two independent wake sources are armed: the RTC trigger at that deadline less
 a 3 ms clock-restart lead, and the RTC periodic timer at 1 s as a backstop no earlier event can
-consume, so a trigger lost in the vendor prologue costs one late window rather than deafness until
-the host wakes. Because the vendor primitive takes its sleep instruction with interrupts enabled,
+consume, so a trigger lost in the vendor prologue is recovered within one backstop period (1 s)
+rather than leaving the dongle deaf until the host wakes. Because the vendor primitive takes its sleep instruction with interrupts enabled,
 the entry takes a last look immediately before it and abandons the halt if the trigger has already
 fired, if the deadline is within 1 ms, or if the USB state has moved (a resume or bus reset can run
 after the unmask and clear its own flag, so only the driver's state proves anything). Both flags and
@@ -31,13 +31,19 @@ with the clocks, so it is advanced on the way out by the RTC delta minus the Sys
 parts already counted. While the host sleeps the deadline cap becomes `PM_SUSPEND_CAP_US` (250 ms):
 the window schedule is itself in the deadline table, so the cap only bounds the library's untracked
 timers, its 1 s temperature sample and 120 s calibration.
-Bench (CH592 950E9B1E, production keyboard resting, host asleep): 1.347 mA against 10.13 mA before
-Tier 2 and 5.74 mA awake, halts averaging 136 ms with zero abandoned entries, 393 catches on 395
+Bench (CH592 950E9B1E, production keyboard resting, host asleep, measured on the dongle's 3V3
+feed): 1.347 mA against 10.13 mA before Tier 2 and 5.74 mA awake, halts averaging 136 ms with zero abandoned entries, 393 catches on 395
 phase windows, one give-up, no reset. Awake behaviour unchanged: poll replies 1139-1140/s of
 1143/s sent, fresh pair 2/2, reacquire cadence 33.4/s, bonded reconnect 10/10 at 5 ms, the 5- and
 10-slot hop gaps held, and windowing never engages against a keyboard that holds its link.
-Ships opt-in (`PM_HALT=0`) pending the remaining gates: bus reset taken while halted, remote wake
-from a halt, and a shipped-default suspend soak. With the knob off the image is byte-identical and
+That is an operating point, not a compliance claim: it is the 3V3 rail rather than VBUS, one
+keyboard resting, and neither the unbonded camp nor a continuously connected keyboard windows at
+all. Ships opt-in (`PM_HALT=0`) pending the remaining gates: bus reset taken while halted, remote
+wake from a halt, clock continuity across halts, resume without re-enumeration measured rather
+than inferred, and a shipped-default suspend soak; the 395-window sample above is not that soak.
+The entry also carries a known residual: the vendor primitive takes its wait with interrupts
+enabled, so a resume arriving inside its prologue is serviced and then slept through, bounded by
+the backstop at one second. With the knob off the image is byte-identical and
 CH570 is untouched.
 
 ## Windowed receiver in the reacquire scan and the terminal camp (CH592)

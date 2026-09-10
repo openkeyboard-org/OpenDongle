@@ -550,13 +550,19 @@ the build id for no functional gain, or expands scope beyond the import:
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.
 - **Tier 2 R3b: Halt between windows in suspend (2026-09-10, opt-in `PM_HALT`).** 1.347 mA with
-  the host asleep and a resting production keyboard, against 10.13 mA before Tier 2, so the USB
-  suspend budget of 2.5 mA is met with room. The R3a spike settled the silicon question (56,986
+  the host asleep and a resting production keyboard, against 10.13 mA before Tier 2. That is the
+  dongle's 3V3 feed at one operating point, not a USB compliance result: VBUS on the product board
+  is unmeasured, and the unbonded camp and a continuously connected keyboard both keep the
+  receiver on. The R3a spike settled the silicon question (56,986
   halts, all returned, no library restoration needed), and the shipped entry adds what a spike may
   omit: an RTC periodic-timer backstop, a last look that also re-checks USB, both RTC flags cleared
   at entry, exact paired SysTick correction, and a 250 ms suspend cap. Outstanding before the knob
-  can default on: a bus reset taken while halted, a remote wake out of a halt, and a shipped-default
-  suspend soak. Note the RAM ceiling this hit: the vendor halt primitive is 328 B of RAM-resident
+  can default on: a bus reset taken while halted, a remote wake out of a halt, clock continuity
+  across halts, resume without re-enumeration measured rather than inferred, and a shipped-default
+  suspend soak. Known residual: the vendor halt primitive takes its wait with interrupts enabled,
+  so a resume arriving inside its prologue is serviced and then slept through; the 1 s backstop
+  bounds it, and closing it needs either a hardware guarantee about pending interrupts and WFI on
+  this part or an entry that does not delegate the wait. Note the RAM ceiling this hit: the vendor halt primitive is 328 B of RAM-resident
   code and the product links at ~93 % of RAM against the fault-retention block, which was only
   resolved by forcing the deadline planner out of line into flash in halt builds. There is ~2 KB of
   unused RAM between the fault block and the stack, and the BLE library heap is 6144 B in a dongle
