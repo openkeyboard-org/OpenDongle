@@ -5,6 +5,33 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## Windowed receiver in the reacquire scan and the terminal camp (CH592)
+
+Against a resting production keyboard the dongle spent ~990 ms of every second in the
+reacquire scan to catch a ~10 ms probe that arrives once a second (the keyboard stops its
+session 5 s after the last key and reconnects every 1.010 s), and against an absent
+keyboard the camp kept the receiver on for nothing; the receiver is about 7 mA of the
+dongle's draw. The scan and the camp now open short receiver windows instead: 30 ms on
+channel 8 every 200 ms (the production probe sweeps all three pairing channels inside its
+~10 ms, so one channel suffices), plus one window a second phase-locked to the resting
+keyboard's next probe once a detector has seen two scheduled drops (a short confirmed link
+dropped within 300 ms of its promote, ~1 s apart); the radio is shut between windows. A
+missed phase window widens the next one and two misses fall back to the continuous scan
+until the next promote, so the keyboard's third unanswered probe, which would send it to a
+sleep stage only its host can end, never happens. Acceptance inside a window hands the
+radio to the existing accept path untouched. A grace period keeps today's continuous
+receiver for the first 60 s after a scheduled drop, so the first key after a short pause
+keeps its ~40 ms; the unbonded fresh-pair camp and the 3 s boot window stay continuous.
+Knobs `PM_RX_WINDOW` (0 is byte-identical to before), `PM_RX_WINDOW_MS`, `PM_RX_PERIOD_MS`,
+`PM_RX_GRACE_S`, `PM_RX_PHASE_MS`; diag page 7 `rx window` counts opens, closes, catches,
+phase opens and misses, detector locks and the reasons a drop did not qualify.
+Bench (CH592 6308E6D8, production keyboard, grace 0): 297 resting cycles, 297 phase
+windows, 297 catches, 0 misses, 0 give-ups, 0 fallbacks; first key after rest 20/20 within
+48 ms (40 ms before); cold reconnect at random phases 10/10 within 199 ms; the awake resting
+state metered 5.74 mA against 10.67 mA (the same keyboard, one session's scale). CH570 and
+the knob-off CH592 image are byte-identical to before. Suspend-state core Halt between
+windows is the next step; the awake floor with the receiver off is 3.06 mA.
+
 ## Connected hop counts the keyboard's edges
 
 The connected data-hop reproduced the recovered dongle rule: reset the anchor to

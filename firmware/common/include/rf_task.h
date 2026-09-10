@@ -34,6 +34,8 @@
 #define RF_EVT_BOOT_WINDOW       0x0400  /* boot reconnect/pair listen-window timer */
 #define RF_EVT_PERSIST_BOND      0x0800  /* deferred DataFlash bond write (task ctx, out of the radio ISR) */
 #define RF_EVT_QUIESCE           0x1000  /* pre-reboot: shut the radio in executor context, stop re-arming */
+#define RF_EVT_RX_WIN_CLOSE      0x2000  /* Tier 2: close a receiver window (shut) unless a beacon was accepted */
+#define RF_EVT_RX_WIN_PHASE      0x4000  /* Tier 2: the once-per-second phase-locked window open */
 
 /* Connection states */
 #define RF_STATE_IDLE        0

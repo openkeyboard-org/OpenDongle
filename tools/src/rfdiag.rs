@@ -19,7 +19,7 @@ pub const PAGE_LEN: usize = 62;
 /// firmware answers it with an empty payload and it is skipped, see
 /// `REQUIRED_PAGES`); 5 ("power") and 6 ("power detail") exist only on CH592
 /// firmware built with PM_IDLE=1 and are skipped otherwise.
-pub const PAGE_COUNT: u8 = 7;
+pub const PAGE_COUNT: u8 = 8;
 const PAGE_VERSION: u8 = 1;
 
 /// Little-endian u16 at `at`.
@@ -221,6 +221,18 @@ pub const PAGE5_NAMES: [&str; 14] = [
 /// before dispatch (a link-loss teardown sweeping the TMR0 ISR's post), so a
 /// count of the order of the teardowns is benign; the scheduler-shape alarm
 /// is a RATE comparable to `wfe_count` / `quiet_passes`.
+/// Page 7 "rx window" (CH592, Tier 2): the windowed receiver's counters.
+pub const PAGE7_NAMES: [&str; 8] = [
+    "win_opens",
+    "win_closes",
+    "win_phase_opens",
+    "win_phase_misses",
+    "win_catches",
+    "win_locks",
+    "win_unlocks",
+    "win_engages",
+];
+
 pub const PAGE6_NAMES: [&str; 10] = [
     "sleep_control",
     "alien_ipr0",
@@ -313,6 +325,11 @@ pub fn counters(pages: &[Page]) -> Vec<(&'static str, u32)> {
                     if *n == "hal_now" {
                         continue; // a clock; the derived idle duty uses it
                     }
+                    v.push((*n, le32(&p.raw, 2 + 4 * i)));
+                }
+            }
+            7 => {
+                for (i, n) in PAGE7_NAMES.iter().enumerate() {
                     v.push((*n, le32(&p.raw, 2 + 4 * i)));
                 }
             }
@@ -549,6 +566,19 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     f & 0x10 != 0, f & 0x20 != 0, f & 0x40 != 0, exact
                 ));
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
+            }
+            7 => {
+                let f = r[42];
+                out.push("rx window:".to_string());
+                out.push(format!(
+                    "  windows         opens={} closes={} catches={} phase_opens={} phase_misses={}",
+                    le32(r, 2), le32(r, 6), le32(r, 18), le32(r, 10), le32(r, 14)
+                ));
+                out.push(format!(
+                    "  detector        locks={} unlocks={} engages={} faults={} link_rx={} phase_ms={} grace_ms={} misses={} mode={} open={} phase_open={} locked={} | unscheduled: rx_low={} long={} late={} uncadenced={}",
+                    le32(r, 22), le32(r, 26), le32(r, 30), le32(r, 44), le16(r, 34), le16(r, 36), le32(r, 38), r[43],
+                    f & 1 != 0, f & 2 != 0, f & 4 != 0, f & 8 != 0, r[48], r[49], r[50], r[51]
+                ));
             }
             6 => {
                 let sc = le32(r, 2);

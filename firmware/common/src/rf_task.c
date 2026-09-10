@@ -911,6 +911,9 @@ static volatile uint8_t  stock_seed_burst_applied;
 
 static void rf_start_rx(void);
 static void rf_rearm_rx(void);
+#if DONGLE_RX_WINDOW
+static void rf_win_reset(void);
+#endif
 static void rf_configure(uint32_t access_addr);
 static void rf_send_poll(void);
 static void rf_send_pair_prep(void);
@@ -1231,6 +1234,9 @@ static void rf_return_to_fresh_pair(void)
     rf_boot_window_active = 1u;
     rf_pair_window_open   = 0u;
     rf_boot_window_step   = 0u;
+#if DONGLE_RX_WINDOW
+    rf_win_reset();
+#endif
     rf_camp_wd_active     = 0u;   /* the window takes the slot back; its close re-arms the watchdog */
     rf_state = RF_STATE_PAIRING;
     rf_access_addr = rf_bond_aa;
@@ -1241,9 +1247,291 @@ static void rf_return_to_fresh_pair(void)
     
 }
 
+#if DONGLE_RX_WINDOW
+/* ---------- Tier 2 R1: windowed receiver (CH592) ----------
+ * Against a resting production keyboard the dongle spent ~990 ms of every
+ * second in the reacquire scan to catch a ~10 ms probe that arrives once per
+ * second (1.010 s, sd 15 ms); against an absent keyboard the camp kept RX on
+ * for nothing. The receiver is ~7 mA of the dongle's draw. Windowing keeps
+ * the radio shut between short receiver windows:
+ *   - the scan's PAIR_PREP arm is the window open (channel 8 only: the
+ *     production probe sweeps all three pairing channels inside its ~10 ms,
+ *     measured 2026-09-10 with the scan pinned to each), RF_EVT_RX_WIN_CLOSE
+ *     shuts the radio W ms later unless a beacon was accepted meanwhile, and
+ *     the next open follows at P - W;
+ *   - once the scheduled-drop detector is locked (confirmed traffic, a drop
+ *     within 100 ms of the promote, twice at ~1 s cadence) one window per
+ *     second is phase-locked to the predicted probe (RF_EVT_RX_WIN_PHASE);
+ *     a miss widens the next one, two misses fall back to the continuous
+ *     scan until the next promote, because the keyboard's THIRD unanswered
+ *     probe sends it to a sleep stage its host must end;
+ *   - the terminal camp's 200 ms tick becomes the window open, period P;
+ *   - a grace period keeps today's continuous receiver for the first T
+ *     seconds after a scheduled drop (the first key after a short pause
+ *     keeps its 40 ms), counted in probe cycles in the scan and in ticks in
+ *     the camp.
+ * Acceptance inside a window hands the radio to the existing accept path
+ * (300 us PAIR_ACK slot, 15-byte ACK, promote) untouched: the close handler
+ * checks ownership under the IRQ mask and does nothing once the state moved
+ * on. Everything here is task context except rf_win_on_promote (radio sink)
+ * and the answered-poll count (connected RX sink). */
+#ifndef DONGLE_RX_WINDOW_MS
+#define DONGLE_RX_WINDOW_MS 30u
+#endif
+#ifndef DONGLE_RX_PERIOD_MS
+#define DONGLE_RX_PERIOD_MS 200u
+#endif
+#ifndef DONGLE_RX_GRACE_S
+#define DONGLE_RX_GRACE_S 60u
+#endif
+#ifndef DONGLE_RX_PHASE_MS
+#define DONGLE_RX_PHASE_MS 120u
+#endif
+#if DONGLE_RX_WINDOW_MS < 10 || DONGLE_RX_WINDOW_MS >= DONGLE_RX_PERIOD_MS || DONGLE_RX_PHASE_MS < DONGLE_RX_WINDOW_MS
+#error "DONGLE_RX_WINDOW_MS/PERIOD_MS/PHASE_MS out of range"
+#endif
+#define RF_WIN_MS_TO_TICKS(ms)   ((uint32_t)(ms) * 1000u * HAL_TICKS_PER_US)
+#define RF_WIN_PROBE_PERIOD_MS   1010u   /* measured resting-probe period */
+#define RF_WIN_PHASE_LEAD_MS     45u     /* 3 sigma of the measured jitter (15 ms) */
+#define RF_WIN_PHASE_WIDEN_MS    15u     /* per miss */
+#define RF_WIN_MAX_MISSES        2u      /* the third probe must be caught continuously */
+#define RF_WIN_MIN_LINK_RX       4u      /* answered polls that make a drop "confirmed traffic" (a ~10 ms resting link answers 8-11) */
+#define RF_WIN_MAX_LINK_TICKS    64000u  /* TMR0 periods elapsed on the link times the negotiated interval, in hop
+                                          * ticks of 31.25 us: 2 s. An elapsed-time bound from the dongle's own poll
+                                          * grid, so a qualifying link cannot have wrapped hal_now() (71.6 s) at
+                                          * ANY advertised interval; a resting burst is well under it */
+#define RF_WIN_DROP_MAX_MS       300u    /* promote -> lapse within this = a scheduled drop (the lapse dispatch can
+                                          * trail the keyboard's ~10 ms stop by the supervision timeout plus a busy
+                                          * foreground, e.g. the library's 1 s ADC sample) */
+#define RF_WIN_CADENCE_MIN_MS    900u
+#define RF_WIN_CADENCE_MAX_MS    1100u
+#define RF_WIN_CAMP_TICK_MS      200u    /* RF_CAMP_WD_TICKS_TSYS */
+
+static uint8_t  rf_win_mode;             /* 1 = windowed: radio shut between windows */
+static uint8_t  rf_win_open;             /* a window is armed */
+static uint8_t  rf_win_phase_open;       /* the open window is the phase window */
+static uint8_t  rf_win_locked;           /* scheduled-drop detector locked on a resting keyboard */
+static uint8_t  rf_win_misses;           /* consecutive phase-window misses */
+static uint8_t  rf_win_sched_runs;       /* consecutive scheduled drops (saturating at 2): the lock needs two */
+static volatile uint8_t rf_win_accepted; /* the radio sink accepted a beacon inside the current window (ownership passed) */
+static uint8_t  rf_win_fault_next;       /* rung 3 while windowed: the next open arms, then shuts (deaf) */
+static uint32_t rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u;   /* grace remaining before windowing engages */
+static uint16_t rf_win_phase_ms;         /* current phase window width */
+static volatile uint16_t rf_win_link_rx; /* answered polls on the current link (connected RX sink) */
+static volatile uint32_t rf_win_link_periods; /* TMR0 grid periods elapsed on the current link (the CYC_END ISR, once per
+                                               * period whether or not the task loop coalesces the poll events), saturating */
+static uint32_t rf_win_promote_tsys, rf_win_prev_promote_tsys;
+static volatile uint32_t rfd_win_opens, rfd_win_closes, rfd_win_phase_opens, rfd_win_phase_misses;
+static volatile uint32_t rfd_win_catches, rfd_win_locks, rfd_win_unlocks, rfd_win_engages, rfd_win_faults;
+static uint8_t rfd_win_unsched_rx, rfd_win_unsched_long, rfd_win_unsched_late, rfd_win_uncadenced;   /* why a drop did not qualify */
+
+static uint8_t rf_camp_is_terminal(void);
+static void rf_arm_retry_if_failed(void);
+static void rf_ev10_rekey_cb(uint8_t slot);
+static void rfd_put32(uint8_t *p, uint32_t v);
+static void rfd_put16(uint8_t *p, uint16_t v);
+
+static void rf_win_reset(void)
+{
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    rf_win_mode = 0u; rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_locked = 0u;
+    rf_win_misses = 0u; rf_win_sched_runs = 0u; rf_win_accepted = 0u; rf_win_fault_next = 0u;
+    rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u;
+    rf_win_phase_ms = (uint16_t)DONGLE_RX_PHASE_MS;
+}
+
+/* Promote (radio sink, IRQ tail): the link is up; no window may fire. */
+__HIGH_CODE
+static void rf_win_on_promote(void)
+{
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    if (rf_win_open) {
+        rf_win_open = 0u; rf_win_phase_open = 0u; rfd_win_catches++;
+    }
+    rf_win_prev_promote_tsys = rf_win_promote_tsys;
+    rf_win_promote_tsys = hal_now();
+    rf_win_accepted = 0u;
+    rf_win_link_rx = 0u;
+    rf_win_link_periods = 0u;
+    rf_win_misses = 0u;
+    rf_win_phase_ms = (uint16_t)DONGLE_RX_PHASE_MS;
+}
+
+/* Supervision lapse (task, before the scan starts): the scheduled-drop detector. */
+static void rf_win_on_lapse(void)
+{
+    uint32_t now = hal_now();
+    uint32_t since_promote = now - rf_win_promote_tsys;                      /* modular Tsys */
+    uint32_t cadence = rf_win_promote_tsys - rf_win_prev_promote_tsys;        /* modular Tsys */
+    uint32_t interval = (rf_conn_interval != 0u) ? rf_conn_interval : 1u;
+    uint8_t short_link = (uint8_t)(rf_win_link_periods <= RF_WIN_MAX_LINK_TICKS / interval);
+    uint8_t scheduled = (uint8_t)(rf_win_link_rx >= RF_WIN_MIN_LINK_RX && short_link
+                                  && since_promote < RF_WIN_MS_TO_TICKS(RF_WIN_DROP_MAX_MS));
+    if (rf_win_link_rx < RF_WIN_MIN_LINK_RX) { rfd_win_unsched_rx++; }
+    else if (!short_link) { rfd_win_unsched_long++; }
+    else if (since_promote >= RF_WIN_MS_TO_TICKS(RF_WIN_DROP_MAX_MS)) { rfd_win_unsched_late++; }
+    uint8_t cadenced = (uint8_t)(rf_win_sched_runs >= 1u
+                                 && cadence >= RF_WIN_MS_TO_TICKS(RF_WIN_CADENCE_MIN_MS)
+                                 && cadence <= RF_WIN_MS_TO_TICKS(RF_WIN_CADENCE_MAX_MS));
+
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    hal_event_cancel(RF_EVT_RX_RESTART);
+    rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    if (scheduled) {
+        if (rf_win_sched_runs < 2u) { rf_win_sched_runs++; }
+    } else {
+        rf_win_sched_runs = 0u;
+    }
+    if (scheduled && !cadenced && rf_win_sched_runs >= 2u) { rfd_win_uncadenced++; }
+    if (scheduled && cadenced) {
+        /* two consecutive scheduled drops ~1 s apart: a resting production keyboard */
+        if (!rf_win_locked) { rf_win_locked = 1u; rf_win_misses = 0u; rfd_win_locks++; }
+        if (!rf_win_mode) {
+            if (rf_win_grace_ms > RF_WIN_PROBE_PERIOD_MS) {
+                rf_win_grace_ms -= RF_WIN_PROBE_PERIOD_MS;
+            } else {
+                rf_win_grace_ms = 0u; rf_win_mode = 1u; rfd_win_engages++;
+            }
+        }
+    } else {
+        /* an unscheduled loss, or the cadence broke: today's continuous scan, and the
+         * grace is replenished, since the user may be typing */
+        if (rf_win_locked) { rf_win_locked = 0u; rfd_win_unlocks++; }
+        if (!scheduled) { rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u; }
+        rf_win_mode = 0u;
+    }
+    if (rf_win_mode && rf_win_locked) {
+        uint32_t since_ms = since_promote / RF_WIN_MS_TO_TICKS(1u);
+        uint32_t open_at_ms = RF_WIN_PROBE_PERIOD_MS - RF_WIN_PHASE_LEAD_MS;
+        uint32_t delay_ms = (since_ms + DONGLE_RX_WINDOW_MS < open_at_ms) ? (open_at_ms - since_ms) : DONGLE_RX_WINDOW_MS;
+        hal_event_post_delayed(RF_EVT_RX_WIN_PHASE, RF_WIN_MS_TO_TICKS(delay_ms));
+    }
+}
+
+/* RF_EVT_RX_WIN_PHASE (task): open the phase-locked window in the scan. */
+static void rf_win_phase_open_now(void)
+{
+    if (!rf_win_mode || !rf_win_locked || !rf_supervision_ev10_active || rf_state != RF_STATE_PAIRING) {
+        return;
+    }
+    hal_event_cancel(RF_EVT_PAIR_PREP);      /* the 5 Hz open yields to the phase window */
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    rf_win_phase_open = 1u;
+    rfd_win_phase_opens++;
+    rf_send_pair_prep();                     /* arms channel 8 and posts the close at the phase width */
+}
+
+/* RF_EVT_RX_WIN_CLOSE (task): shut the radio unless the window's state moved on. */
+static void rf_win_close(void)
+{
+    uint32_t irq = __risc_v_disable_irq();
+    uint8_t in_scan = (uint8_t)(rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING);
+    uint8_t in_camp = (uint8_t)(rf_camp_wd_active && rf_camp_is_terminal());
+    uint8_t owned = (uint8_t)(rf_win_open && rf_win_mode && !rf_win_accepted && (in_scan || in_camp));
+    uint8_t was_phase = rf_win_phase_open;
+
+    if (owned) {
+        hal_event_cancel(RF_EVT_RX_RESTART);   /* a failed-arm retry must not reopen a closed window */
+        hal_rf_shut();
+    }
+    rf_win_open = 0u; rf_win_phase_open = 0u;
+    (void)__risc_v_enable_irq(irq);
+    if (!owned) {
+        return;                              /* accepted meanwhile, or the state moved on */
+    }
+    rfd_win_closes++;
+    if (in_scan) {
+        if (was_phase) {
+            rfd_win_phase_misses++;
+            rf_win_misses++;
+            /* keep the scan alive across the miss instead of giving up to the camp
+             * (drain a coalesced timeout first: rf_ev10_rekey_cb posts RF_EVT_TIMEOUT) */
+            hal_event_cancel(RF_EVT_TIMEOUT);
+            hal_timer_arm(HAL_TMR_SLOT_EV10_REKEY,
+                          RF_SUPERVISION_STOCK_WATCHDOG_TMOS * HAL_TMOS_UNIT_TICKS, rf_ev10_rekey_cb);
+            if (rf_win_misses >= RF_WIN_MAX_MISSES) {
+                rf_win_mode = 0u;            /* continuous scan until the next promote re-locks */
+                hal_event_post(RF_EVT_PAIR_PREP);
+                return;
+            }
+            rf_win_phase_ms = (uint16_t)(rf_win_phase_ms + RF_WIN_PHASE_WIDEN_MS);
+            hal_event_post_delayed(RF_EVT_RX_WIN_PHASE,
+                                   RF_WIN_MS_TO_TICKS(RF_WIN_PROBE_PERIOD_MS - rf_win_phase_ms));
+        }
+        hal_event_post_delayed(RF_EVT_PAIR_PREP,
+                               RF_WIN_MS_TO_TICKS(DONGLE_RX_PERIOD_MS - DONGLE_RX_WINDOW_MS));
+    }
+    /* camp: the camp tick opens the next window */
+}
+
+/* Camp tick (task, inside rf_camp_watchdog_tick after the terminal check). Returns 1 when the
+ * tick was a window open (the caller returns), 0 to run today's silent-tick logic. */
+static uint8_t rf_win_camp_tick(void)
+{
+    uint32_t irq;
+
+    if (!rf_bond_valid) {
+        return 0u;                           /* the unbonded fresh-pair camp stays continuous (D5) */
+    }
+    if (!rf_win_mode) {
+        if (rf_win_grace_ms > RF_WIN_CAMP_TICK_MS) {
+            rf_win_grace_ms -= RF_WIN_CAMP_TICK_MS;
+            return 0u;
+        }
+        rf_win_grace_ms = 0u; rf_win_mode = 1u; rfd_win_engages++;
+    }
+    irq = __risc_v_disable_irq();
+    if (!rf_camp_is_terminal() || !rf_camp_wd_active) {
+        (void)__risc_v_enable_irq(irq);
+        return 1u;                           /* the camp ended under us */
+    }
+    hal_event_cancel(RF_EVT_RX_RESTART);
+    rf_start_rx();                           /* the camp's own arm: session AA, channel 8 */
+    if (rf_win_fault_next) {                 /* rung 3: a deaf window; the next tick must recover */
+        rf_win_fault_next = 0u; hal_rf_shut(); rfd_win_faults++;
+    }
+    rf_win_open = 1u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    rfd_win_opens++;
+    hal_event_post_delayed(RF_EVT_RX_WIN_CLOSE, RF_WIN_MS_TO_TICKS(DONGLE_RX_WINDOW_MS));
+    (void)__risc_v_enable_irq(irq);
+    rf_arm_retry_if_failed();
+    if (rf_camp_wd_active) {
+        hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_WIN_MS_TO_TICKS(DONGLE_RX_PERIOD_MS), rf_boot_window_cb);
+    }
+    return 1u;
+}
+
+static void rf_win_diag_fill(uint8_t *out)
+{
+    rfd_put32(&out[2],  rfd_win_opens);
+    rfd_put32(&out[6],  rfd_win_closes);
+    rfd_put32(&out[10], rfd_win_phase_opens);
+    rfd_put32(&out[14], rfd_win_phase_misses);
+    rfd_put32(&out[18], rfd_win_catches);
+    rfd_put32(&out[22], rfd_win_locks);
+    rfd_put32(&out[26], rfd_win_unlocks);
+    rfd_put32(&out[30], rfd_win_engages);
+    rfd_put16(&out[34], rf_win_link_rx);
+    rfd_put16(&out[36], rf_win_phase_ms);
+    rfd_put32(&out[38], rf_win_grace_ms);
+    out[42] = (uint8_t)((rf_win_mode ? 1u : 0u) | (rf_win_open ? 2u : 0u)
+                        | (rf_win_phase_open ? 4u : 0u) | (rf_win_locked ? 8u : 0u));
+    out[43] = rf_win_misses;
+    rfd_put32(&out[44], rfd_win_faults);
+    out[48] = rfd_win_unsched_rx; out[49] = rfd_win_unsched_long;
+    out[50] = rfd_win_unsched_late; out[51] = rfd_win_uncadenced;
+}
+#endif /* DONGLE_RX_WINDOW */
+
 static void rf_enter_stock_reacquire(void)
 {
     rfd_supervision_lapses++;
+#if DONGLE_RX_WINDOW
+    rf_win_on_lapse();
+#endif
     rfd_reacq_entry_systick = hal_timing_systick_now();
 #if !RF_TASK_EXECUTOR_TMOS
     if (rf_ch570_connected_rx_count == 0u) {
@@ -1389,6 +1677,11 @@ static void rf_camp_watchdog_tick(void)
         rf_camp_wd_active = 0u;           /* the camp ended: self-disable */
         return;
     }
+#if DONGLE_RX_WINDOW
+    if (rf_win_camp_tick()) {
+        return;
+    }
+#endif
     seen = rf_camp_wd_events();
     if (seen != rf_camp_wd_seen) {
         rf_camp_wd_seen   = seen;         /* alive: leave the radio alone */
@@ -1476,6 +1769,13 @@ static void rf_stock_reacquire_giveup(void)
     hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
     rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
     hal_event_cancel(RF_EVT_PAIR_PREP);
+#if DONGLE_RX_WINDOW
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    if (rf_win_locked) { rf_win_locked = 0u; rfd_win_unlocks++; }   /* the probes stopped: no lock to keep */
+    rf_win_sched_runs = 0u;
+#endif
     hal_event_cancel(RF_EVT_SEND_PAIR_ACK);
     hal_event_cancel(RF_EVT_POLL);
     hal_event_cancel(RF_EVT_POST_POLL_RX);
@@ -1789,6 +2089,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                                             * stamps refresh every RX, reads
                                             * within the 10 s deadline) */
             rf_last_conn_rx_tsys = rx_now;
+#if DONGLE_RX_WINDOW
+            if (rf_win_link_rx != 0xFFFFu) { rf_win_link_rx++; }
+#endif
 
 #if !RF_TASK_EXECUTOR_TMOS
             rf_ch570_connected_rx_count++;
@@ -1907,6 +2210,12 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 
                     if (rf_supervision_ev10_active) {
                         hal_event_cancel(RF_EVT_PAIR_PREP);
+#if DONGLE_RX_WINDOW
+                        hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+                        hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+                        rf_win_accepted = 1u;
+                        if (rf_win_open) { rf_win_open = 0u; rf_win_phase_open = 0u; rfd_win_catches++; }
+#endif
                         hal_timer_arm_periodic(HAL_TMR_SLOT_PAIR_ACK,
                                       RF_TMR0_PAIR_INIT_COUNT, rf_pair_ack_cb);
                         
@@ -2049,6 +2358,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* Stock configures the session-AA radio path while still in
                  * state 1, then commits state 2. Keep that ordering so our
                  * rf_config entry context matches the stock caller trace. */
+#if DONGLE_RX_WINDOW
+                rf_win_on_promote();
+#endif
                 rfd_connected_promotes++;   /* diag: before the flip, so the
                                              * flip -> grid-arm gap is untouched */
                 rf_start_rx();
@@ -2174,6 +2486,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             /* Production shape: RF config happens while still in state 1;
              * TX_FINISH then promotes to state 2 and the already-running
              * TMR0 event-0x40 cadence becomes connected polling. */
+#if DONGLE_RX_WINDOW
+            rf_win_on_promote();
+#endif
             rfd_connected_promotes++;       /* diag: before the flip (see above) */
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
@@ -2261,6 +2576,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
         }
         if (rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING) {
             hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
+#if DONGLE_RX_WINDOW
+            rf_win_accepted = 0u;   /* the accepted window is abandoned: the scan owns the radio again */
+#endif
             hal_event_post(RF_EVT_PAIR_PREP);
             
             break;
@@ -2346,6 +2664,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         uint8_t slot;
         uint16_t bit;
         rf_quiesced = 1;
+#if DONGLE_RX_WINDOW
+        hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+        hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+        rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_mode = 0u;
+#endif
         if (rf_bond_persist_pending) {
             rf_persist_bond_task();
         }
@@ -2394,6 +2717,16 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_START;
     }
 
+#if DONGLE_RX_WINDOW
+    if (events & RF_EVT_RX_WIN_CLOSE) {
+        rf_win_close();
+        return events ^ RF_EVT_RX_WIN_CLOSE;
+    }
+    if (events & RF_EVT_RX_WIN_PHASE) {
+        rf_win_phase_open_now();
+        return events ^ RF_EVT_RX_WIN_PHASE;
+    }
+#endif
     if (events & RF_EVT_BOOT_WINDOW) {
         /* Stock-style boot reconnect/pair window. Runs only while bonded and
          * still un-connected. Each ~300 ms tick flips the listen AA between the
@@ -2873,6 +3206,9 @@ void rf_tmr0_isr_dispatch(void)
         }
         break;
     case RF_STATE_CONNECTED:
+#if DONGLE_RX_WINDOW
+        if (rf_win_link_periods != 0xFFFFFFFFu) { rf_win_link_periods++; }
+#endif
         hal_event_post(RF_EVT_POLL);
         break;
     default:
@@ -2922,6 +3258,32 @@ static void rf_send_pair_prep(void)
         return;
     }
 
+#if DONGLE_RX_WINDOW
+    if (rf_win_mode) {
+        /* Window open, atomic against the radio sink: an accept that lands between the
+         * arm and the publication would otherwise be re-armed over and re-owned. */
+        uint32_t w_irq = __risc_v_disable_irq();
+        if (rf_win_accepted) {
+            (void)__risc_v_enable_irq(w_irq);
+            return;                          /* ownership already passed to the accept path */
+        }
+        rf_channel = rf_pair_channels[0];   /* channel 8: the probe sweeps all three */
+        (void)rf_hop_read();
+        hal_rf_shut();
+        hal_rf_set_channel(rf_channel);
+        (void)hal_rf_start_rx_primed(HAL_RF_CHANNEL_CURRENT, 0, rf_pair_prep_buf, sizeof(rf_pair_prep_buf));
+        if (rf_win_fault_next) {             /* rung 3: a deaf window; the next open must recover */
+            rf_win_fault_next = 0u; hal_rf_shut(); rfd_win_faults++;
+        }
+        rf_win_open = 1u;
+        rfd_win_opens++;
+        rfd_pair_prep_runs++;
+        (void)__risc_v_enable_irq(w_irq);
+        hal_event_post_delayed(RF_EVT_RX_WIN_CLOSE,
+            RF_WIN_MS_TO_TICKS(rf_win_phase_open ? rf_win_phase_ms : DONGLE_RX_WINDOW_MS));
+        return;
+    }
+#endif
     rf_channel = rf_pair_channels[rf_pair_prep_idx % RF_PROTO_PAIR_CHANNEL_COUNT];
     rf_pair_prep_idx = (uint8_t)((rf_pair_prep_idx + 1) % 3);  /* == RF_PROTO_PAIR_CHANNEL_COUNT; signed literal kept for byte-identical codegen */
 
@@ -3824,6 +4186,10 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
         out[59] = d2.irq_bits;
         rfd_put16(&out[60], USB_SuspendEpisodes());
 #if DONGLE_PM_IDLE
+#if DONGLE_RX_WINDOW
+    } else if (page == 7u) {
+        rf_win_diag_fill(out);
+#endif
     } else if (page >= 5u) {
         /* Pages 5 "power" and 6 "power detail": ch592/src/pm_ch592.c. */
         dongle_pm_diag_fill(page, out);
@@ -3915,6 +4281,13 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         return 0xE1u;
     }
     hal_event_cancel(RF_EVT_RX_RESTART);    /* a stale restart must not race us */
+#if DONGLE_RX_WINDOW
+    if (rung == 3u && rf_win_mode) {
+        rf_win_fault_next = 1u;             /* inject inside the next window: arm, then shut */
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
+#endif
     if (rung == 3u) {
         /* Fault injection: shut the radio and leave it deaf. The camp
          * watchdog must bring it back at its next tick: reset its baseline

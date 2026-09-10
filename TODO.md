@@ -549,6 +549,22 @@ the build id for no functional gain, or expands scope beyond the import:
   no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.
+- **Tier 2 R1 shipped: windowed receiver (2026-09-10).** The production keyboard rests by
+  stopping its session 5 s after the last key and reconnecting once a second (1.010 s,
+  sd 15 ms, each connection ~10 ms); the dongle used to spend the whole second in the
+  reacquire scan, and the absent camp kept RX on: the receiver is 7.15 mA of the 10.2 to
+  10.7 mA idle states, the core's idle path 3.06 mA (host-independent: 3.063 awake,
+  3.059 asleep with the receiver never armed). The scan and camp now open 30 ms channel-8
+  windows every 200 ms plus a phase-locked window per second; awake resting state 5.74 mA.
+  Open: R2 sweeps P in {100, 200, 500} and W in {25, 30, 40} for the shipped pair (the
+  production probe is caught on any single channel, so W can shrink); R3a is a spike on
+  Halt with the radio shut (datasheet Table 5-2: USB wake exists for Halt, not Sleep; a
+  sleep behind TMOS hangs the next RF op on OpenController's bench) before R3b halts the
+  core between windows in suspend, re-basing `hal_now()` by the halted RTC ticks; the
+  ~3 % of resting cycles that fell back to the continuous scan in earlier builds were the
+  detector's traffic threshold and are gone with the grid-period bound. A resting production
+  keyboard yields one lapse, one EV10 entry and one promote per second by design; "0 lapses"
+  oracles describe OpenController, which never drops on its own.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while
   the host sleeps (toward the USB suspend budget) is out of Tier 1 and needs the
   remote-wake latency contract first.

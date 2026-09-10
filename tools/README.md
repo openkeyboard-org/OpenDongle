@@ -146,6 +146,22 @@ deadline arms the timer sooner, and on a live link TMR0 wakes the core before it
 fires). The page 6 remote-wake
 arm count is 16 bits on both sides and its rate wraps accordingly.
 
+Page 7 `rx window` (CH592 with `PM_RX_WINDOW=1`, the Tier 2 windowed receiver) counts the
+receiver windows the reacquire scan and the terminal camp open instead of keeping RX on:
+`win_opens` / `win_closes` (a close is a window that ended with nothing accepted; opens
+minus closes minus catches is the window in flight), `win_catches` (a beacon accepted
+inside a window), `win_phase_opens` / `win_phase_misses` (the once-per-second window
+phase-locked to a resting production keyboard's probe, and how often it caught nothing; a
+miss widens the next one and two in a row fall back to the continuous scan until the next
+promote), `win_locks` / `win_unlocks` (the scheduled-drop detector locking on two
+consecutive drops ~1 s apart after a short confirmed link, and letting go on anything
+else) and `win_engages` (windowing starting once the grace period ran out). The detector
+line shows the live state: `link_rx` (answered polls on the last link), `phase_ms` (the
+current phase window width), `grace_ms` (continuous receiver remaining before windowing
+engages), `misses`, `faults` (rung 3 injections inside a window) and the mode/open/
+phase_open/locked flags. Against a resting production keyboard the healthy reading is
+one phase open and one catch per second with `win_phase_misses` flat.
+
 Exit codes:
 
 | Code | Meaning |
@@ -185,6 +201,10 @@ radio); rung `3` shuts the radio and leaves it deaf, the fault injection for the
 terminal camp's liveness watchdog, which re-arms it at its next 200 ms tick on
 both chips (rung 3 resets the tick's baseline; page 1 `camp_wd_rearms` advances
 by one; on CH570 the escalation to a vendor re-init needs a second silent tick).
+With the CH592 receiver windowed (page 7 `mode` true) rung 3 instead marks the NEXT
+window: it arms and is shut at once, so the injection lands inside a listening window
+rather than on a radio that was off anyway, and recovery is the window after it (page 7
+`faults` advances by one, the link re-forms within the window period).
 Rungs `40` to `59` are the opposite kind of injection: on a live link they mask
 every interrupt for a nominal `rung - 40` poll slots of 875 µs, so the polls
 coalesce into one gap of about that many intervals; a nominal gap of 5 or 10
