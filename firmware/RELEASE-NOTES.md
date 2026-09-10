@@ -5,6 +5,47 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## Halt between receiver windows while the host sleeps (CH592, opt-in)
+
+With the windowed receiver of the previous entry the dongle is idle between windows, and while
+the host is suspended nothing needs the core at all: the window schedule is an RTC timer, the
+radio is shut and the link is down. `PM_HALT=1` stops the clock system between windows with the
+vendor `LowPower_Halt`, which keeps every peripheral powered and wakes on RTC or USB (the
+datasheet gives USB as a wake event for Idle and Halt only; a core in Sleep would sleep through
+the host's resume and force a re-enumeration). A spike answered the one silicon question first:
+56,986 halts with the radio shut, all returned, the resting keyboard served throughout, so the
+BLE library needs none of the restoration a sleep taken behind the scheduler's back would.
+
+The entry is admitted only when USB is suspended, the receiver is windowed with no window open,
+no accepted window and no live link, and the next deadline is at least 5 ms away, on top of every
+existing idle veto. Two independent wake sources are armed: the RTC trigger at that deadline less
+a 3 ms clock-restart lead, and the RTC periodic timer at 1 s as a backstop no earlier event can
+consume, so a trigger lost in the vendor prologue is recovered within one backstop period (1 s)
+rather than leaving the dongle deaf until the host wakes. Because the vendor primitive takes its sleep instruction with interrupts enabled,
+the entry takes a last look immediately before it and abandons the halt if the trigger has already
+fired, if the deadline is within 1 ms, or if the USB state has moved (a resume or bus reset can run
+after the unmask and clear its own flag, so only the driver's state proves anything). Both flags and
+the pending bit are cleared on entry and exit; a stale periodic-timer flag would otherwise fire the
+handler the moment it is enabled and abandon every halt. `hal_now()` is the SysTick, which stops
+with the clocks, so it is advanced on the way out by the RTC delta minus the SysTick delta the awake
+parts already counted. While the host sleeps the deadline cap becomes `PM_SUSPEND_CAP_US` (250 ms):
+the window schedule is itself in the deadline table, so the cap only bounds the library's untracked
+timers, its 1 s temperature sample and 120 s calibration.
+Bench (CH592 950E9B1E, production keyboard resting, host asleep, measured on the dongle's 3V3
+feed): 1.347 mA against 10.13 mA before Tier 2 and 5.74 mA awake, halts averaging 136 ms with zero abandoned entries, 393 catches on 395
+phase windows, one give-up, no reset. Awake behaviour unchanged: poll replies 1139-1140/s of
+1143/s sent, fresh pair 2/2, reacquire cadence 33.4/s, bonded reconnect 10/10 at 5 ms, the 5- and
+10-slot hop gaps held, and windowing never engages against a keyboard that holds its link.
+That is an operating point, not a compliance claim: it is the 3V3 rail rather than VBUS, one
+keyboard resting, and neither the unbonded camp nor a continuously connected keyboard windows at
+all. Ships opt-in (`PM_HALT=0`) pending the remaining gates: bus reset taken while halted, remote
+wake from a halt, clock continuity across halts, resume without re-enumeration measured rather
+than inferred, and a shipped-default suspend soak; the 395-window sample above is not that soak.
+The entry also carries a known residual: the vendor primitive takes its wait with interrupts
+enabled, so a resume arriving inside its prologue is serviced and then slept through, bounded by
+the backstop at one second. With the knob off the image is byte-identical and
+CH570 is untouched.
+
 ## Windowed receiver in the reacquire scan and the terminal camp (CH592)
 
 Against a resting production keyboard the dongle spent ~990 ms of every second in the

@@ -113,6 +113,9 @@ const uint8_t *RF_GetDongleMac(void);
 #define RF_DIAG_PAGE_COUNT   5u
 #endif
 uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max);
+#if DONGLE_RX_WINDOW
+uint8_t RF_WinRadioOff(void);   /* windowed and between windows: the radio is shut */
+#endif
 
 #if DONGLE_PM_IDLE
 /* Idle-admission class of the RF task for the CH592 main-loop idle
