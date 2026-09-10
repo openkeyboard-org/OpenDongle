@@ -1288,8 +1288,9 @@ static void rf_return_to_fresh_pair(void)
 #ifndef DONGLE_RX_PHASE_MS
 #define DONGLE_RX_PHASE_MS 120u
 #endif
-#if DONGLE_RX_WINDOW_MS < 10 || DONGLE_RX_WINDOW_MS >= DONGLE_RX_PERIOD_MS || DONGLE_RX_PHASE_MS < DONGLE_RX_WINDOW_MS
-#error "DONGLE_RX_WINDOW_MS/PERIOD_MS/PHASE_MS out of range"
+#if DONGLE_RX_WINDOW_MS < 10 || DONGLE_RX_WINDOW_MS >= DONGLE_RX_PERIOD_MS \
+    || DONGLE_RX_PHASE_MS < DONGLE_RX_WINDOW_MS || DONGLE_RX_PHASE_MS > DONGLE_RX_PERIOD_MS * 5u
+#error "DONGLE_RX_WINDOW_MS/PERIOD_MS/PHASE_MS: need 10 <= W < P and W <= PHASE <= 5*P"
 #endif
 #define RF_WIN_MS_TO_TICKS(ms)   ((uint32_t)(ms) * 1000u * HAL_TICKS_PER_US)
 #define RF_WIN_PROBE_PERIOD_MS   1010u   /* measured resting-probe period */
@@ -1485,9 +1486,14 @@ static uint8_t rf_win_camp_tick(void)
         rf_win_grace_ms = 0u; rf_win_mode = 1u; rfd_win_engages++;
     }
     irq = __risc_v_disable_irq();
-    if (!rf_camp_is_terminal() || !rf_camp_wd_active) {
+    if (!rf_camp_is_terminal()) {
+        rf_camp_wd_active = 0u;              /* the camp ended under us: self-disable, as the tick does */
         (void)__risc_v_enable_irq(irq);
-        return 1u;                           /* the camp ended under us */
+        return 1u;
+    }
+    if (!rf_camp_wd_active) {
+        (void)__risc_v_enable_irq(irq);
+        return 1u;                           /* ownership already passed to a sink accept */
     }
     hal_event_cancel(RF_EVT_RX_RESTART);
     rf_start_rx();                           /* the camp's own arm: session AA, channel 8 */
