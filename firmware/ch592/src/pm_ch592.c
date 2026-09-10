@@ -102,7 +102,7 @@
 #include "CH59x_clk.h"       /* RTC_TRIGFunCfg, RTC_ClearITFlag, HSECFG_Current */
 extern volatile uint32_t RTCTigFlag;   /* the HAL's RTC_IRQHandler (RTC.c) sets it */
 #if !DONGLE_PM_EXACT_DEADLINE || !DONGLE_RX_WINDOW
-#error "PM_HALT_SPIKE needs PM_EXACT_DEADLINE=1 (the RTC deadline plan) and PM_RX_WINDOW=1"
+#error "PM_HALT needs PM_EXACT_DEADLINE=1 (the RTC deadline plan) and PM_RX_WINDOW=1"
 #endif
 #endif
 
@@ -424,7 +424,7 @@ static void pm_tmr3_plan(void)
  * re-arms; a veto leaves the last period running, so TMR3 keeps cycling at
  * <= cap whenever the idle path is not reached. */
 #if DONGLE_PM_HALT
-/* ---------- Tier 2 R3a spike: Halt between receiver windows in suspend ----------
+/* ---------- Tier 2 R3b: Halt between receiver windows in suspend ----------
  * Datasheet Table 5-2: Halt stops the clock system with every peripheral powered
  * and wakes on I/O, RTC, BAT or USB (Sleep would not wake on USB). Between two
  * receiver windows nothing needs the core: the window schedule is a TMOS timer

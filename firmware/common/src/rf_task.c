@@ -1529,7 +1529,7 @@ uint8_t RF_WinRadioOff(void)
 
 #if DONGLE_PM_HALT
 void pm_halt_diag(uint32_t *halts, uint32_t *ticks, uint16_t *usb_wakes);   /* pm_ch592.c */
-void pm_halt_diag2(uint32_t *attempts, uint32_t *rtc_wakes);                /* pm_ch592.c */
+void pm_halt_diag2(uint32_t *abandons, uint32_t *reasons);                  /* pm_ch592.c */
 #endif
 
 static void rf_win_diag_fill(uint8_t *out)

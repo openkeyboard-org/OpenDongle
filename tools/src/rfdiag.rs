@@ -580,7 +580,7 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     le32(r, 22), le32(r, 26), le32(r, 30), le32(r, 44), le16(r, 34), le16(r, 36), le32(r, 38), r[43],
                     f & 1 != 0, f & 2 != 0, f & 4 != 0, f & 8 != 0, r[48], r[49], r[50], r[51]
                 ));
-                // Bytes 52..61 are the Tier 2 R3a Halt spike (PM_HALT_SPIKE=1); all zero otherwise.
+                // Bytes 52..61 are the Tier 2 halt path (PM_HALT=1); all zero otherwise.
                 let halts = le32(r, 52);
                 if halts != 0 || le16(r, 60) != 0 {
                     out.push(format!(
