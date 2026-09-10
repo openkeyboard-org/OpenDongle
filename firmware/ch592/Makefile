@@ -263,6 +263,11 @@ $(call pm-require-range,PM_HEARTBEAT_US,100,10000)
 $(call pm-require-in,PM_EXACT_DEADLINE,0 1,0 or 1)
 $(call pm-require-range,PM_DEADLINE_CAP_US,1000,50000)
 $(call pm-require-range,PM_EP0_QUIET_MS,0,5000)
+$(call pm-require-in,PM_RX_WINDOW,0 1,0 or 1)
+$(call pm-require-range,PM_RX_WINDOW_MS,10,1000)
+$(call pm-require-range,PM_RX_PERIOD_MS,20,5000)
+$(call pm-require-range,PM_RX_GRACE_S,0,3600)
+$(call pm-require-range,PM_RX_PHASE_MS,10,2000)
 # Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
 # named before the compiler runs.
 ifneq ($(strip $(PM_IDLE_LEVEL)),0)

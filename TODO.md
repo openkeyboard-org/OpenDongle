@@ -555,14 +555,15 @@ the build id for no functional gain, or expands scope beyond the import:
   reacquire scan, and the absent camp kept RX on: the receiver is 7.15 mA of the 10.2 to
   10.7 mA idle states, the core's idle path 3.06 mA (host-independent: 3.063 awake,
   3.059 asleep with the receiver never armed). The scan and camp now open 30 ms channel-8
-  windows every 200 ms plus a phase-locked window per second; awake resting state 5.74 mA.
+  windows every 200 ms plus a phase-locked window per second; awake resting state 5.74 mA
+  (bench builds ran with `PM_RX_GRACE_S=0`; the shipped grace is a nominal 60 s).
   Open: R2 sweeps P in {100, 200, 500} and W in {25, 30, 40} for the shipped pair (the
   production probe is caught on any single channel, so W can shrink); R3a is a spike on
   Halt with the radio shut (datasheet Table 5-2: USB wake exists for Halt, not Sleep; a
   sleep behind TMOS hangs the next RF op on OpenController's bench) before R3b halts the
   core between windows in suspend, re-basing `hal_now()` by the halted RTC ticks; the
   ~3 % of resting cycles that fell back to the continuous scan in earlier builds were the
-  detector's traffic threshold and are gone with the grid-period bound. A resting production
+  detector's traffic threshold; the final build observed 0 fallbacks over 297 cycles. A resting production
   keyboard yields one lapse, one EV10 entry and one promote per second by design; "0 lapses"
   oracles describe OpenController, which never drops on its own.
 - **Suspend policy.** Idle while suspended is on (10.71 mA); radio duty-cycling while

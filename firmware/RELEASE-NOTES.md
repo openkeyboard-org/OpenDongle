@@ -17,19 +17,21 @@ channel 8 every 200 ms (the production probe sweeps all three pairing channels i
 keyboard's next probe once a detector has seen two scheduled drops (a short confirmed link
 dropped within 300 ms of its promote, ~1 s apart); the radio is shut between windows. A
 missed phase window widens the next one and two misses fall back to the continuous scan
-until the next promote, so the keyboard's third unanswered probe, which would send it to a
-sleep stage only its host can end, never happens. Acceptance inside a window hands the
+until the next promote, restoring continuous reception before the keyboard's third
+unanswered probe (which would send it to a sleep stage only its host can end). Acceptance inside a window hands the
 radio to the existing accept path untouched. A grace period keeps today's continuous
-receiver for the first 60 s after a scheduled drop, so the first key after a short pause
-keeps its ~40 ms; the unbonded fresh-pair camp and the 3 s boot window stay continuous.
+receiver for a nominal 60 s after a scheduled drop (counted 1.010 s per resting cycle in the
+scan and 200 ms per tick in the camp, replenished by an unscheduled loss), so the first key
+after a short pause keeps its ~40 ms; the unbonded fresh-pair camp and the 3 s boot window stay continuous.
 Knobs `PM_RX_WINDOW` (0 is byte-identical to before), `PM_RX_WINDOW_MS`, `PM_RX_PERIOD_MS`,
 `PM_RX_GRACE_S`, `PM_RX_PHASE_MS`; diag page 7 `rx window` counts opens, closes, catches,
 phase opens and misses, detector locks and the reasons a drop did not qualify.
 Bench (CH592 6308E6D8, production keyboard, grace 0): 297 resting cycles, 297 phase
 windows, 297 catches, 0 misses, 0 give-ups, 0 fallbacks; first key after rest 20/20 within
 48 ms (40 ms before); cold reconnect at random phases 10/10 within 199 ms; the awake resting
-state metered 5.74 mA against 10.67 mA (the same keyboard, one session's scale). CH570 and
-the knob-off CH592 image are byte-identical to before. Suspend-state core Halt between
+state metered 5.74 mA against 10.67 mA (the same keyboard, one session's scale). With the
+build id forced, CH570 and the knob-off CH592 image are byte-identical to before (ordinary
+images differ in their identity bytes, since the id hashes the shared sources and flags). Suspend-state core Halt between
 windows is the next step; the awake floor with the receiver off is 3.06 mA.
 
 ## Connected hop counts the keyboard's edges
@@ -152,9 +154,10 @@ build id and named in `CONFIG_TEXT`, schema 12 as of the exact-deadline change):
 (3 = idle in every RF state: 1 = keyboard-absent camp only, 2 = every pairing
 sub-mode + idle), `PM_IDLE_IN_SUSPEND` (1), `PM_GPIO_PARK` (1), `PM_CLK_GATE` (1, see
 below) with `PM_CLK_GATE_MASK` (19958 = 0x4DF6), `PM_USB_DIGIN_OFF` (0),
-`PM_HEARTBEAT_US` (1000), `PM_EP0_QUIET_MS` (200). Building with the six switches at
+`PM_HEARTBEAT_US` (1000), `PM_EP0_QUIET_MS` (200). Building with the seven switches at
 zero (`PM_IDLE=0 PM_IDLE_LEVEL=0 PM_IDLE_IN_SUSPEND=0 PM_GPIO_PARK=0
-PM_USB_DIGIN_OFF=0 PM_CLK_GATE=0`; the period and mask knobs keep their defaults)
+PM_USB_DIGIN_OFF=0 PM_CLK_GATE=0 PM_RX_WINDOW=0`; the period and mask knobs keep their
+defaults; `PM_RX_WINDOW` joined the set with the Tier 2 windowed receiver)
 produces an image byte-identical to the pre-change firmware (verified with a forced
 build id), and the CH570 image is untouched. New IAP 0x92 pages 5/6 ("power")
 expose idle duty, wake attribution (radio / TMR0 / TMR3 / USB), the veto histogram,
