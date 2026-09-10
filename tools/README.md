@@ -185,10 +185,16 @@ radio); rung `3` shuts the radio and leaves it deaf, the fault injection for the
 terminal camp's liveness watchdog, which re-arms it at its next 200 ms tick on
 both chips (rung 3 resets the tick's baseline; page 1 `camp_wd_rearms` advances
 by one; on CH570 the escalation to a vendor re-init needs a second silent tick).
-The firmware refuses every rung unless the dongle is in its exact terminal
-reconnect camp -- not connected, no EV10 reacquire scan, no boot window or
-relisten, no pair-ACK burst in flight -- and refuses them all while quiescing
-for a reboot. Exit status is non-zero on any refusal, and the reply names the
+Rungs `40` to `59` are the opposite kind of injection: on a live link they mask
+every interrupt for `rung - 40` poll slots of 875 µs, so the polls coalesce into
+one gap of that many intervals; a gap of 5 or 10 slots is the regression check
+for the hop repeat-correction fix (the link must survive it). Rungs `60` to `69`
+add `3 * (rung - 60)` ticks of 31.25 µs to a 5-slot gap and `70` to `79` to a
+6-slot gap, sweeping the remainder within the slot. The firmware
+refuses rungs 1 to 3 unless the dongle is in its exact terminal reconnect camp
+-- not connected, no EV10 reacquire scan, no boot window or relisten, no
+pair-ACK burst in flight -- refuses rungs 40 to 79 unless a link is up, and
+refuses them all while quiescing for a reboot. Exit status is non-zero on any refusal, and the reply names the
 reason. Use it on a dongle that is deaf to its
 keyboard, rung 1 first: which rung restores the link says whether the software
 re-arm loop or the PHY was dead.

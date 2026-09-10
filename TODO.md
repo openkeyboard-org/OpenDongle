@@ -238,64 +238,49 @@ opportunistic rather than systematic — `GET_DESCRIPTOR`, `GET_REPORT`,
 `GET_IDLE` and `GET_PROTOCOL` omit it too — so the tidy fix is a single
 direction check at the dispatch point rather than four scattered ones.
 
-## Defect: the hop repeat-correction can forward-date its own anchor and then overflow 32 bits
+## Fixed 2026-09-09: the connected hop lost the keyboard after a coalesced gap of 5k poll slots
 
-**Where:** `firmware/common/include/rf_protocol.h`, `rf_proto_hop_step()` — the
-`sum = h->last + elapsed` computation inside the repeat-correction branch, and
-the anchor write below it.
+**Where:** `firmware/common/include/rf_protocol.h`, `rf_proto_hop_step()`; the seed
+sites in `firmware/common/src/rf_task.c`.
 
-**Not the finding as filed.** CodeRabbit asked for `h->last` to be reduced
-modulo `RF_PROTO_HOP_WRAP` before the addition. That is a no-op: `h->last` was
-overwritten with `now` a few lines earlier and `rf_hop_read()` already reduces
-`now` mod WRAP, so it is always in range. The overflow is real, but it arrives
-by a route the finding does not describe.
+**What the filed overflow really was.** The entry below this one used to describe a
+32-bit overflow in the repeat-correction branch (reachable, bounded, "a deliberate
+decision to deviate from the recovered rule"). The bench campaign that decision
+triggered found the branch itself is the defect, and the overflow only its rarest
+symptom: the recovered rule reset the anchor to the poll time, took
+`step = elapsed / interval`, and whenever the index landed back on the previous one
+forced a slot forward and forward-dated the anchor. That is right for a poll a tick
+early (step 0) and wrong for a coalesced gap of exactly 5, 10, 15 ... slots, where
+the keyboard is already on that channel: the forced slot misses it, the next poll
+takes the wrap arm and hops two slots, and supervision tears the link down.
+Masking the dongle's interrupts for a whole number of poll slots on a live link
+(`opendongle --rf-poke 40+N`) dropped the link every time at 5 and 10 slots and
+never at 1-4, 6-8 or 12. Restricting the correction to step 0 only moved the
+failure into the remainder band after a 5k gap (codex counterexample: 5 slots +
+15..27 ticks).
 
-**The actual mechanism.** The branch fires whenever `step = elapsed / interval`
-is *any* multiple of 5, not only zero. For `step == 0` it back-dates the anchor,
-which is the documented intent. For `step >= 5` the same expression *forward*-
-dates it: `h->last` lands `elapsed - interval` ticks **ahead** of the hop clock.
-`rf_proto_hop_delta()` cannot tell a future-dated anchor from a genuine wrap, so
-the next poll takes the wrap arm and returns an `elapsed` near WRAP (~2.83e9).
-If that poll's `step` is also a multiple of 5, the branch is re-entered with
-`sum = now + elapsed` ~5.3e9, which truncates: the single `if (sum >= WRAP)`
-reduction is skipped because the truncated value is already below WRAP, and the
-anchor lands low by exactly `2^32 - WRAP` = 1,463,812,096 ticks.
+**The fix is a model, not a patch.** The dongle now keeps the keyboard's model: an
+edge anchor 13 ticks before the poll it expects (`RF_PROTO_HOP_EDGE_LEAD`, every seed
+site backdates the grid origin by it), `step = elapsed / interval` from that anchor,
+the anchor advanced by step WHOLE intervals (`rf_proto_hop_add`, the poll's jitter
+stays in the phase), the index by step mod 5. No correction branch, no reset to the
+poll time, and the modular add subtracts before it adds so the sum cannot pass 2^32
+(the original finding, closed by construction). Both ends now count the same edges
+however the polls are spaced; the one structural exception (the keyboard's servo
+settles a tick short of the dongle's lead, so a poll in that two-tick window counts
+one edge more, for that poll only) is documented at the definition.
 
-**Reachability: ordinary operation, no attacker.** Reproduced by transcribing
-the function and driving it with realistic poll schedules. A brute-force sweep
-over gap pairs at the live interval of 28 ticks found 2996 overflowing
-schedules. The smallest trigger is a **5-slot coalesced poll gap — 140 ticks,
-4.38 ms** — followed by a normal-cadence poll. Poll-event coalescing is
-explicitly designed for and documented as benign elsewhere in `rf_task.c`, so
-this is not an exotic input. The one real precondition is that the hop clock be
-past `2^32 - WRAP`, i.e. more than 12.7 hours into its 24.576-hour cycle, which
-is true roughly 48% of the time.
+**Bench (CH592, OpenController as the keyboard):** masked gaps of 1..15 whole slots
+and the 5- and 6-slot remainder bands (3-tick steps across the slot) all held the
+link with 0 lapses; 30 alternating 5/10-slot gaps back to back, 0 lapses; EV10 scan
+cadence, bonded reconnect (10/10, 5 ms) and fresh pair unchanged; poll reply ratio
+unchanged. `firmware/tests/test_hop_model.py` compiles the real function with the host
+compiler and pins the seed contract, a 100k-poll grid across the modulus, every gap
+of 0..20 slots and 0..27 ticks against the keyboard model, and the modulus
+arithmetic (the "host-tested" clause in the source is true again).
 
-Note this is *not* the "12.7 hours between two consecutive polls" route, which
-is genuinely unreachable — supervision tears the link down and re-anchors long
-before that. Checking only that route is what made this look like a false
-positive on the first pass.
-
-**Impact.** Bounded. The overflowing poll itself still transmits on a
-well-defined channel (`idx` is computed before the sum arithmetic) and the
-anchor stays within range, so nothing is corrupted and the device does not
-brick. What follows is a mis-anchored hop clock: channel selection diverges from
-the keyboard's until supervision notices the dead link and re-seeds the anchor.
-The observable symptom is a brief deaf patch, not a failure needing a replug.
-
-**Worth knowing before "fixing" it.** The forward-dating comes from faithfully
-reproducing the stock dongle's formula, and stock is 32-bit with the same wrap
-constant, so the stock firmware has the same overflow. Any change here diverges
-from the recovered behaviour that the pairing and connected paths were validated
-against. Correcting the arithmetic to 64-bit — or reducing `sum` mod WRAP
-properly instead of subtracting once — should be a deliberate decision to
-deviate, taken with a bench campaign, not a quiet cleanup.
-
-**Before merging a fix:** it changes firmware bytes on both chips, so re-run the
-hardware matrix and re-pin the digests.
-
-*Filed by CodeRabbit with the wrong mechanism and the wrong remedy; the real
-route was found by adversarial review and then reproduced independently.*
+**Not covered:** CH570 compiled, not bench-verified (the model is shared; its seed
+sites changed the same way). A production keyboard was not exercised on this bench.
 
 ## Fixed 2026-09-09: an invalid bond record could leave the CH570 radio shut down
 
@@ -392,19 +377,11 @@ the build id for no functional gain, or expands scope beyond the import:
   guarantee is explicit and matches CH570, or widen the early-out to cover it.
   Worth settling because as written it invites exactly the review finding it
   received.
-- **The hop formula is described as "host-tested" and this tree has no such
-  test.** The wording appears twice — in `rf_task.c` at the call site and again
-  in `rf_protocol.h` — and it was true where the code came from: the covering
-  test lives in the private reverse-engineering tree and was not part of this
-  import. `make test` discovers only `test_build_identity.py` and
-  `test_compose_factory.py`, and a whole-tree grep for `hop_step` finds only the
-  definition and its single call site. Two options, and the second is better:
-  drop the clause, or port a host test for `rf_proto_hop_step()`. Porting it is
-  worth real effort — the adversarial review above turned up a reachable
-  overflow in exactly this function, and a table-driven test pinning the stock
-  vectors would have caught the regression that a "fix" here could introduce.
-  The comments are in build-id-bearing files; a new test file is not, so the
-  test can land first and independently.
+- **Done 2026-09-09: the hop formula's "host-tested" clause is true again.**
+  `firmware/tests/test_hop_model.py` compiles `rf_proto_hop_step()` with the host
+  compiler behind a stdin driver and pins the seed contract, the steady grid, every
+  coalesced gap against the keyboard model, and the modulus arithmetic (`make test`
+  discovers it; it skips without a C compiler).
 - **`ch592_boot_reset_status` cannot be inspected the way the startup comment
   says.** `startup_CH592_phased.S` tells a debugger to read boot-entry evidence
   from that name, but it is a file-scope `static uint8_t` in

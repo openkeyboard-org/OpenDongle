@@ -2026,7 +2026,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * value captured at burst#1. */
                 if (rf_hop.last == 0) {
                     rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                    rf_hop.last = rf_hop_backdate(rf_hop_read(), 13u);
+                    rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);
                     stock_seed_burst_applied = 0;
                 }
 #if RF_TASK_EXECUTOR_TMOS
@@ -2039,7 +2039,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * fixed hop-phase offset -> deaf connected poll -> rx=0
                  * (bench + codex 2026-07-07). CH570 keeps the burst#1 anchor. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                rf_hop.last = rf_hop_read();
+                rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);   /* the poll grid starts here: edge anchor */
 #endif
                 stock_seed_burst_applied = 0xFE;
                 /* Keep rf_poll_buf[0] stable (per stock: initialized
@@ -2161,8 +2161,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             rf_conn_interval = rf_active_conn_interval();
             rf_conn_timeout = rf_active_conn_timeout();
             rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack_buf[4]);
-            rf_hop.last = rf_ev10_rekey_tx_hop ? rf_ev10_rekey_tx_hop
-                                                : rf_hop_read();
+            rf_hop.last = rf_hop_backdate(rf_ev10_rekey_tx_hop ? rf_ev10_rekey_tx_hop
+                                                                : rf_hop_read(),
+                                          RF_PROTO_HOP_EDGE_LEAD);   /* edge anchor of the re-keyed grid */
             stock_seed_burst_applied = 0xF7;
             rf_data_ch_idx = rf_hop.prev_idx;
             rf_channel = rf_data_channels[rf_data_ch_idx];
@@ -2719,7 +2720,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                  * restores connectivity, but the %5 form is correct per
                  * stock — keeping that as the documented default. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                rf_hop.last = rf_hop_backdate(rf_hop_read(), 13u);
+                rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);
                 stock_seed_burst_applied = rf_inject_burst_idx;
             }
             status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
@@ -3025,10 +3026,10 @@ static void rf_send_poll(void)
 
 
     {
-        /* The shared stock hop formula (rf_protocol.h) -- the exact block
-         * that used to live here (firmware.bin runtime 0x20000ff6..0x1016,
-         * incl. the +elapsed repeat-correction anchor) now single-sourced
-         * and host-tested; R3 ported CH570 onto the same call. */
+        /* The shared connected hop model (rf_protocol.h: edge anchor,
+         * whole-interval advance, no repeat-correction), single-sourced and
+         * host-tested (firmware/tests/test_hop_model.py); R3 ported CH570
+         * onto the same call. */
         rf_proto_hop_t h = { rf_hop.last, rf_hop.prev_idx };
         uint32_t now = rf_hop_read();
         uint8_t idx;
@@ -3846,10 +3847,43 @@ uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
  * task context; rung 2 additionally re-runs the vendor init that only
  * hal_rf_init otherwise performs. Both end on the P4 guard. Refused while a
  * link is up or a reboot quiesce is in progress. */
+/* Bench facility (rf-poke rungs 40..59, armed session): mask every IRQ for
+ * (rung - 40) poll slots of 875 us on a live link, so the TMR0 poll events
+ * coalesce into one gap of that many intervals. This is how the hop
+ * repeat-correction defect was reproduced and its fix validated (gaps of 5
+ * and 10 slots dropped the link every time on the old rule, never on the
+ * new one; rf_protocol.h). CONNECTED only. */
+static void rf_bench_spin_ticks(uint32_t ticks)   /* protocol ticks of 31.25 us */
+{
+    uint32_t t0 = hal_now();
+    while ((uint32_t)(hal_now() - t0) < ticks * HAL_TICKS_PER_PROTO_TICK) { }
+}
+
 uint8_t RF_DiagIntervene(uint8_t rung)
 {
     uint32_t irq;
 
+    if (rung >= 40u && rung < 80u) {
+        /* 40..59: (rung-40) whole slots; 60..69: 5 slots + 3*(rung-60) ticks;
+         * 70..79: 6 slots + 3*(rung-70) ticks (the remainder bands). The
+         * masking starts asynchronously to the previous poll, so the actual
+         * coalesced step is around the nominal, not exactly it (read page 2
+         * rx_restart_handled / a page-1 trace for the realised gap); it is a
+         * regression stimulus, not a precise input. */
+        uint32_t ticks = (rung < 60u) ? ((uint32_t)rung - 40u) * 28u
+                       : (rung < 70u) ? 5u * 28u + 3u * ((uint32_t)rung - 60u)
+                       :                6u * 28u + 3u * ((uint32_t)rung - 70u);
+        if (rf_quiesced) {
+            return 0xE2u;
+        }
+        if (rf_state != RF_STATE_CONNECTED) {
+            return 0xE1u;
+        }
+        irq = __risc_v_disable_irq();
+        rf_bench_spin_ticks(ticks);
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
     if (rung != 1u && rung != 2u && rung != 3u) {
         return 0xE0u;
     }
