@@ -549,33 +549,41 @@ the build id for no functional gain, or expands scope beyond the import:
   no longer apply across this change (the linker relaxes 22 library calls to `c.jal` from
   the new proximity, 68 bytes smaller), so the gate for link-order changes is the symbol
   set with sizes plus the bench oracles.
-- **Tier 2 R3b: Halt between windows in suspend (2026-09-10, opt-in `PM_HALT`).** 1.347 mA with
-  the host asleep and a resting production keyboard, against 10.13 mA before Tier 2. That is the
+- **Tier 2 R3b: Halt between windows in suspend (2026-09-10, opt-in `PM_HALT`).** 1.347 mA with the
+  host asleep and a resting production keyboard, against 10.13 mA before Tier 2. That is the
   dongle's 3V3 feed at one operating point, not a USB compliance result: VBUS on the product board
-  is unmeasured, and the unbonded camp and a continuously connected keyboard both keep the
-  receiver on. The R3a spike settled the silicon question (56,986
-  halts, all returned, no library restoration needed), and the shipped entry adds what a spike may
-  omit: an RTC periodic-timer backstop, a last look that also re-checks USB, both RTC flags cleared
-  at entry, exact paired SysTick correction, and a 250 ms suspend cap. Gates run on the merged code
-  (2026-09-10, E514E4F0): clock continuity 99.93 % of wall across a 47-minute sleep; resume with
-  the USB node identity unchanged; a shipped-default soak of 14,049 halts, 67 % of the wall clock,
-  zero abandoned, 1,366 catches on 1,368 phase windows, no reset; and a USB replug taken while
-  halted with the probe still powering the board, after which the boot count was unmoved, the
-  device enumerated fresh as expected and the link returned in a second. Outstanding before the
-  knob can default on: a remote wake driven out of a halt, which this bench cannot produce because
-  the only keystroke source is the module's UART driven by the sleeping host; it needs a physical
-  key source or an accepted risk decision. Observed and benign: the detector unlocked and
-  re-engaged 131 times in those 47 minutes, every one a failed acquisition answering no polls, each
-  costing one continuous-scan cycle with the grace correctly not replenished. The run also
-  confirmed the production keyboard's thirty-minute stage in the wild: it stopped probing entirely
-  and returned only on its host's transport select. Known residual: the vendor halt primitive takes its wait with interrupts enabled,
-  so a resume arriving inside its prologue is serviced and then slept through; the 1 s backstop
-  bounds it, and closing it needs either a hardware guarantee about pending interrupts and WFI on
-  this part or an entry that does not delegate the wait. Note the RAM ceiling this hit: the vendor halt primitive is 328 B of RAM-resident
-  code and the product links at ~93 % of RAM against the fault-retention block, which was only
-  resolved by forcing the deadline planner out of line into flash in halt builds. There is ~2 KB of
-  unused RAM between the fault block and the stack, and the BLE library heap is 6144 B in a dongle
-  that opens no BLE connection; either would give real headroom and both are owner decisions.
+  is unmeasured, and the unbonded camp and a continuously connected keyboard both keep the receiver
+  on. The R3a spike settled the silicon question (56,986 halts, all returned, no library
+  restoration needed), and the shipped entry adds what a spike may omit: an RTC periodic-timer
+  backstop, a last look that also re-checks USB, both RTC flags cleared at entry, exact paired
+  SysTick correction, and a 250 ms suspend cap. Gates run on the merged code (2026-09-10,
+  E514E4F0): clock continuity 99.93 % of wall across a 47-minute sleep; resume with the USB node
+  identity unchanged; a shipped-default soak of 14,049 halts, 67 % of the wall clock, zero
+  abandoned, 1,366 catches on 1,368 phase windows, no reset; and a USB replug taken while halted
+  with the probe still powering the board, after which the boot count was unmoved, the device
+  enumerated fresh as expected and the link returned in a second. The fifth gate, a remote wake
+  driven out of a halt, ran on 2026-09-11 and passed: the host slept at 12:09:35 and woke itself
+  145 s later with the wake attributed to `USB2_wake` rather than to the internal keyboard, across
+  an episode that logged 330 halts totalling 47.4 s with zero abandoned, one keystroke sent, the
+  USB node identity unchanged, the clock at 224.6 s of 224.7 s of wall, and the boot count unmoved.
+  The keystroke source is a Nucleo-U083RC running QMK's OpenController driver on the module's UART,
+  which parks on the USB host so the link drops and the dongle camps, engages windowing on the
+  grace, then returns to wireless and presses one key; that reaches the halt through the camp
+  rather than through the scheduled-drop detector, but the halt entry, the radio wake and the
+  remote-wake pulse are shared. Defaulting the knob on is now an owner decision rather than a
+  blocked one. Observed and benign: the detector unlocked and re-engaged 131 times in those 47
+  minutes, every one a failed acquisition answering no polls, each costing one continuous-scan
+  cycle with the grace correctly not replenished. The run also confirmed the production keyboard's
+  thirty-minute stage in the wild: it stopped probing entirely and returned only on its host's
+  transport select. Known residual: the vendor halt primitive takes its wait with interrupts
+  enabled, so a resume arriving inside its prologue is serviced and then slept through; the 1 s
+  backstop bounds it, and closing it needs either a hardware guarantee about pending interrupts and
+  WFI on this part or an entry that does not delegate the wait. Note the RAM ceiling this hit: the
+  vendor halt primitive is 328 B of RAM-resident code and the product links at ~93 % of RAM against
+  the fault-retention block, which was only resolved by forcing the deadline planner out of line
+  into flash in halt builds. There is ~2 KB of unused RAM between the fault block and the stack,
+  and the BLE library heap is 6144 B in a dongle that opens no BLE connection; either would give
+  real headroom and both are owner decisions.
 - **Tier 2 R1 shipped: windowed receiver (2026-09-10).** The production keyboard rests by
   stopping its session 5 s after the last key and reconnecting once a second (1.010 s,
   sd 15 ms, each connection ~10 ms); the dongle used to spend the whole second in the
