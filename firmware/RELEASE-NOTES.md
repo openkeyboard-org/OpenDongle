@@ -38,9 +38,27 @@ phase windows, one give-up, no reset. Awake behaviour unchanged: poll replies 11
 10-slot hop gaps held, and windowing never engages against a keyboard that holds its link.
 That is an operating point, not a compliance claim: it is the 3V3 rail rather than VBUS, one
 keyboard resting, and neither the unbonded camp nor a continuously connected keyboard windows at
-all. Ships opt-in (`PM_HALT=0`) pending the remaining gates: bus reset taken while halted, remote
-wake from a halt, clock continuity across halts, resume without re-enumeration measured rather
-than inferred, and a shipped-default suspend soak; the 395-window sample above is not that soak.
+all. Ships opt-in (`PM_HALT=0`). Four of the five gates have since run on the merged code
+(E514E4F0, production keyboard resting). A 47-minute host sleep: the clock advanced 2843.6 s of
+2845.6 s of wall time; the device resumed with its USB node identity unchanged rather than
+re-enumerating; and the soak recorded 14,049 halts totalling 1917.6 s, 67 % of the wall clock,
+with zero abandoned entries, 1,622 reconnects at about one a second, 1,366 catches on 1,368 phase
+windows, two misses, one give-up and no reset. Separately, the USB data cable was pulled and
+replaced while the host slept and the dongle was halting, with the debug probe still powering the
+board: the boot count did not move, there was no watchdog recovery, the device enumerated fresh as
+a replug should, and the link returned in a second. The fifth gate, a remote wake driven out of a
+halt, has since run too (2026-09-11). A Nucleo-U083RC carrying the OpenController driver stands in
+for the keyboard MCU on the module's UART, so a keystroke can originate while the host is asleep
+and every process on it is frozen. It parks on the USB host at reset, which drops the 2.4 GHz link
+and puts the dongle in its bonded camp, where the windowed receiver engages on the grace rather
+than on the scheduled-drop detector; it then returns to the wireless host and presses one key. The
+host slept at 12:09:35 and woke itself at 12:12:00, 145 s later, with the wake attributed to
+`USB2_wake` rather than to the internal keyboard. Across that episode the dongle logged 330 halts
+totalling 47.4 s with zero abandoned entries, the stand-in sent exactly one keystroke, the USB node
+identity was unchanged, the clock advanced 224.6 s of 224.7 s of wall time, and the boot count did
+not move. The halting state there was the camp rather than a resting production keyboard, but the
+halt entry, the radio wake and the remote-wake pulse are the same code on both paths. Whether the
+knob now defaults on is an owner decision; nothing in the gate list is outstanding against it.
 The entry also carries a known residual: the vendor primitive takes its wait with interrupts
 enabled, so a resume arriving inside its prologue is serviced and then slept through, bounded by
 the backstop at one second. With the knob off the image is byte-identical and
