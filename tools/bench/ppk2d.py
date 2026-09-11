@@ -10,7 +10,7 @@ bench session; scripts talk to it over a unix socket.
   stats  (--last S | --since LABEL [--until LABEL]) [--json]
   raw    --seconds N --out FILE          full-rate CSV of the last N seconds
 """
-import argparse, array, bisect, json, os, re, signal, socket, statistics, sys, threading, time
+import argparse, array, bisect, json, os, re, signal, socket, stat, statistics, sys, threading, time
 from ppk2_api.ppk2_api import PPK2_API, PPK2_Command
 try:
     import numpy as np
@@ -99,8 +99,17 @@ class Store:
 class Daemon:
     def __init__(self, a):
         self.a = a; self.store = Store(a.ring_s); self.quit = threading.Event(); self.rate = 0.0; self.err = None
+        # Every self.ppk touch goes through this: the fetch thread reads the serial port
+        # continuously while the command handler writes control commands, and the vendor
+        # API is not thread-safe, so interleaving would corrupt the device session.
+        self.dev_lock = threading.Lock()
+        self.dut_power = "on"
+        if os.path.islink(a.sock) or (os.path.exists(a.sock) and not stat.S_ISSOCK(os.stat(a.sock).st_mode)):
+            raise SystemExit("refusing to remove non-socket path %s" % a.sock)
         if os.path.exists(a.sock): os.unlink(a.sock)
-        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); self.srv.bind(a.sock); self.srv.listen(8); self.srv.settimeout(0.5)
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); self.srv.bind(a.sock)
+        os.chmod(a.sock, 0o600)           # bench machines can be shared
+        self.srv.listen(8); self.srv.settimeout(0.5)
         self.ppk = PPK2_API(a.port, timeout=0.02)
         meta = read_metadata(self.ppk); self.ppk._parse_metadata(meta)
         self.mode = int(re.search(r"mode: (\d+)", meta).group(1))
@@ -108,7 +117,11 @@ class Daemon:
             raise SystemExit("PPK2 reports mode %d (not ampere meter); refusing without --allow-source" % self.mode)
         self.ppk.mode = "AMPERE_MODE" if self.mode == 1 else "SOURCE_MODE"; self.ppk.current_vdd = 3300  # guard only; never REGULATOR_SET in ampere mode
         self.ppk.toggle_DUT_power("ON")                     # close the series switch: the app does this on connect
-        self.ppk.start_measuring(); time.sleep(0.3); self.ppk.get_data()
+        with self.dev_lock:
+            self.ppk.start_measuring()
+        time.sleep(0.3)
+        with self.dev_lock:
+            self.ppk.get_data()
         self.logf = None
         if a.log:
             os.makedirs(a.log, exist_ok=True)
@@ -117,11 +130,13 @@ class Daemon:
         last_log = time.time(); acc_n = 0; acc_s = 0.0; acc_min = 1e12; acc_max = -1e12; rate_n = 0; rate_t = time.time()
         while not self.quit.is_set():
             try:
-                d = self.ppk.get_data()
+                with self.dev_lock:
+                    d = self.ppk.get_data()
+                    s, bits = self.ppk.get_samples(d) if d else ([], [])
             except Exception as e:
                 self.err = repr(e); break
             if d:
-                s, bits = self.ppk.get_samples(d); now = time.time()
+                now = time.time()
                 self.store.push(s, bits, now)
                 rate_n += len(s)
                 if s:
@@ -140,7 +155,7 @@ class Daemon:
         if c == "status":
             i1 = len(st.b_t); i0 = max(0, i1 - 1000)
             last = (sum(st.b_mean[i0:i1]) / max(1, i1 - i0) / 1000) if i1 > i0 else None
-            return {"ok": True, "port": self.a.port, "mode": "ampere" if self.mode == 1 else "source", "dut_power": "on",
+            return {"ok": True, "port": self.a.port, "mode": "ampere" if self.mode == 1 else "source", "dut_power": self.dut_power,
                     "uptime_s": round(now - st.t_start, 1), "samples": st.total, "rate_kSps": round(self.rate / 1000, 1),
                     "last_1s_mean_mA": last, "marks": st.marks, "fetch_error": self.err, "pid": os.getpid()}
         if c == "mark":
@@ -153,13 +168,27 @@ class Daemon:
             else:
                 if req["since"] not in st.marks: return {"ok": False, "error": "unknown mark %r" % req["since"]}
                 t0 = st.marks[req["since"]]
-                t1 = st.marks[req["until"]] if req.get("until") in st.marks else (min(now, st.ring_t_last) if st.ring_t_last else now)
+                until = req.get("until")
+                if until is not None:
+                    if until not in st.marks:
+                        return {"ok": False, "error": "unknown mark %r" % until}
+                    t1 = st.marks[until]
+                else:
+                    t1 = min(now, st.ring_t_last) if st.ring_t_last else now
             r = st.stats(t0, t1); r["ok"] = "error" not in r; return r
         if c == "power":
-            self.ppk.toggle_DUT_power("ON" if req["state"] == "on" else "OFF"); st.marks["power_" + req["state"]] = now
-            return {"ok": True, "dut_power": req["state"], "t": now}
+            state = req.get("state")
+            if state not in ("on", "off"):
+                return {"ok": False, "error": "state must be 'on' or 'off'"}
+            with self.dev_lock:
+                self.ppk.toggle_DUT_power("ON" if state == "on" else "OFF")
+            self.dut_power = state; st.marks["power_" + state] = now
+            return {"ok": True, "dut_power": state, "t": now}
         if c == "raw":
-            v, t0 = st.raw(float(req["seconds"]))
+            seconds = float(req["seconds"])
+            if seconds <= 0:
+                return {"ok": False, "error": "seconds must be positive"}
+            v, t0 = st.raw(seconds)
             with open(req["out"], "w") as f:
                 f.write("t_ms,uA\n"); f.writelines("%.2f,%.3f\n" % (i / FS * 1000, x) for i, x in enumerate(v))
             return {"ok": True, "samples": len(v), "t0_unix": t0, "out": req["out"]}
@@ -174,12 +203,20 @@ class Daemon:
             except socket.timeout: continue
             with conn:
                 try:
-                    req = json.loads(conn.makefile("r").readline() or "{}"); resp = self.handle(req)
+                    conn.settimeout(5.0)                       # a silent client must not wedge the daemon
+                    line = conn.makefile("r").readline(65536)
+                    req = json.loads(line or "{}"); resp = self.handle(req)
                 except Exception as e: resp = {"ok": False, "error": repr(e)}
                 conn.sendall((json.dumps(resp) + "\n").encode())
-        try: self.ppk.stop_measuring()
+        try:
+            with self.dev_lock: self.ppk.stop_measuring()
         except Exception: pass
-        self.ppk.ser.close(); srv.close(); os.unlink(self.a.sock)
+        for fn in (lambda: self.ppk.ser.close(),
+                   lambda: self.logf and self.logf.close(),
+                   srv.close,
+                   lambda: os.unlink(self.a.sock)):
+            try: fn()
+            except Exception: pass
 
 def client(sock, req):
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -197,6 +234,8 @@ def main():
     stt = sub.add_parser("stats"); stt.add_argument("--last", type=float); stt.add_argument("--since"); stt.add_argument("--until"); stt.add_argument("--json", action="store_true"); stt.add_argument("--sock", default=DEF_SOCK)
     rw = sub.add_parser("raw"); rw.add_argument("--seconds", type=float, required=True); rw.add_argument("--out", required=True); rw.add_argument("--sock", default=DEF_SOCK)
     a = p.parse_args()
+    if a.cmd == "serve" and a.ring_s < 1:
+        p.error("--ring-s must be at least 1")
     if a.cmd == "serve":
         if a.port is None:
             devs = PPK2_API.list_devices()
