@@ -182,8 +182,12 @@ class Daemon:
                 return {"ok": False, "error": "state must be 'on' or 'off'"}
             with self.dev_lock:
                 self.ppk.toggle_DUT_power("ON" if state == "on" else "OFF")
-            self.dut_power = state; st.marks["power_" + state] = now
-            return {"ok": True, "dut_power": state, "t": now}
+            # Stamp AFTER the toggle: `now` was taken before the lock, and if the
+            # fetch thread held it the mark could precede the real transition by
+            # many samples -- which would silently mis-slice any stats using it.
+            t_sw = time.time()
+            self.dut_power = state; st.marks["power_" + state] = t_sw
+            return {"ok": True, "dut_power": state, "t": t_sw}
         if c == "raw":
             seconds = float(req["seconds"])
             if seconds <= 0:
@@ -198,16 +202,25 @@ class Daemon:
     def serve(self):
         srv = self.srv
         th = threading.Thread(target=self.fetch, daemon=True); th.start()
-        while not self.quit.is_set():
-            try: conn, _ = srv.accept()
-            except socket.timeout: continue
-            with conn:
-                try:
-                    conn.settimeout(5.0)                       # a silent client must not wedge the daemon
-                    line = conn.makefile("r").readline(65536)
-                    req = json.loads(line or "{}"); resp = self.handle(req)
-                except Exception as e: resp = {"ok": False, "error": repr(e)}
-                conn.sendall((json.dumps(resp) + "\n").encode())
+        try:
+            while not self.quit.is_set():
+                try: conn, _ = srv.accept()
+                except socket.timeout: continue
+                except OSError: break
+                with conn:
+                    try:
+                        conn.settimeout(5.0)                   # a silent client must not wedge the daemon
+                        line = conn.makefile("r").readline(65536)
+                        req = json.loads(line or "{}"); resp = self.handle(req)
+                    except Exception as e: resp = {"ok": False, "error": repr(e)}
+                    # A client that disconnected before reading must not take the
+                    # daemon down with it: the DUT's power depends on us living.
+                    try: conn.sendall((json.dumps(resp) + "\n").encode())
+                    except OSError: pass
+        finally:
+            self._shutdown(srv)
+    def _shutdown(self, srv):
+        self.quit.set()
         try:
             with self.dev_lock: self.ppk.stop_measuring()
         except Exception: pass
