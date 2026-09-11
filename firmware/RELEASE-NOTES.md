@@ -5,7 +5,7 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
-## Halt between receiver windows while the host sleeps (CH592, opt-in)
+## Halt between receiver windows while the host sleeps (CH592)
 
 With the windowed receiver of the previous entry the dongle is idle between windows, and while
 the host is suspended nothing needs the core at all: the window schedule is an RTC timer, the
@@ -38,8 +38,11 @@ phase windows, one give-up, no reset. Awake behaviour unchanged: poll replies 11
 10-slot hop gaps held, and windowing never engages against a keyboard that holds its link.
 That is an operating point, not a compliance claim: it is the 3V3 rail rather than VBUS, one
 keyboard resting, and neither the unbonded camp nor a continuously connected keyboard windows at
-all. Ships opt-in (`PM_HALT=0`). Four of the five gates have since run on the merged code
-(E514E4F0, production keyboard resting). A 47-minute host sleep: the clock advanced 2843.6 s of
+all. Shipped opt-in until its gates were complete; `PM_HALT` now defaults on (2026-09-11), and
+the default image is byte-identical to the one every gate below ran against, build id E514E4F0.
+Setting `PM_HALT=0` reproduces the pre-R3b image byte for byte with the build id forced. Four of
+the five gates ran on the merged code (E514E4F0, production keyboard resting).
+A 47-minute host sleep: the clock advanced 2843.6 s of
 2845.6 s of wall time; the device resumed with its USB node identity unchanged rather than
 re-enumerating; and the soak recorded 14,049 halts totalling 1917.6 s, 67 % of the wall clock,
 with zero abandoned entries, 1,622 reconnects at about one a second, 1,366 catches on 1,368 phase
