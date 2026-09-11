@@ -230,10 +230,11 @@ PM_RX_WINDOW_MS ?= 30
 PM_RX_PERIOD_MS ?= 200
 PM_RX_GRACE_S ?= 60
 PM_RX_PHASE_MS ?= 120
-# Tier 2 R3b: Halt between receiver windows while USB is suspended. 0 compiles the path out;
-# the image is then byte-identical to the pre-change firmware with the build id forced (PM_HALT
+# Tier 2 R3b: Halt between receiver windows while USB is suspended. Default on since 2026-09-11,
+# when the last of its five gates (a remote wake driven out of a halt) ran. 0 compiles the path
+# out; the image is then byte-identical to the pre-R3b firmware with the build id forced (PM_HALT
 # and PM_SUSPEND_CAP_US are CONFIG_TEXT tokens, so an ordinary build's identity bytes differ).
-PM_HALT ?= 0
+PM_HALT ?= 1
 # The deadline cap while the host sleeps: the window schedule is in the table, so this only
 # bounds the library timers the planner does not track (1 s temperature sample, 120 s LSI cal).
 PM_SUSPEND_CAP_US ?= 250000
