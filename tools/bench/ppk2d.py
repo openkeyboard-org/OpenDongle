@@ -18,8 +18,11 @@ except ImportError:
     np = None
 
 FS = 100_000                      # PPK2 sample rate
-# The PPK2 measures to 1 A. Anything past this cannot be a real reading, so it is
-# proof the 4-byte sample framing has lost alignment (see Daemon._resync).
+# The PPK2 measures to 1 A. Any sample whose MAGNITUDE passes this cannot be a real
+# reading, so it is proof the 4-byte sample framing has lost alignment (see
+# Daemon._resync). Magnitude, not just the upper bound: misframing assembles samples
+# from two real ones and can decode strongly negative just as easily as strongly
+# positive. Small negatives near zero are normal (offset) and stay far inside this.
 IMPLAUSIBLE_UA = 1_100_000.0
 DEF_SOCK = os.path.expanduser("~/.ppk2d.sock")   # AF_UNIX paths are limited to ~104 chars on macOS
 
@@ -63,6 +66,11 @@ class Store:
                 self.ring[w] = v; w += 1
                 if w == self.ring_len: w = 0
             self.ring_w = w; self.ring_total += n; self.ring_t_last = t_end; self.total += n
+    def reset_partial(self):
+        """Discard the part-filled 1 ms bucket after a re-frame."""
+        with self.lock:
+            self._acc = [0, 0.0, float("inf"), float("-inf"), 0]
+
     def window(self, t0, t1):
         i0 = bisect.bisect_left(self.b_t, t0); i1 = bisect.bisect_right(self.b_t, t1)
         return i0, i1
@@ -145,8 +153,13 @@ class Daemon:
                 # NEVER recovers: it just keeps emitting nonsense, hundreds of mA
                 # for a milliamp DUT, with no error raised. Seen twice on the
                 # bench. Catch it on the device's own ceiling and re-frame.
-                if s and max(s) > IMPLAUSIBLE_UA:
+                if s and max(abs(min(s)), abs(max(s))) > IMPLAUSIBLE_UA:
                     self._resync()
+                    # Drop the part-filled bucket and the part-filled log interval:
+                    # samples from before and after a re-frame must never be
+                    # averaged together, nor stamped with the new batch's time.
+                    self.store.reset_partial()
+                    acc_n = 0; acc_s = 0.0; acc_min = 1e12; acc_max = -1e12
                     continue
                 now = time.time()
                 self.store.push(s, bits, now)
