@@ -18,6 +18,9 @@ except ImportError:
     np = None
 
 FS = 100_000                      # PPK2 sample rate
+# The PPK2 measures to 1 A. Anything past this cannot be a real reading, so it is
+# proof the 4-byte sample framing has lost alignment (see Daemon._resync).
+IMPLAUSIBLE_UA = 1_100_000.0
 DEF_SOCK = os.path.expanduser("~/.ppk2d.sock")   # AF_UNIX paths are limited to ~104 chars on macOS
 
 def read_metadata(ppk, deadline=3.0):
@@ -104,6 +107,7 @@ class Daemon:
         # API is not thread-safe, so interleaving would corrupt the device session.
         self.dev_lock = threading.Lock()
         self.dut_power = "on"
+        self.desyncs = 0
         if os.path.islink(a.sock) or (os.path.exists(a.sock) and not stat.S_ISSOCK(os.stat(a.sock).st_mode)):
             raise SystemExit("refusing to remove non-socket path %s" % a.sock)
         if os.path.exists(a.sock): os.unlink(a.sock)
@@ -136,6 +140,14 @@ class Daemon:
             except Exception as e:
                 self.err = repr(e); break
             if d:
+                # get_samples() carries a remainder across calls, so a single
+                # truncated read or bus glitch shifts the 4-byte framing and it
+                # NEVER recovers: it just keeps emitting nonsense, hundreds of mA
+                # for a milliamp DUT, with no error raised. Seen twice on the
+                # bench. Catch it on the device's own ceiling and re-frame.
+                if s and max(s) > IMPLAUSIBLE_UA:
+                    self._resync()
+                    continue
                 now = time.time()
                 self.store.push(s, bits, now)
                 rate_n += len(s)
@@ -150,13 +162,28 @@ class Daemon:
                 self.logf.write("%.3f,%.4f,%.4f,%.4f,%d\n" % (now, acc_s / acc_n / 1000, acc_min / 1000, acc_max / 1000, acc_n)); self.logf.flush()
                 last_log = now; acc_n = 0; acc_s = 0.0; acc_min = 1e12; acc_max = -1e12
             time.sleep(0.001)
+    def _resync(self):
+        """Re-frame the sample stream after a detected desync: stop the average,
+        drop whatever is buffered, clear the decoder's partial-sample remainder,
+        and start again. Measurements before this point in the batch are already
+        discarded by the caller."""
+        self.desyncs += 1
+        with self.dev_lock:
+            for fn in (self.ppk.stop_measuring,
+                       lambda: time.sleep(0.05),
+                       self.ppk.ser.reset_input_buffer,
+                       lambda: setattr(self.ppk, "remainder", {"sequence": b"", "len": 0}),
+                       self.ppk.start_measuring):
+                try: fn()
+                except Exception as e: self.err = repr(e)
+
     def handle(self, req):
         c = req.get("cmd"); st = self.store; now = time.time()
         if c == "status":
             i1 = len(st.b_t); i0 = max(0, i1 - 1000)
             last = (sum(st.b_mean[i0:i1]) / max(1, i1 - i0) / 1000) if i1 > i0 else None
             return {"ok": True, "port": self.a.port, "mode": "ampere" if self.mode == 1 else "source", "dut_power": self.dut_power,
-                    "uptime_s": round(now - st.t_start, 1), "samples": st.total, "rate_kSps": round(self.rate / 1000, 1),
+                    "uptime_s": round(now - st.t_start, 1), "samples": st.total, "rate_kSps": round(self.rate / 1000, 1), "desyncs": self.desyncs,
                     "last_1s_mean_mA": last, "marks": st.marks, "fetch_error": self.err, "pid": os.getpid()}
         if c == "mark":
             st.marks[req["label"]] = now; return {"ok": True, "label": req["label"], "t": now}
