@@ -182,6 +182,14 @@ class Framer:
                     words = words[:nxt]
             else:
                 self.gaps += 1          # counter jumped but alignment is sound
+                # _first_break stops at the FIRST break, so a real slip later in
+                # this same batch is still unexamined. Clearing expect makes the
+                # re-scan ignore the index-0 gap and look only for that.
+                self.expect = None
+                nxt = self._first_break(words)
+                if nxt:
+                    n = nxt * SAMPLE_BYTES
+                    words = words[:nxt]
 
         del self.buf[:n]
         self.expect = (self._cnt(words[-1]) + 1) % CNT_MOD

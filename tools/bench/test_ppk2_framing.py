@@ -111,6 +111,23 @@ def test_whole_sample_loss_is_a_gap_not_a_slip():
     assert len(got) == 32, len(got)
 
 
+def test_gap_then_slip_in_one_batch_does_not_leak_garbage():
+    """A gap and a slip can land in the same batch. _first_break stops at the
+    first one, so without a re-scan the words after the slip would be decoded
+    and would reach the spike filter without any realignment."""
+    f = Framer(FakePPK())
+    f.feed(stream(32))
+    batch = stream(16, start=48) + stream(32, start=64)[2:]   # gap, then a slip
+    got, _, realigned = f.feed(batch)
+    assert not realigned, "the leading break is a gap, not a slip"
+    assert f.gaps == 1
+    assert len(got) == 16, f"must stop at the slip, got {len(got)}"
+    c = counters(got)
+    assert all((c[i] - c[i - 1]) % CNT_MOD == 1 for i in range(1, len(c))), c
+    rest, _, realigned2 = f.feed(b"")
+    assert realigned2 and f.realigns == 1, "the slip is caught on the next pass"
+
+
 def test_filter_state_is_reset_on_realignment():
     ppk = FakePPK()
     ppk.rolling_avg, ppk.prev_range, ppk.after_spike = 1.0, "3", 2
@@ -126,23 +143,28 @@ def test_library_bug_is_real():
     followed by a 1-byte read leaves remainder['len'] negative, after which the
     same aligned bytes decode differently and never recover."""
     try:
+        # Every private name this test depends on is resolved HERE, inside the
+        # handler, including the bound get_samples. If any of them moves, the
+        # test fails with a clear message instead of letting an AttributeError
+        # escape and abort the run before the tests that sort after it.
         from ppk2_api.ppk2_api import PPK2_API
         p = object.__new__(PPK2_API)
         p.remainder = {"sequence": b"", "len": 0}
         p._digital_to_analog = lambda b: int.from_bytes(b, "little", signed=False)
         p._handle_raw_data = lambda v: (v, None)
+        get_samples = p.get_samples
     except (ImportError, AttributeError) as e:
-        # This test pokes at library internals on purpose. If they move, say so
-        # as a failure rather than letting the exception escape and abort the
-        # whole run: the other tests still have something to report.
-        raise AssertionError(f"cannot probe ppk2_api internals: {e!r}")
+        raise AssertionError(f"cannot probe ppk2_api internals: {e!r}") from e
+
+    # Assertions stay outside the handler: an unrelated failure in here is a
+    # real fault and should keep its own traceback.
     good = b"".join(i.to_bytes(4, "little") for i in range(6))
-    assert p.get_samples(good)[0] == [0, 1, 2, 3, 4, 5]
+    assert get_samples(good)[0] == [0, 1, 2, 3, 4, 5]
     p.remainder = {"sequence": b"", "len": 0}
-    p.get_samples(bytes(9))      # leaves a 1-byte remainder
-    p.get_samples(bytes(1))      # short read -> remainder len goes negative
+    get_samples(bytes(9))        # leaves a 1-byte remainder
+    get_samples(bytes(1))        # short read -> remainder len goes negative
     assert p.remainder["len"] < 0, "expected the negative-remainder bug"
-    assert p.get_samples(good)[0] != [0, 1, 2, 3, 4, 5], "expected the stream to be slipped"
+    assert get_samples(good)[0] != [0, 1, 2, 3, 4, 5], "expected the stream to be slipped"
 
 
 if __name__ == "__main__":
