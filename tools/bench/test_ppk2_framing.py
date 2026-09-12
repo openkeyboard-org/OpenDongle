@@ -39,10 +39,10 @@ def counters(samples):
 
 def test_aligned_stream_decodes_every_sample():
     f = Framer(FakePPK())
-    got, _, realigned = f.feed(stream(64))
+    got, _, event = f.feed(stream(64))
     assert len(got) == 64, len(got)
     assert counters(got) == [i % CNT_MOD for i in range(64)]
-    assert not realigned and f.realigns == 0 and f.gaps == 0
+    assert event is None and f.realigns == 0 and f.gaps == 0
 
 
 def test_partial_words_are_held_not_mangled():
@@ -75,8 +75,8 @@ def test_byte_slip_is_detected_and_corrected():
     f.feed(stream(32))
     # Two bytes vanish mid-stream: every following word is misframed.
     slipped = stream(64, start=32)[2:]
-    got, _, realigned = f.feed(slipped)
-    assert realigned, "a 2-byte slip must be detected"
+    got, _, event = f.feed(slipped)
+    assert event == "realign", "a 2-byte slip must be detected"
     assert f.realigns == 1
     assert got, "realignment must still yield samples"
     c = counters(got)
@@ -94,8 +94,8 @@ def test_good_prefix_survives_a_mid_batch_slip():
     got, _, _ = f.feed(batch)
     assert len(got) == 16, f"expected the 16 good samples, got {len(got)}"
     assert counters(got) == [(32 + i) % CNT_MOD for i in range(16)]
-    rest, _, realigned = f.feed(b"")
-    assert realigned and f.realigns == 1
+    rest, _, event = f.feed(b"")
+    assert event == "realign" and f.realigns == 1
     c = counters(rest)
     assert all((c[i] - c[i - 1]) % CNT_MOD == 1 for i in range(1, len(c))), c[:8]
 
@@ -105,8 +105,8 @@ def test_whole_sample_loss_is_a_gap_not_a_slip():
     That is an overrun, not corruption, and must not trigger a re-alignment."""
     f = Framer(FakePPK())
     f.feed(stream(32))
-    got, _, realigned = f.feed(stream(32, start=40))   # 8 samples missing
-    assert not realigned and f.realigns == 0
+    got, _, event = f.feed(stream(32, start=40))   # 8 samples missing
+    assert event == "gap" and f.realigns == 0
     assert f.gaps == 1
     assert len(got) == 32, len(got)
 
@@ -118,14 +118,14 @@ def test_gap_then_slip_in_one_batch_does_not_leak_garbage():
     f = Framer(FakePPK())
     f.feed(stream(32))
     batch = stream(16, start=48) + stream(32, start=64)[2:]   # gap, then a slip
-    got, _, realigned = f.feed(batch)
-    assert not realigned, "the leading break is a gap, not a slip"
+    got, _, event = f.feed(batch)
+    assert event == "gap", "the leading break is a gap, not a slip"
     assert f.gaps == 1
     assert len(got) == 16, f"must stop at the slip, got {len(got)}"
     c = counters(got)
     assert all((c[i] - c[i - 1]) % CNT_MOD == 1 for i in range(1, len(c))), c
-    rest, _, realigned2 = f.feed(b"")
-    assert realigned2 and f.realigns == 1, "the slip is caught on the next pass"
+    rest, _, event2 = f.feed(b"")
+    assert event2 == "realign" and f.realigns == 1, "the slip is caught on the next pass"
 
 
 def test_filter_state_is_reset_on_realignment():
@@ -136,6 +136,27 @@ def test_filter_state_is_reset_on_realignment():
     f.feed(stream(64, start=32)[2:])
     assert f.realigns == 1
     assert ppk.rolling_avg is None and ppk.prev_range is None and ppk.after_spike == 0
+
+
+def test_gap_closes_a_bucket_without_losing_samples():
+    """A gap must not be treated like a re-frame. Re-framing discards the
+    part-filled bucket because those samples are garbage; a gap corrupts
+    nothing, so the bucket is closed instead and every sample is kept. What must
+    not survive is a bucket spanning the hole, which would place its early
+    samples as if the missing interval never existed."""
+    st = ppk2d.Store(1)
+    st.push([1.0] * 150, [], 1000.0)          # 100 -> one bucket, 50 pending
+    assert len(st.b_n) == 1 and st.b_n[0] == 100
+
+    st.flush_partial()
+    assert len(st.b_n) == 2, "the pending samples must be kept, in their own bucket"
+    assert st.b_n[1] == 50
+    assert sum(st.b_n) == 150, "no sample may be lost to a gap"
+
+    st2 = ppk2d.Store(1)
+    st2.push([1.0] * 150, [], 1000.0)
+    st2.reset_partial()                       # the re-frame path, by contrast
+    assert len(st2.b_n) == 1 and sum(st2.b_n) == 100, "a re-frame discards the partial"
 
 
 def test_library_bug_is_real():

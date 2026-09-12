@@ -120,12 +120,19 @@ class Framer:
             setattr(self.ppk, attr, val)
 
     def feed(self, raw):
-        """Return (samples_uA, digital_bits, realigned)."""
+        """Return (samples_uA, digital_bits, event).
+
+        event is None, "realign" (framing had slipped and was corrected, so the
+        samples either side are not comparable) or "gap" (whole samples were
+        lost but framing held, so the samples are sound and only the time base
+        has a hole in it). The caller needs the distinction: one is corruption,
+        the other is loss.
+        """
         if raw:
             self.buf += raw
         n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
         if n < SAMPLE_BYTES:
-            return [], [], False
+            return [], [], None
 
         if not self.aligned:
             # We attach to a stream already in flight, so sample boundaries are
@@ -133,24 +140,24 @@ class Framer:
             # than emitting a few garbage samples and correcting afterwards.
             if n // SAMPLE_BYTES < FRAME_MIN_SAMPLES and len(self.buf) < FRAME_HOLD_BYTES:
                 self.held += 1
-                return [], [], False
+                return [], [], None
             scores = [self._score(self.buf, off, 4096) for off in range(SAMPLE_BYTES)]
             best = max(range(SAMPLE_BYTES), key=lambda o: scores[o])
             if scores[best] <= 0.99:
                 self.held += 1          # no offset looks like a sample stream yet
                 if len(self.buf) < FRAME_HOLD_BYTES:
-                    return [], [], False
+                    return [], [], None
                 del self.buf[:len(self.buf) // 2]   # never grow without bound
-                return [], [], False
+                return [], [], None
             if best:
                 del self.buf[:best]
             self.aligned = True
             self.expect = None
             n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
             if n < SAMPLE_BYTES:
-                return [], [], False
+                return [], [], None
 
-        realigned = False
+        event = None
         words = self._words(self.buf, n)
         brk = self._first_break(words)
         if brk:
@@ -162,18 +169,18 @@ class Framer:
             avail = n // SAMPLE_BYTES
             if avail < FRAME_MIN_SAMPLES and len(self.buf) < FRAME_HOLD_BYTES:
                 self.held += 1          # too little evidence; wait for more bytes
-                return [], [], False
+                return [], [], None
             scores = [self._score(self.buf, off, 4096) for off in range(SAMPLE_BYTES)]
             best = max(range(SAMPLE_BYTES), key=lambda o: scores[o])
             if best != 0 and scores[best] > 0.99 and scores[best] > scores[0] + 0.5:
                 del self.buf[:best]     # orphaned tail of a sample we can never complete
                 self.realigns += 1
-                realigned = True
+                event = "realign"
                 self.reset_filter()
                 n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
                 if n < SAMPLE_BYTES:
                     self.expect = None
-                    return [], [], True
+                    return [], [], "realign"
                 self.expect = None          # nothing to chain to across the slip
                 words = self._words(self.buf, n)
                 nxt = self._first_break(words)
@@ -182,6 +189,7 @@ class Framer:
                     words = words[:nxt]
             else:
                 self.gaps += 1          # counter jumped but alignment is sound
+                event = "gap"
                 # _first_break stops at the FIRST break, so a real slip later in
                 # this same batch is still unexamined. Clearing expect makes the
                 # re-scan ignore the index-0 gap and look only for that.
@@ -200,7 +208,7 @@ class Framer:
                 samples.append(m)
             if b is not None:
                 bits.append(b)
-        return samples, bits, realigned
+        return samples, bits, event
 
 def read_metadata(ppk, deadline=3.0):
     """Accumulate until END (the library's own loop drops chunks and loses the calibration)."""
@@ -221,7 +229,7 @@ class Store:
         self.ring_len = ring_s * FS; self.ring = array.array("f", bytes(4 * self.ring_len)); self.ring_w = 0
         self.ring_total = 0; self.ring_t_last = 0.0
         self.total = 0; self.marks = {}; self.t_start = time.time()
-        self._acc = [0, 0.0, float("inf"), float("-inf"), 0]   # n, sum, min, max, dig
+        self._acc = [0, 0.0, float("inf"), float("-inf"), 0, 0.0]  # n, sum, min, max, dig, t_last
     def push(self, samples, bits, t_end):
         n = len(samples)
         if n == 0: return
@@ -232,6 +240,7 @@ class Store:
                 if v < a[2]: a[2] = v
                 if v > a[3]: a[3] = v
                 if i < len(bits): a[4] = bits[i]
+                a[5] = t0 + i / FS
                 if a[0] >= 100:
                     self.b_t.append(t0 + i / FS); self.b_mean.append(a[1] / a[0]); self.b_min.append(a[2])
                     self.b_max.append(a[3]); self.b_n.append(a[0]); self.b_dig.append(a[4] & 0xFF)
@@ -243,9 +252,27 @@ class Store:
                 if w == self.ring_len: w = 0
             self.ring_w = w; self.ring_total += n; self.ring_t_last = t_end; self.total += n
     def reset_partial(self):
-        """Discard the part-filled 1 ms bucket after a re-frame."""
+        """Discard the part-filled bucket after a re-frame: those samples are
+        garbage, so they must not reach the record at all."""
         with self.lock:
-            self._acc = [0, 0.0, float("inf"), float("-inf"), 0]
+            self._acc = [0, 0.0, float("inf"), float("-inf"), 0, 0.0]
+
+    def flush_partial(self):
+        """Close the part-filled bucket after a GAP, keeping its samples.
+
+        A gap loses whole samples but corrupts none, so unlike a re-frame there
+        is nothing to discard. What must not happen is a bucket spanning the
+        discontinuity: push() lays samples out at 1/FS from the batch's end
+        stamp, so a straddling bucket would place its early samples as if the
+        missing interval never existed. Closing the bucket here keeps every
+        bucket a contiguous run, at the cost of one short bucket per gap.
+        """
+        with self.lock:
+            a = self._acc
+            if a[0]:
+                self.b_t.append(a[5]); self.b_mean.append(a[1] / a[0]); self.b_min.append(a[2])
+                self.b_max.append(a[3]); self.b_n.append(a[0]); self.b_dig.append(a[4] & 0xFF)
+            self._acc = [0, 0.0, float("inf"), float("-inf"), 0, 0.0]
 
     def window(self, t0, t1):
         i0 = bisect.bisect_left(self.b_t, t0); i1 = bisect.bisect_right(self.b_t, t1)
@@ -321,16 +348,23 @@ class Daemon:
             try:
                 with self.dev_lock:
                     d = self.ppk.get_data()
-                    s, bits, realigned = self.framer.feed(d) if d else ([], [], False)
+                    s, bits, event = self.framer.feed(d) if d else ([], [], None)
             except Exception as e:
                 self.err = repr(e); break
-            if realigned:
+            if event == "realign":
                 # The framer found the stream on a different byte offset and
                 # shifted to it. Samples either side of the slip must not be
                 # averaged together, so drop the part-filled bucket exactly as a
                 # device resync does -- but without stopping the device.
                 self.store.reset_partial()
                 acc_n = 0; acc_s = 0.0; acc_min = 1e12; acc_max = -1e12
+            elif event == "gap":
+                # Whole samples were lost but none were corrupted, so nothing is
+                # discarded: the bucket is simply closed here so that none spans
+                # the hole and reports its early samples at the wrong time. The
+                # 1 s log accumulator is left alone; a mean over a second is not
+                # harmed by a hole inside it.
+                self.store.flush_partial()
             if d:
                 # Belt and braces. The counter check above is the real detector;
                 # this catches anything that slips past it, and a magnitude over
