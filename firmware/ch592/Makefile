@@ -132,6 +132,10 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-common
 CFLAGS += --param=highcode-gen-section-name=1
 CFLAGS += -DCLK_OSC32K=1
 CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
+# Delivery counters are bench-only instrumentation and CH592's .bss has no room
+# for them alongside the EP1 queue; enable with DONGLE_DELIVERY_COUNTERS=1 on a
+# build that drops another optional feature.
+CFLAGS += -DDONGLE_EP1_QUEUE_SLOTS=4
 # BLE SNV must stay OFF: its default address is BLE_SNV_ADDR =
 # 0x77000-FLASH_ROM_MAX_SIZE, i.e. DataFlash offset 0x7000 - the SAME block as
 # the stage-1 transaction state (CH592_IAP_STATE_EEPROM_OFF).

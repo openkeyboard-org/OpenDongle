@@ -46,6 +46,13 @@
 #ifndef DONGLE_PM_IDLE
 #define DONGLE_PM_IDLE 0
 #endif
+/* Bench instrumentation for the report-delivery path (key-down counters at RF
+ * ingress, EP1 arm/completion, and the suspend stash). Costs ~100 B of SRAM, which
+ * CH570 does not have -- it links with ~32 B above its stack floor -- so this is
+ * opt-in and only the CH592 Makefile sets it. Every other port is a true no-op. */
+#ifndef DONGLE_DELIVERY_COUNTERS
+#define DONGLE_DELIVERY_COUNTERS 0
+#endif
 /* Tier 2: windowed receiver in the reacquire scan and terminal camp (CH592 only). */
 #ifndef DONGLE_RX_WINDOW
 #define DONGLE_RX_WINDOW 0
