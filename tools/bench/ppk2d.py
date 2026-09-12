@@ -34,8 +34,15 @@ DEF_SOCK = os.path.expanduser("~/.ppk2d.sock")   # AF_UNIX paths are limited to 
 # consecutive pairs at the correct byte offset and 0-19 % at every wrong one.
 SAMPLE_BYTES = 4
 CNT_SHIFT, CNT_MASK, CNT_MOD = 18, 0x3F, 64
-FRAME_MIN_SAMPLES = 16      # pairs needed before trusting a re-alignment verdict
-FRAME_HOLD_BYTES = 1 << 16  # never hold more than this waiting for that many
+# Samples (not pairs) a batch must hold before its re-alignment verdict is
+# trusted. 16 samples give 15 consecutive-pair tests; random bytes pass one pair
+# with probability 1/64, so a wrong offset survives all 15 with probability
+# about 64**-15. Below this the batch is held and retried with the next read.
+FRAME_MIN_SAMPLES = 16
+# Ceiling on bytes held while waiting for FRAME_MIN_SAMPLES. Reached only if the
+# stream never looks like samples at any offset, which must not be allowed to
+# grow the buffer without bound; at that point the oldest half is dropped.
+FRAME_HOLD_BYTES = 1 << 16
 
 
 class Framer:
