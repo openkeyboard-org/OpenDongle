@@ -125,11 +125,17 @@ def test_library_bug_is_real():
     """Why ppk2d does not call ppk2_api.get_samples(): a 1-byte remainder
     followed by a 1-byte read leaves remainder['len'] negative, after which the
     same aligned bytes decode differently and never recover."""
-    from ppk2_api.ppk2_api import PPK2_API
-    p = object.__new__(PPK2_API)
-    p.remainder = {"sequence": b"", "len": 0}
-    p._digital_to_analog = lambda b: int.from_bytes(b, "little", signed=False)
-    p._handle_raw_data = lambda v: (v, None)
+    try:
+        from ppk2_api.ppk2_api import PPK2_API
+        p = object.__new__(PPK2_API)
+        p.remainder = {"sequence": b"", "len": 0}
+        p._digital_to_analog = lambda b: int.from_bytes(b, "little", signed=False)
+        p._handle_raw_data = lambda v: (v, None)
+    except (ImportError, AttributeError) as e:
+        # This test pokes at library internals on purpose. If they move, say so
+        # as a failure rather than letting the exception escape and abort the
+        # whole run: the other tests still have something to report.
+        raise AssertionError(f"cannot probe ppk2_api internals: {e!r}")
     good = b"".join(i.to_bytes(4, "little") for i in range(6))
     assert p.get_samples(good)[0] == [0, 1, 2, 3, 4, 5]
     p.remainder = {"sequence": b"", "len": 0}
@@ -144,8 +150,12 @@ if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             try:
-                fn(); print(f"  ok    {name}")
+                fn()
+                print(f"  ok    {name}")
             except AssertionError as e:
-                failed += 1; print(f"  FAIL  {name}: {e}")
+                failed += 1
+                print(f"  FAIL  {name}: {e}")
+    # Anything other than an AssertionError is a real fault in the test or the
+    # code under test, and is deliberately left to propagate with its traceback.
     print("all framing tests passed" if not failed else f"{failed} test(s) failed")
     sys.exit(1 if failed else 0)

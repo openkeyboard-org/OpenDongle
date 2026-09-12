@@ -112,7 +112,7 @@ class Framer:
                 return i
         return None
 
-    def _reset_filter(self):
+    def reset_filter(self):
         """Drop the library's spike/rolling-average state: it was fed garbage."""
         for attr, val in (("rolling_avg", None), ("rolling_avg4", None),
                           ("prev_range", None), ("consecutive_range_samples", 0),
@@ -169,7 +169,7 @@ class Framer:
                 del self.buf[:best]     # orphaned tail of a sample we can never complete
                 self.realigns += 1
                 realigned = True
-                self._reset_filter()
+                self.reset_filter()
                 n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
                 if n < SAMPLE_BYTES:
                     self.expect = None
@@ -351,9 +351,9 @@ class Daemon:
             time.sleep(0.001)
     def _resync(self):
         """Re-frame the sample stream after a detected desync: stop the average,
-        drop whatever is buffered, clear the decoder's partial-sample remainder,
-        and start again. Measurements before this point in the batch are already
-        discarded by the caller."""
+        drop whatever is buffered, forget the framing, clear the spike/rolling
+        state the bad samples polluted, and start again. Measurements before this
+        point in the batch are already discarded by the caller."""
         self.desyncs += 1
         with self.dev_lock:
             for fn in (self.ppk.stop_measuring,
@@ -362,6 +362,7 @@ class Daemon:
                        lambda: self.framer.buf.clear(),
                        lambda: setattr(self.framer, "expect", None),
                        lambda: setattr(self.framer, "aligned", False),
+                       self.framer.reset_filter,   # the bad samples reached the filter
                        self.ppk.start_measuring):
                 try: fn()
                 except Exception as e: self.err = repr(e)
