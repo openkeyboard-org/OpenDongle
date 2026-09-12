@@ -26,6 +26,167 @@ FS = 100_000                      # PPK2 sample rate
 IMPLAUSIBLE_UA = 1_100_000.0
 DEF_SOCK = os.path.expanduser("~/.ppk2d.sock")   # AF_UNIX paths are limited to ~104 chars on macOS
 
+# Sample layout. The device streams 4-byte little-endian words:
+#   bits 0-13  ADC value        bits 14-16  measurement range
+#   bits 18-23 sample counter   bits 24-31  logic pins
+# The counter steps by exactly 1 (mod 64) per sample, which makes it an exact
+# framing oracle: measured over 231k live samples it held for 100.00 % of
+# consecutive pairs at the correct byte offset and 0-19 % at every wrong one.
+SAMPLE_BYTES = 4
+CNT_SHIFT, CNT_MASK, CNT_MOD = 18, 0x3F, 64
+FRAME_MIN_SAMPLES = 16      # pairs needed before trusting a re-alignment verdict
+FRAME_HOLD_BYTES = 1 << 16  # never hold more than this waiting for that many
+
+
+class Framer:
+    """Own the 4-byte sample framing, because ppk2_api gets it wrong.
+
+    ppk2_api.get_samples() carries a partial-sample remainder across calls and
+    ends each call with
+
+        remainder["len"] = len(buf) - (SAMPLE_BYTES - remainder_len)
+
+    which goes NEGATIVE whenever a read is shorter than the bytes still needed
+    to finish the pending sample (a 1-byte remainder followed by a 1-byte read
+    gives -2). The next call then takes 4 + |n| bytes for its "first" sample and
+    starts its loop past the end of it, so the stream slips by |n| bytes and
+    NEVER recovers: it keeps emitting nonsense with no exception raised. That is
+    what produced 4045 and 4944 desyncs in two overnight runs and cost us two
+    measurement windows. Reproduced offline in test_ppk2_framing.py.
+
+    So: buffer bytes here, consume only whole words, and check every batch
+    against the sample counter. A break is either a slip (a wrong byte offset,
+    which we find and correct) or a gap (whole samples lost by the host or the
+    device, alignment intact). Only a slip is a desync; telling them apart stops
+    us treating ordinary overruns as corruption.
+    """
+
+    def __init__(self, ppk):
+        self.ppk = ppk
+        self.buf = bytearray()
+        self.expect = None          # counter the next sample should carry
+        self.realigns = 0           # byte-offset slips found and corrected
+        self.gaps = 0               # whole samples lost; framing still good
+        self.held = 0               # batches deferred for want of evidence
+        self.aligned = False        # have we proven where sample boundaries are?
+
+    def _words(self, buf, n):
+        return [int.from_bytes(buf[i:i + SAMPLE_BYTES], "little")
+                for i in range(0, n, SAMPLE_BYTES)]
+
+    @staticmethod
+    def _score(buf, off, limit):
+        """Fraction of consecutive pairs at this offset whose counter steps by 1."""
+        n = min((len(buf) - off) // SAMPLE_BYTES, limit)
+        if n < 2:
+            return -1.0
+        c = [(int.from_bytes(buf[off + SAMPLE_BYTES * i:off + SAMPLE_BYTES * (i + 1)],
+                             "little") >> CNT_SHIFT) & CNT_MASK for i in range(n)]
+        return sum(1 for i in range(1, n) if (c[i] - c[i - 1]) % CNT_MOD == 1) / (n - 1)
+
+    @staticmethod
+    def _cnt(word):
+        return (word >> CNT_SHIFT) & CNT_MASK
+
+    def _first_break(self, words):
+        """Index of the first word that does not follow its predecessor, or None.
+
+        Locating the break matters: a slip usually starts part way through a
+        batch, and the words before it are perfectly good. Re-framing the whole
+        batch would turn those into garbage -- which is how a bad sample still
+        reached the magnitude guard in the first bench run of this decoder.
+        """
+        if not words:
+            return None
+        if self.expect is not None and self._cnt(words[0]) != self.expect:
+            return 0
+        for i in range(1, len(words)):
+            if (self._cnt(words[i]) - self._cnt(words[i - 1])) % CNT_MOD != 1:
+                return i
+        return None
+
+    def _reset_filter(self):
+        """Drop the library's spike/rolling-average state: it was fed garbage."""
+        for attr, val in (("rolling_avg", None), ("rolling_avg4", None),
+                          ("prev_range", None), ("consecutive_range_samples", 0),
+                          ("after_spike", 0)):
+            setattr(self.ppk, attr, val)
+
+    def feed(self, raw):
+        """Return (samples_uA, digital_bits, realigned)."""
+        if raw:
+            self.buf += raw
+        n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
+        if n < SAMPLE_BYTES:
+            return [], [], False
+
+        if not self.aligned:
+            # We attach to a stream already in flight, so sample boundaries are
+            # unknown until proven. Find them before emitting anything, rather
+            # than emitting a few garbage samples and correcting afterwards.
+            if n // SAMPLE_BYTES < FRAME_MIN_SAMPLES and len(self.buf) < FRAME_HOLD_BYTES:
+                self.held += 1
+                return [], [], False
+            scores = [self._score(self.buf, off, 4096) for off in range(SAMPLE_BYTES)]
+            best = max(range(SAMPLE_BYTES), key=lambda o: scores[o])
+            if scores[best] <= 0.99:
+                self.held += 1          # no offset looks like a sample stream yet
+                if len(self.buf) < FRAME_HOLD_BYTES:
+                    return [], [], False
+                del self.buf[:len(self.buf) // 2]   # never grow without bound
+                return [], [], False
+            if best:
+                del self.buf[:best]
+            self.aligned = True
+            self.expect = None
+            n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
+            if n < SAMPLE_BYTES:
+                return [], [], False
+
+        realigned = False
+        words = self._words(self.buf, n)
+        brk = self._first_break(words)
+        if brk:
+            # Emit the good prefix now and leave the break at the head of the
+            # buffer; the next batch decides what it is, with more evidence.
+            n = brk * SAMPLE_BYTES
+            words = words[:brk]
+        elif brk == 0:
+            avail = n // SAMPLE_BYTES
+            if avail < FRAME_MIN_SAMPLES and len(self.buf) < FRAME_HOLD_BYTES:
+                self.held += 1          # too little evidence; wait for more bytes
+                return [], [], False
+            scores = [self._score(self.buf, off, 4096) for off in range(SAMPLE_BYTES)]
+            best = max(range(SAMPLE_BYTES), key=lambda o: scores[o])
+            if best != 0 and scores[best] > 0.99 and scores[best] > scores[0] + 0.5:
+                del self.buf[:best]     # orphaned tail of a sample we can never complete
+                self.realigns += 1
+                realigned = True
+                self._reset_filter()
+                n = (len(self.buf) // SAMPLE_BYTES) * SAMPLE_BYTES
+                if n < SAMPLE_BYTES:
+                    self.expect = None
+                    return [], [], True
+                self.expect = None          # nothing to chain to across the slip
+                words = self._words(self.buf, n)
+                nxt = self._first_break(words)
+                if nxt:                     # a second break inside the same batch
+                    n = nxt * SAMPLE_BYTES
+                    words = words[:nxt]
+            else:
+                self.gaps += 1          # counter jumped but alignment is sound
+
+        del self.buf[:n]
+        self.expect = (self._cnt(words[-1]) + 1) % CNT_MOD
+        samples, bits = [], []
+        for w in words:
+            m, b = self.ppk._handle_raw_data(w)
+            if m is not None:
+                samples.append(m)
+            if b is not None:
+                bits.append(b)
+        return samples, bits, realigned
+
 def read_metadata(ppk, deadline=3.0):
     """Accumulate until END (the library's own loop drops chunks and loses the calibration)."""
     ppk._write_serial((PPK2_Command.GET_META_DATA,))
@@ -129,6 +290,7 @@ class Daemon:
             raise SystemExit("PPK2 reports mode %d (not ampere meter); refusing without --allow-source" % self.mode)
         self.ppk.mode = "AMPERE_MODE" if self.mode == 1 else "SOURCE_MODE"; self.ppk.current_vdd = 3300  # guard only; never REGULATOR_SET in ampere mode
         self.ppk.toggle_DUT_power("ON")                     # close the series switch: the app does this on connect
+        self.framer = Framer(self.ppk)                      # we frame samples, not ppk2_api
         with self.dev_lock:
             self.ppk.start_measuring()
         time.sleep(0.3)
@@ -144,15 +306,20 @@ class Daemon:
             try:
                 with self.dev_lock:
                     d = self.ppk.get_data()
-                    s, bits = self.ppk.get_samples(d) if d else ([], [])
+                    s, bits, realigned = self.framer.feed(d) if d else ([], [], False)
             except Exception as e:
                 self.err = repr(e); break
+            if realigned:
+                # The framer found the stream on a different byte offset and
+                # shifted to it. Samples either side of the slip must not be
+                # averaged together, so drop the part-filled bucket exactly as a
+                # device resync does -- but without stopping the device.
+                self.store.reset_partial()
+                acc_n = 0; acc_s = 0.0; acc_min = 1e12; acc_max = -1e12
             if d:
-                # get_samples() carries a remainder across calls, so a single
-                # truncated read or bus glitch shifts the 4-byte framing and it
-                # NEVER recovers: it just keeps emitting nonsense, hundreds of mA
-                # for a milliamp DUT, with no error raised. Seen twice on the
-                # bench. Catch it on the device's own ceiling and re-frame.
+                # Belt and braces. The counter check above is the real detector;
+                # this catches anything that slips past it, and a magnitude over
+                # the device's own 1 A ceiling can only be a decoding fault.
                 if s and max(abs(min(s)), abs(max(s))) > IMPLAUSIBLE_UA:
                     self._resync()
                     # Drop the part-filled bucket and the part-filled log interval:
@@ -185,7 +352,9 @@ class Daemon:
             for fn in (self.ppk.stop_measuring,
                        lambda: time.sleep(0.05),
                        self.ppk.ser.reset_input_buffer,
-                       lambda: setattr(self.ppk, "remainder", {"sequence": b"", "len": 0}),
+                       lambda: self.framer.buf.clear(),
+                       lambda: setattr(self.framer, "expect", None),
+                       lambda: setattr(self.framer, "aligned", False),
                        self.ppk.start_measuring):
                 try: fn()
                 except Exception as e: self.err = repr(e)
@@ -196,7 +365,9 @@ class Daemon:
             i1 = len(st.b_t); i0 = max(0, i1 - 1000)
             last = (sum(st.b_mean[i0:i1]) / max(1, i1 - i0) / 1000) if i1 > i0 else None
             return {"ok": True, "port": self.a.port, "mode": "ampere" if self.mode == 1 else "source", "dut_power": self.dut_power,
-                    "uptime_s": round(now - st.t_start, 1), "samples": st.total, "rate_kSps": round(self.rate / 1000, 1), "desyncs": self.desyncs,
+                    "uptime_s": round(now - st.t_start, 1), "samples": st.total, "rate_kSps": round(self.rate / 1000, 1),
+                    "desyncs": self.desyncs, "realigns": self.framer.realigns, "gaps": self.framer.gaps,
+                    "held": self.framer.held,
                     "last_1s_mean_mA": last, "marks": st.marks, "fetch_error": self.err, "pid": os.getpid()}
         if c == "mark":
             st.marks[req["label"]] = now; return {"ok": True, "label": req["label"], "t": now}
