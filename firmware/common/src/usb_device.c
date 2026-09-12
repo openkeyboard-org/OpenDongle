@@ -90,6 +90,18 @@ static usb_ep6_out_cb_t ep6_out_cb;
 static volatile uint8_t usb_suspended;
 static volatile uint16_t usb_suspend_episodes;   /* IAP 0x92 page 4 */
 
+/* ---- Report-delivery observability (IAP 0x92 page 8; read over USB, never SWD,
+ * which would reset the dongle and drop the link). These locate a lost keystroke
+ * at the dongle->USB hop: ep1_arms counts every boot-keyboard report armed onto
+ * EP1; ep1_completions counts host IN completions (the delivery signal);
+ * ep1_overwrites counts a report armed while the previous one had NOT completed
+ * -- the proven single-slot overwrite. arms - completions - overwrites that stay
+ * queued is the loss. All u32; wrap is irrelevant over a bench run. */
+static volatile uint32_t usb_ep1_arms;
+static volatile uint32_t usb_ep1_completions;
+static volatile uint32_t usb_ep1_overwrites;
+static volatile uint8_t  usb_ep1_armed;   /* set on arm, cleared on IN completion / reset */
+
 /* USB remote-wakeup feature. Armed/disarmed by the host via
  * SET/CLEAR_FEATURE(DEVICE_REMOTE_WAKEUP) and reported in GET_STATUS(device).
  * USB spec: defaults OFF after every bus reset; the host sets it before
@@ -546,6 +558,7 @@ static __attribute__((noinline)) void USB_BusReset(void)
 {
     R8_USB_DEV_AD = 0;
     usb_config = 0;
+    usb_ep1_armed = 0;
     usb_dev_addr = 0;
 
     R8_UEP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
@@ -654,6 +667,8 @@ void USB_IRQHandler(void)
         case UIS_TOKEN_IN | 1:
             R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
             R8_UEP1_CTRL ^= RB_UEP_T_TOG;
+            usb_ep1_armed = 0;             /* host consumed the report */
+            usb_ep1_completions++;
             break;
 
         /* ---- EP2 IN (boot mouse) ---- */
@@ -951,6 +966,9 @@ void USB_SendKeyboard(const uint8_t report[8])
     for (int i = 0; i < 8; i++)
         EP1_IN()[i] = report[i];
     R8_UEP1_T_LEN = 8;
+    if (usb_ep1_armed) usb_ep1_overwrites++;   /* armed before the previous IN completed */
+    usb_ep1_armed = 1;
+    usb_ep1_arms++;
     R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
 }
@@ -987,6 +1005,9 @@ static void usb_reconcile_keyboard(void)
     for (int i = 0; i < 8; i++)
         EP1_IN()[i] = src[i];
     R8_UEP1_T_LEN = 8;
+    if (usb_ep1_armed) usb_ep1_overwrites++;
+    usb_ep1_armed = 1;
+    usb_ep1_arms++;
     R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
 }
@@ -1198,6 +1219,10 @@ uint16_t USB_SuspendEpisodes(void)
 {
     return usb_suspend_episodes;
 }
+
+uint32_t USB_Ep1Arms(void)        { return usb_ep1_arms; }
+uint32_t USB_Ep1Completions(void) { return usb_ep1_completions; }
+uint32_t USB_Ep1Overwrites(void)  { return usb_ep1_overwrites; }
 
 uint8_t USB_GetLEDState(void)
 {

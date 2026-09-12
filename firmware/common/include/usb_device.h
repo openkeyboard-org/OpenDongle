@@ -69,6 +69,14 @@ uint8_t USB_IsSuspended(void);
 /* Number of host suspend episodes seen since boot (diagnostics). */
 uint16_t USB_SuspendEpisodes(void);
 
+/* Report-delivery observability (report-delivery step 1): EP1 boot-keyboard
+ * arms, host IN completions (delivery), and overwrites (a report armed before
+ * the previous completed -- the single-slot drop). Read over USB or a post-run
+ * SWD snapshot; they locate a lost keystroke at the dongle->USB hop. */
+uint32_t USB_Ep1Arms(void);
+uint32_t USB_Ep1Completions(void);
+uint32_t USB_Ep1Overwrites(void);
+
 /* Call from the main loop (foreground). When a HID report arrived over RF
  * while the bus was suspended and remote wakeup is armed, this drives the
  * ~2 ms USB resume K-state to wake the host. No-op otherwise. Kept out of the
