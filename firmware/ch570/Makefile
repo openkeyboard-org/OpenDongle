@@ -131,6 +131,11 @@ CFLAGS += --param=highcode-gen-section-name=1
 CFLAGS += -DCH570_SYSCLK_SOURCE=CLK_SOURCE_HSE_PLL_100MHz
 CFLAGS += -DCH570_SYSCLK_HZ=100000000u
 CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
+# CH570 links with barely 2 KB above its stack floor, so the EP1 queue gets the
+# minimum workable depth: >= 2 is required (the overflow path coalesces onto the
+# newest entry, which must never be the in-flight head) and the free-running
+# 8-bit indices require a power-of-two capacity.
+CFLAGS += -DDONGLE_EP1_QUEUE_SLOTS=2
 # OpenBoot app companion (openboot_request_update / openboot_get_record).
 # openboot_app.c #errors without the two slot defines; they must match the
 # bootloader's own generated openboot_config.h, which is why they are derived

@@ -46,6 +46,16 @@
 #ifndef DONGLE_PM_IDLE
 #define DONGLE_PM_IDLE 0
 #endif
+/* Extra bench instrumentation for the report-delivery path: key-down counters at
+ * RF ingress and at EP1 arm/completion. These are ADDITIONAL to the always-on
+ * usb_ep1_arms/completions/overwrites counters, which the EP1 queue needs anyway.
+ * They cost SRAM neither chip has spare -- CH570 links with ~2 KB above its stack
+ * floor and CH592's .bss nearly meets its fault-retention block -- so they are
+ * opt-in: add -DDONGLE_DELIVERY_COUNTERS=1 to a port's CFLAGS on a build that
+ * drops another optional feature to make room. */
+#ifndef DONGLE_DELIVERY_COUNTERS
+#define DONGLE_DELIVERY_COUNTERS 0
+#endif
 /* Tier 2: windowed receiver in the reacquire scan and terminal camp (CH592 only). */
 #ifndef DONGLE_RX_WINDOW
 #define DONGLE_RX_WINDOW 0
