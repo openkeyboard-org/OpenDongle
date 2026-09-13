@@ -99,7 +99,7 @@ static volatile uint16_t usb_suspend_episodes;   /* IAP 0x92 page 4 */
  * queued is the loss. All u32; wrap is irrelevant over a bench run. */
 static volatile uint32_t usb_ep1_arms;
 static volatile uint32_t usb_ep1_completions;
-static volatile uint32_t usb_ep1_overwrites;
+static volatile uint32_t usb_ep1_overwrites;  /* queued transitions replaced by full-queue coalescing */
 static volatile uint8_t  usb_ep1_armed;   /* set on arm, cleared on IN completion / reset */
 #if DONGLE_DELIVERY_COUNTERS
 static volatile uint16_t usb_ep1_arms_down;        /* EP1 armed with a non-zero (key-down) report */
@@ -614,6 +614,12 @@ static __attribute__((noinline)) void USB_BusReset(void)
     usb_kbd_q_owned = 0;
     usb_kbd_q_head  = 0;
     usb_kbd_q_tail  = 0;
+    /* Pre-existing: the resume flush request is only consumed while configured
+     * (USB_PollEP6), so a reset left it set and USB_HasPendingWork()/
+     * USB_PmSnapshot() kept reporting pending USB work until reconfiguration --
+     * holding the PM path out of idle. The flush it asks for is moot now: the
+     * queue above is empty and the host re-enumerates with no keys held. */
+    usb_resume_clear_kbd = 0;
 #if DONGLE_DELIVERY_COUNTERS
     usb_ep1_down_inflight = 0;
 #endif

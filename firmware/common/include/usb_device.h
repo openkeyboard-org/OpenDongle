@@ -69,9 +69,11 @@ uint8_t USB_IsSuspended(void);
 /* Number of host suspend episodes seen since boot (diagnostics). */
 uint16_t USB_SuspendEpisodes(void);
 
-/* Report-delivery observability (report-delivery step 1): EP1 boot-keyboard
- * arms, host IN completions (delivery), and overwrites (a report armed before
- * the previous completed -- the single-slot drop). Read over USB or a post-run
+/* Report-delivery observability: EP1 boot-keyboard arms, host IN completions
+ * (delivery), and "overwrites". NOTE the last one changed meaning with the EP1
+ * queue: a report can no longer be armed over one the host has not collected,
+ * so this now counts queued transitions replaced by FULL-QUEUE COALESCING --
+ * the only path that still discards a transition. Read over USB or a post-run
  * SWD snapshot; they locate a lost keystroke at the dongle->USB hop. */
 uint32_t USB_Ep1Arms(void);
 uint32_t USB_Ep1Completions(void);
