@@ -536,6 +536,10 @@ static volatile uint32_t rfd_pair_ack_posted;        /* RF_EVT_TX_PAIR_15 schedu
 static volatile uint32_t rfd_pair_ack_tx_ok;         /* pair-ACK StartTx rc == 0 (first + burst) */
 static volatile uint32_t rfd_pair_ack_tx_fail;       /* pair-ACK StartTx rc != 0 */
 static volatile uint32_t rfd_pair_ack_tx_done;       /* TX_FINISH while the burst was active */
+#if DONGLE_DELIVERY_COUNTERS
+static volatile uint16_t rfd_hid_rx;                 /* HID reports (peer-matched 0xA1) received over RF in CONNECTED, pre-forward/pre-dedup */
+static volatile uint16_t rfd_hid_rx_down;            /* of those, non-zero (key-down) payloads: compare to controller ll_hid_tx_done_down => RF loss */
+#endif
 static volatile uint32_t rfd_rx_restart_handled;     /* RF_EVT_RX_RESTART re-arm attempts (a failed
                                                       * arm counts too; it schedules the P4 retry) */
 static volatile uint32_t rfd_rx_restart_dropped_ev10;/* RF_EVT_RX_RESTART dropped (EV10 scan owns RX) */
@@ -2156,6 +2160,20 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             {
                 uint8_t hid_tag =
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
+#if DONGLE_DELIVERY_COUNTERS
+                if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
+                    rfd_hid_rx++;
+                    /* Boot keyboard only: the classifier returns RF_PROTO_HID_TAG solely
+                     * for an exact LEN-10 frame (it rejects a short 0xA1 precisely so a
+                     * sink cannot read past the body), so the tag alone makes the 8-byte
+                     * read in bounds. Consumer 0xA3 and mouse 0xA8 have shorter bodies and
+                     * route to EP3/EP2, not the EP1 path this is compared against. */
+                    if (hid_tag == RF_PROTO_HID_TAG
+                        && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
+                        rfd_hid_rx_down++;
+                    }
+                }
+#endif
                 if (hid_tag && rf_hid_callback) {
                     rf_hid_callback(hid_tag, &rxBuf[4], len - 2);
                 }
