@@ -554,6 +554,15 @@ size: $(BUILD)/$(TARGET).elf
 print-build-id:
 	@echo $(BUILD_ID)
 
+# CH570's 12 KB SRAM is the tight budget, and the link only says "less than the
+# selected stack floor" when it is already too late. Print the actual numbers so
+# a change that eats the margin is seen as a number, not as a cryptic assert.
+# .highcode (code executed from SRAM) dominates: see ch570/README-sram.md before
+# trying to shrink it -- the obvious moves cost more than they save.
+.PHONY: ram-report
+ram-report: $(BUILD)/$(TARGET).elf
+	@hi=$$("$(SIZE)" -A "$<" | awk '$$1==".highcode"{print $$2}'); 	 da=$$("$(SIZE)" -A "$<" | awk '$$1==".data"{print $$2}'); 	 bs=$$("$(SIZE)" -A "$<" | awk '$$1==".bss"{print $$2}'); 	 end=$$("$(MRS_TOOLCHAIN)/$(CROSS)-nm" "$<" | awk '/ _enoinit$$/{print $$1}'); 	 top=536883184; 	 endd=$$(printf '%d' 0x$$end); 	 free=$$((top - endd)); floor=2048; 	 printf 'CH570 SRAM: .highcode %s B  .data %s B  .bss %s B\n' "$$hi" "$$da" "$$bs"; 	 printf '  _end 0x%x, free to top of RAM %d B, stack floor %d B, margin %d B\n' "$$endd" "$$free" "$$floor" "$$((free - floor))"; 	 test "$$((free - floor))" -ge 0 || { echo "  OVER BUDGET" >&2; exit 1; }
+
 size-check: $(BUILD)/$(TARGET).bin
 	@size=$$(stat -c%s "$<"); \
 	 test "$$size" -le $(APP_MAX_BYTES) || { \
