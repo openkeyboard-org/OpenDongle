@@ -56,6 +56,16 @@
 #ifndef DONGLE_DELIVERY_COUNTERS
 #define DONGLE_DELIVERY_COUNTERS 0
 #endif
+
+/* Bench fault injection (default off, compiles to nothing): drop the first
+ * non-zero boot-keyboard report after each promote before it is counted or
+ * forwarded. Positive control for the control-byte feedback placement in
+ * rf_task.c: with feedback applied to unadmitted frames the keyboard's
+ * ack-retired FIFO releases the swallowed report (silent loss); with feedback
+ * gated on admission it retransmits it on the next poll. */
+#ifndef DONGLE_BENCH_DROP_FIRST_HID
+#define DONGLE_BENCH_DROP_FIRST_HID 0
+#endif
 /* Tier 2: windowed receiver in the reacquire scan and terminal camp (CH592 only). */
 #ifndef DONGLE_RX_WINDOW
 #define DONGLE_RX_WINDOW 0

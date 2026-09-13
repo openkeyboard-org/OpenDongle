@@ -508,7 +508,10 @@ static volatile uint8_t rf_state;
  * the post-promote re-sync restores the keyboard LED. */
 static volatile uint8_t rf_led_state;
 static int8_t  rf_rssi;
-static uint8_t rf_ctrl_byte;
+#if DONGLE_BENCH_DROP_FIRST_HID
+static volatile uint8_t  rf_bench_drop_armed;   /* set at promote; the next non-zero HID is swallowed */
+static volatile uint16_t rf_bench_drops;        /* SWD-readable: injected drops so far */
+#endif
 
 /* Pairing data */
 static uint32_t rf_access_addr;
@@ -1945,19 +1948,17 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     default:
         return;
     }
-    if (sta == 0x03) {
-        if (rsr == 0 && rxBuf) {
-            /* Stock dongle's tx_ctrl feedback formula (PROTOCOL.md:324):
-             *   if ((rx_ctrl ^ tx_ctrl) & 2)
-             *       tx_ctrl = ((tx_ctrl & ~2) | (rx_ctrl & 2)) ^ 1;
-             * Synchronises bit 1 with the keyboard's "fresh packet"
-             * indicator. Without this update our tx_ctrl never matches
-             * what the keyboard expects, so its CONNECTED-state RX
-             * validator stale-rejects most polls. */
-            rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0],
-                                                  rxBuf[2]);
-        }
-    }
+    /* The stock control-byte feedback (rf_proto_ctrl_update) used to run
+     * HERE, on every good RX before the state switch. That acked frames this
+     * task never admitted: a LEN-10 that the not-CONNECTED consumer below
+     * swallowed as a beacon (or rejected) still flipped our poll bit, and the
+     * keyboard's ack-retired FIFO released a report we never dispatched.
+     * Bench 2026-09-13: first key after a dongle reset, keyboard
+     * ll_hid_tx_done_down advanced, rfd_hid_rx unchanged, no retransmit. The
+     * feedback now lives in the CONNECTED handler, applied only to a frame
+     * this session admits (a LEN-1 keepalive or a classified HID report), so
+     * an ack means "admitted by the RF task" -- it precedes the optional
+     * forwarding callback; the EP1 queue's counters cover the USB hop. */
     switch (sta) {
     case RX_MODE_RX_DATA:
         if (rsr != 0) {
@@ -2146,8 +2147,6 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * re-broadcasting). The supervision/EV10 machinery handles the
              * recovery. */
 
-            /* Save control byte */
-            rf_ctrl_byte = rxBuf[2];
 
             /* Dispatch HID data if callback registered and payload present.
              * On-wire layout (validated against sniff-mode decoder at the
@@ -2160,6 +2159,31 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             {
                 uint8_t hid_tag =
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
+#if DONGLE_BENCH_DROP_FIRST_HID
+                /* Bench fault injection: swallow the first non-zero boot-keyboard
+                 * report after each promote before the reception counters, the
+                 * feedback and the forwarding callback, so it is neither counted
+                 * nor acked nor forwarded (it still refreshes liveness and
+                 * supervision like any connected RX). Whether the keyboard's
+                 * ack-retired FIFO then loses that report or retransmits it is
+                 * exactly what the control-byte feedback placement decides. */
+                if (rf_bench_drop_armed && hid_tag == RF_PROTO_HID_TAG
+                    && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
+                    rf_bench_drop_armed = 0u;
+                    rf_bench_drops++;
+                    hid_tag = 0u;
+                }
+#endif
+                /* Control-byte feedback (stock PROTOCOL.md formula, bit 1 =
+                 * the keyboard's fresh-packet indicator; we flip bit 0 when it
+                 * changes) -- ONLY for a frame this session admits, so the
+                 * keyboard retires a report exactly when the RF task accepts
+                 * it (the forwarding callback follows). A frame the injection
+                 * above swallowed, or one the classifier rejects, must not be
+                 * acked. */
+                if (len == 1u || hid_tag != 0u) {
+                    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rxBuf[2]);
+                }
 #if DONGLE_DELIVERY_COUNTERS
                 if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
                     rfd_hid_rx++;
@@ -2421,6 +2445,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
                 rfd_connected_promotes++;   /* diag: before the flip, so the
                                              * flip -> grid-arm gap is untouched */
+#if DONGLE_BENCH_DROP_FIRST_HID
+                rf_bench_drop_armed = 1u;
+#endif
                 rf_start_rx();
                 rf_state = RF_STATE_CONNECTED;
                 /* OQ7 Track 2f (2026-05-17): per stock event 0x40 disasm
@@ -2548,6 +2575,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             rf_win_on_promote();
 #endif
             rfd_connected_promotes++;       /* diag: before the flip (see above) */
+#if DONGLE_BENCH_DROP_FIRST_HID
+            rf_bench_drop_armed = 1u;
+#endif
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
 #if !RF_TASK_EXECUTOR_TMOS
