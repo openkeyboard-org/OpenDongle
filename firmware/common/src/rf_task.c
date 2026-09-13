@@ -1957,7 +1957,8 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
      * ll_hid_tx_done_down advanced, rfd_hid_rx unchanged, no retransmit. The
      * feedback now lives in the CONNECTED handler, applied only to a frame
      * this session admits (a LEN-1 keepalive or a classified HID report), so
-     * an ack always means "dispatched". */
+     * an ack means "admitted by the RF task" -- it precedes the optional
+     * forwarding callback; the EP1 queue's counters cover the USB hop. */
     switch (sta) {
     case RX_MODE_RX_DATA:
         if (rsr != 0) {
@@ -2160,9 +2161,10 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
 #if DONGLE_BENCH_DROP_FIRST_HID
                 /* Bench fault injection: swallow the first non-zero boot-keyboard
-                 * report after each promote as if it had never been received --
-                 * before the reception counters, so the signature matches a
-                 * frame that never reached this dispatch. Whether the keyboard's
+                 * report after each promote before the reception counters, the
+                 * feedback and the forwarding callback, so it is neither counted
+                 * nor acked nor forwarded (it still refreshes liveness and
+                 * supervision like any connected RX). Whether the keyboard's
                  * ack-retired FIFO then loses that report or retransmits it is
                  * exactly what the control-byte feedback placement decides. */
                 if (rf_bench_drop_armed && hid_tag == RF_PROTO_HID_TAG
@@ -2175,9 +2177,10 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* Control-byte feedback (stock PROTOCOL.md formula, bit 1 =
                  * the keyboard's fresh-packet indicator; we flip bit 0 when it
                  * changes) -- ONLY for a frame this session admits, so the
-                 * keyboard retires a report exactly when we dispatch it. A
-                 * frame the injection above swallowed, or one the classifier
-                 * rejects, must not be acked. */
+                 * keyboard retires a report exactly when the RF task accepts
+                 * it (the forwarding callback follows). A frame the injection
+                 * above swallowed, or one the classifier rejects, must not be
+                 * acked. */
                 if (len == 1u || hid_tag != 0u) {
                     rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rxBuf[2]);
                 }
