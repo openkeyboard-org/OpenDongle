@@ -509,6 +509,10 @@ static volatile uint8_t rf_state;
 static volatile uint8_t rf_led_state;
 static int8_t  rf_rssi;
 static uint8_t rf_ctrl_byte;
+#if DONGLE_BENCH_DROP_FIRST_HID
+static volatile uint8_t  rf_bench_drop_armed;   /* set at promote; the next non-zero HID is swallowed */
+static volatile uint16_t rf_bench_drops;        /* SWD-readable: injected drops so far */
+#endif
 
 /* Pairing data */
 static uint32_t rf_access_addr;
@@ -2160,6 +2164,20 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             {
                 uint8_t hid_tag =
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
+#if DONGLE_BENCH_DROP_FIRST_HID
+                /* Bench fault injection: swallow the first non-zero boot-keyboard
+                 * report after each promote as if it had never been received --
+                 * before the reception counters, so the signature matches a
+                 * frame that never reached this dispatch. Whether the keyboard's
+                 * ack-retired FIFO then loses that report or retransmits it is
+                 * exactly what the control-byte feedback placement decides. */
+                if (rf_bench_drop_armed && hid_tag == RF_PROTO_HID_TAG
+                    && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
+                    rf_bench_drop_armed = 0u;
+                    rf_bench_drops++;
+                    hid_tag = 0u;
+                }
+#endif
 #if DONGLE_DELIVERY_COUNTERS
                 if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
                     rfd_hid_rx++;
@@ -2421,6 +2439,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
                 rfd_connected_promotes++;   /* diag: before the flip, so the
                                              * flip -> grid-arm gap is untouched */
+#if DONGLE_BENCH_DROP_FIRST_HID
+                rf_bench_drop_armed = 1u;
+#endif
                 rf_start_rx();
                 rf_state = RF_STATE_CONNECTED;
                 /* OQ7 Track 2f (2026-05-17): per stock event 0x40 disasm
@@ -2548,6 +2569,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             rf_win_on_promote();
 #endif
             rfd_connected_promotes++;       /* diag: before the flip (see above) */
+#if DONGLE_BENCH_DROP_FIRST_HID
+            rf_bench_drop_armed = 1u;
+#endif
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
 #if !RF_TASK_EXECUTOR_TMOS
