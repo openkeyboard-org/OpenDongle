@@ -2163,10 +2163,12 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #if DONGLE_DELIVERY_COUNTERS
                 if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
                     rfd_hid_rx++;
-                    /* down count is BOOT-KEYBOARD exact (0xA1, LEN-10): the classifier
-                     * also accepts consumer 0xA3/LEN-4 and mouse 0xA8/LEN-7, whose bodies
-                     * are shorter and route to EP3/EP2, not the EP1 path we compare against. */
-                    if (len == 10u && rxBuf[3] == 0xA1u
+                    /* Boot keyboard only: the classifier returns RF_PROTO_HID_TAG solely
+                     * for an exact LEN-10 frame (it rejects a short 0xA1 precisely so a
+                     * sink cannot read past the body), so the tag alone makes the 8-byte
+                     * read in bounds. Consumer 0xA3 and mouse 0xA8 have shorter bodies and
+                     * route to EP3/EP2, not the EP1 path this is compared against. */
+                    if (hid_tag == RF_PROTO_HID_TAG
                         && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
                         rfd_hid_rx_down++;
                     }

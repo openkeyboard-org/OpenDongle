@@ -46,10 +46,13 @@
 #ifndef DONGLE_PM_IDLE
 #define DONGLE_PM_IDLE 0
 #endif
-/* Bench instrumentation for the report-delivery path (key-down counters at RF
- * ingress, EP1 arm/completion, and the suspend stash). Costs ~100 B of SRAM, which
- * CH570 does not have -- it links with ~32 B above its stack floor -- so this is
- * opt-in and only the CH592 Makefile sets it. Every other port is a true no-op. */
+/* Extra bench instrumentation for the report-delivery path: key-down counters at
+ * RF ingress and at EP1 arm/completion. These are ADDITIONAL to the always-on
+ * usb_ep1_arms/completions/overwrites counters, which the EP1 queue needs anyway.
+ * They cost SRAM neither chip has spare -- CH570 links with ~2 KB above its stack
+ * floor and CH592's .bss nearly meets its fault-retention block -- so they are
+ * opt-in: add -DDONGLE_DELIVERY_COUNTERS=1 to a port's CFLAGS on a build that
+ * drops another optional feature to make room. */
 #ifndef DONGLE_DELIVERY_COUNTERS
 #define DONGLE_DELIVERY_COUNTERS 0
 #endif

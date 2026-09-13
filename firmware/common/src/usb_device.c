@@ -102,7 +102,6 @@ static volatile uint32_t usb_ep1_completions;
 static volatile uint32_t usb_ep1_overwrites;
 static volatile uint8_t  usb_ep1_armed;   /* set on arm, cleared on IN completion / reset */
 #if DONGLE_DELIVERY_COUNTERS
-static volatile uint16_t usb_ep1_q_overflow;      /* a transition was coalesced away: queue full */
 static volatile uint16_t usb_ep1_arms_down;        /* EP1 armed with a non-zero (key-down) report */
 static volatile uint16_t usb_ep1_completions_down; /* IN completed while the armed report was a key-down */
 static volatile uint8_t  usb_ep1_down_inflight;    /* last-armed report is non-zero; awaiting its IN completion */
@@ -189,8 +188,10 @@ static void usb_ep1_service(void);   /* the one place EP1 is armed (defined belo
  * the endpoint is usable again. Required EVERYWHERE we force EP1 to NAK: no
  * completion can arrive for a NAKed endpoint, so leaving ownership set wedges the
  * queue permanently (codex). If the hardware does complete a transfer we already
- * cancelled, the completion handler retires that entry as usual; a re-armed
- * duplicate is an absolute key-state report and therefore idempotent. */
+ * cancelled, the completion handler will NOT retire it -- retirement is gated on
+ * the ownership flag this clears -- so the entry is simply re-armed and delivered
+ * again. That is safe: these are absolute key-state reports, so a repeat conveys
+ * the same state and produces no extra key transition. */
 static void usb_ep1_cancel_owned(void)
 {
     usb_kbd_q_owned = 0;
@@ -443,6 +444,10 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                 case 1:
                     R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK;
                     usb_ep1_cancel_owned();   /* NAK + DATA0 restart: nothing will complete */
+                    /* Re-arm immediately: unlike suspend, the endpoint is usable
+                     * again right now, and without this a queued report waits for
+                     * the next arrival that may never come. */
+                    usb_ep1_service();
                     break;
                 case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
                 case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
@@ -1040,9 +1045,9 @@ static void usb_kbd_q_push(const uint8_t report[8])
         for (int i = 0; i < 8; i++) {
             slot[i] = report[i];
         }
-#if DONGLE_DELIVERY_COUNTERS
-        usb_ep1_q_overflow++;
-#endif
+        /* Surfaced through the existing public overwrite metric: with the queue
+         * in place this is the only path that still discards a transition. */
+        usb_ep1_overwrites++;
     }
 }
 
