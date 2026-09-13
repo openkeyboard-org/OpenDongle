@@ -39,12 +39,16 @@ is mostly hardware-mandated USB endpoint buffers (EP0-EP6, 448 B); `.data` is
 **A function is only free to move out of SRAM if its callers are already in
 flash.** A call from SRAM into flash needs the long call sequence plus spills
 around it, so moving a callee that a *SRAM* function calls adds bytes to that
-caller — often more than the callee was worth. Two measured cases:
+caller — often more than the callee was worth. Two cases, both measured against
+the same 4 B starting margin (i.e. before the `st_set`/`st_cancel` move below):
 
-| change | `.highcode` | margin |
-|---|---|---|
-| `st_set` + `st_cancel` → `DONGLE_HIGHCODE_COLD` (callers `hal_timer_arm`/`hal_timer_cancel`/`hal_event_post_delayed`/`hal_event_cancel` are all in flash) | 8824 → **8608 B** | 4 → **220 B** |
-| `rf_diag_len10_reject_reason` → `DONGLE_HIGHCODE_COLD` (only caller `rf_phy_event_sink` is in SRAM) | helper −80 B, but the caller **+98 B** | 4 → **−12 B**, link fails |
+| change | function sizes | `_end` | margin |
+|---|---|---|---|
+| `st_set` + `st_cancel` → `DONGLE_HIGHCODE_COLD` (callers `hal_timer_arm`/`hal_timer_cancel`/`hal_event_post_delayed`/`hal_event_cancel` are all in flash) | `.highcode` 8824 → **8608 B** | −216 B | 4 → **220 B** |
+| `rf_diag_len10_reject_reason` → `DONGLE_HIGHCODE_COLD` (only caller `rf_phy_event_sink` is in SRAM) | helper −80 B, caller **+98 B** = **+18 B** | +16 B | 4 → **−12 B**, link fails |
+
+(The second row's +18 B of function size becomes a +16 B move of `_end` once the
+section is re-aligned, which is what the margin follows.)
 
 The second looks like the ideal candidate — diagnostics only, reject path only,
 and it already calls `rf_accept_peer_mac`, which is `noinline`/flash-resident on
