@@ -308,6 +308,32 @@ the build id for no functional gain, or expands scope beyond the import:
   **Do not "simplify" by substituting `_vector_base` for the `mtvec` literal** —
   `0x20000003` carries the mode bits, and a bare symbol would drop them.
 
+## Tools
+
+- **`opendongle` cannot clear a bond.** The firmware implements IAP `0x89`
+  BondClear (armed session only; a firmware-side erase with readback, then
+  `RF_TombstoneBond()`), and `firmware/BOOT.md` names it as the way back into
+  pairing for a bonded dongle, but `tools/opendongle` has no flag that sends it.
+  Without it, re-pairing a bonded dongle means hitting the ~3 s boot window or
+  hand-framing IAP reports. Add `--clear-bond`: handshake, arm (GetDevInfo arg
+  1), `0x89`, require `ACK_OK` with status 0, then disarm. The tombstone blocks
+  accepting a new pair until reset, so the flag should also reset the dongle,
+  or tell the operator to replug it, and confirm `connection pairing` with
+  `--info`. Two things seen on 2026-10-04 with a hand-framed sequence against a
+  `main` build (0.96.16, CH592): BondClear answered `0f 01 00` (success), but
+  the GetDevInfo(arg 0) disarm that followed answered `0f 01 f3` rather than
+  the `04` ack the tool's disarm check expects. Settle which reply is correct
+  before the flag relies on it.
+- **`opendongle --info` fails on a bond v1 dongle.** `tools/src/bond.rs`
+  hard-codes `BOND_RECORD_LEN` (32 on `main`, 48 on `em-m2-robustness`, where
+  bond v2 appends `link_key[16]` before the checksum), so a v2-built tool
+  pointed at a `main` dongle stops with `BondRead: record length 32 (expected
+  48)`. Seen on 2026-10-04 against a `main` build (0.96.16, CH592). The v2
+  firmware keeps every v1 offset and migrates a v1 record in place, so mixed
+  versions are expected in the field. Decode by the reply's length and version
+  byte (v1 = 32, v2 = 48) and report the bond rather than failing the whole
+  status read.
+
 ## Project
 
 - **No CI.** There is no `.github/workflows`, so nothing on GitHub compiles this
