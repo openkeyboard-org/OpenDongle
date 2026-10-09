@@ -1903,8 +1903,11 @@ static void rf_stock_reacquire_giveup(void)
  * is preserved VERBATIM (it is heavily bench-validated); the (sta, rsr) pair
  * it branches on is re-synthesized from the event. */
 /* IAP 0x92: name the gate a LEN-10 fell through (mirrors the accept condition
- * in the sink; evaluated only on the reject path, counters only). */
-__HIGH_CODE
+ * in the sink; evaluated only on the reject path, counters only). Cold, so it
+ * runs from flash: CH570's SRAM sits at its stack floor, and the LED relay's
+ * delivery tracking in the sink needed the room. noinline, or it lands back in
+ * the sink's RAM. */
+DONGLE_HIGHCODE_COLD __attribute__((noinline))
 static uint8_t rf_diag_len10_reject_reason(const uint8_t *rxBuf)
 {
     if (rf_bond_tombstone) {
