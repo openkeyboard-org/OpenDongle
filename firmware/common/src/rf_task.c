@@ -309,12 +309,43 @@ volatile uint32_t rf_ev10_rekey_tx_hop;
  * CONNECTED-state RX only listens in those slots, so out-of-band
  * direct LED TX lands in dead air.
  *
- * rf_app_tx_pending nonzero ⇒ rf_send_poll consumes the queue
- * (sends 3-byte [ctrl,buf[0],buf[1]] instead of 1-byte [ctrl]) while
- * decrementing the count. Stock parity: a single LEN=3 relay per host LED
- * change + one at connect/reconnect -- no burst, no periodic heartbeat. */
+ * rf_app_tx_pending nonzero ⇒ rf_send_poll sends the 3-byte
+ * [ctrl,buf[0],buf[1]] instead of the 1-byte [ctrl]. Unlike stock, a send does
+ * not retire it: only the keyboard's answer to a poll that carried it does
+ * (rf_led_relay_phase below). Stock sent the relay once, so a keyboard that
+ * missed that one poll -- still acquiring after a (re)connect, or already gone
+ * quiet to rest -- kept the wrong LED until the next host change. */
 volatile uint8_t  rf_app_tx_pending;
 volatile uint8_t  rf_app_tx_buf[2];
+
+/* Where the relay's delivery stands. rf_send_poll makes a poll SENT; its
+ * TX_FINISH in the sink makes it ON_AIR (the odd phase plus one), and only an
+ * answer the sink takes while ON_AIR counts, so an earlier poll's answer the
+ * sink handles late is never taken for it.
+ * - An answer to the relay poll retires the relay (when buf[1] still holds the
+ *   carried value; a newer one goes out next).
+ * - Unanswered, the next poll is a plain GAP poll, never a second LEN-3 in a
+ *   row: a keyboard that ignores LEN-3 polls still gets one it answers.
+ * - An answer to the gap shows the keyboard is listening and missed or ignored
+ *   the relay, and only that spends a try. A keyboard that answers nothing --
+ *   still acquiring after a promote, or gone quiet -- spends none, so the tries
+ *   wait until it can hear them. After RF_LED_RELAY_MAX_MISSES the relay waits
+ *   for the next host change or promote.
+ * Residual: nothing on the air ties an answer to the poll it answers. A
+ * keyboard that answers an earlier poll late, inside the relay poll's window,
+ * retires a relay it never heard; the next promote or host change re-sends
+ * it. */
+#define RF_LED_RELAY_IDLE       0u
+#define RF_LED_RELAY_SENT       1u
+#define RF_LED_RELAY_ON_AIR     2u
+#define RF_LED_RELAY_GAP_SENT   3u
+#define RF_LED_RELAY_GAP_ON_AIR 4u
+static volatile uint8_t rf_led_relay_phase;
+static volatile uint8_t rf_led_relay_carried;   /* the LED byte the relay poll carried */
+static volatile uint8_t rf_led_relay_misses;
+#ifndef RF_LED_RELAY_MAX_MISSES
+#define RF_LED_RELAY_MAX_MISSES 8u
+#endif
 
 /* Queue the host->keyboard LED relay payload [0xA1][led] so the next connected
  * poll sends it as [ctrl][0xA1][led] (rf_send_poll consumes rf_app_tx_pending).
@@ -324,17 +355,23 @@ volatile uint8_t  rf_app_tx_buf[2];
  * it survives to the next valid poll. Caller contexts are NOT both cooperative:
  * RF_SetLEDState runs in TMOS task context, but the burst-promote re-sync runs
  * inside rf_phy_event_sink -- an IRQ-tail deferred callback that CAN preempt
- * task context (see the P2.4 note at the sink). No IRQ critical section is
- * needed anyway because every shared item (rf_led_state, rf_app_tx_buf bytes,
- * rf_app_tx_pending) is a single volatile byte (atomic on RV32), preemption is
- * strictly one-way (sink over task, never the reverse), and the foreground
- * latches rf_led_state BEFORE any queue access -- so every interleaving
- * converges to the queue holding the current LED byte with pending=1. */
+ * task context (see the P2.4 note at the sink), and on CH570 rf_send_poll runs
+ * from the poll timer's ISR. No IRQ critical section is needed anyway because
+ * every shared item (rf_led_state, rf_app_tx_buf bytes, rf_app_tx_pending, the
+ * relay's phase, carried byte and misses) is a single volatile byte (atomic on
+ * RV32), preemption is strictly one-way (an IRQ over the foreground, never the
+ * reverse), and the foreground latches rf_led_state BEFORE any queue access --
+ * so every interleaving converges to the queue holding the current LED byte
+ * with pending=1. The phase is left alone here, so a requeue never skips the
+ * plain gap an unanswered relay poll is owed; the sink's retire compares the
+ * carried byte with buf[1], so an answer to a poll that carried an older value
+ * never retires a newer one. */
 static __attribute__((noinline)) void rf_queue_led_relay(uint8_t led)
 {
-    rf_app_tx_buf[0]  = RF_PROTO_HID_TAG;
-    rf_app_tx_buf[1]  = (uint8_t)(led & 0x07u);
-    rf_app_tx_pending = 1u;          /* stock parity: single LEN=3 relay, fire-and-forget */
+    rf_app_tx_buf[0]     = RF_PROTO_HID_TAG;
+    rf_app_tx_buf[1]     = (uint8_t)(led & 0x07u);
+    rf_led_relay_misses  = 0u;
+    rf_app_tx_pending    = 1u;
 }
 
 /* Stock dispatcher event 0x04 calls RF_Rx(gp-0x604, 10, 0xff, 0xff):
@@ -507,6 +544,14 @@ static volatile uint8_t rf_state;
  * (sent as [ctrl][0xA1][led] by the next poll). Persists across reconnect so
  * the post-promote re-sync restores the keyboard LED. */
 static volatile uint8_t rf_led_state;
+
+/* The post-promote re-sync (burst and EV10 promotes, in the sink). The link
+ * is new, so any relay poll still in flight belonged to the old one. */
+static __attribute__((noinline)) void rf_led_relay_resync(void)
+{
+    rf_led_relay_phase = RF_LED_RELAY_IDLE;
+    rf_queue_led_relay(rf_led_state);
+}
 static int8_t  rf_rssi;
 #if DONGLE_BENCH_DROP_FIRST_HID
 static volatile uint8_t  rf_bench_drop_armed;   /* set at promote; the next non-zero HID is swallowed */
@@ -2186,6 +2231,21 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * acked. */
                 if (len == 1u || hid_tag != 0u) {
                     rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rxBuf[2]);
+                    /* LED relay delivery (see rf_led_relay_phase): an answer
+                     * to the relay poll retires it, one to the gap after an
+                     * unanswered relay poll spends a try. */
+                    {
+                        uint8_t phase = rf_led_relay_phase;
+                        if (phase == RF_LED_RELAY_ON_AIR) {
+                            rf_led_relay_phase = RF_LED_RELAY_IDLE;
+                            if (rf_app_tx_buf[1] == rf_led_relay_carried) {
+                                rf_app_tx_pending = 0u;
+                            }
+                        } else if (phase == RF_LED_RELAY_GAP_ON_AIR) {
+                            rf_led_relay_phase = RF_LED_RELAY_IDLE;
+                            rf_led_relay_misses++;
+                        }
+                    }
                 }
 #if DONGLE_DELIVERY_COUNTERS
                 if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
@@ -2492,7 +2552,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * LED byte. Replaces the cancellable delayed LED3 event; the
                  * queue survives the supervision/EV10 rebind, and TMR0 is NOT
                  * restarted so the poll grid/phase-lock above is preserved. */
-                rf_queue_led_relay(rf_led_state);
+                rf_led_relay_resync();
 #if RF_CONFIRM_BEFORE_PERSIST
                 if (rf_pair_is_fresh) {
                     /* CODEREVIEW N11: fresh pair is tentative until the peer
@@ -2587,6 +2647,12 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
             rf_last_conn_rx_tsys = hal_now();
             rf_arm_connected_supervision(1);
+            /* Re-sync the keyboard LED, as the burst promote does. This is the
+             * path a bonded keyboard comes back on after every lapse -- a
+             * keyboard that rests between short probes takes it once a
+             * second -- and a host change made while the link was down was
+             * only latched in rf_led_state. */
+            rf_led_relay_resync();
 #if !RF_TASK_EXECUTOR_TMOS
             /* The CH592 phase-lock inherit, for real: rf_send_pair_ack armed
              * the PAIR_ACK slot as the hardware grid immediately before the
@@ -2625,6 +2691,13 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
          * re-enter rf_config during transient state==1 reconnect/teardown
          * windows, but not on every state==2 poll. */
         if (rf_state == RF_STATE_CONNECTED) {
+            /* A relay or gap poll is on the air: its answer counts from now. */
+            {
+                uint8_t phase = rf_led_relay_phase;
+                if (phase & 1u) {
+                    rf_led_relay_phase = (uint8_t)(phase + 1u);
+                }
+            }
             /* Stock-shaped: post the dedicated post-poll RX event so
              * the dispatcher arms RX via RF_Rx(rf_poll_buf, 10, ...)
              * without RF_Config. Mirrors stock callback's
@@ -3502,34 +3575,48 @@ static void rf_send_poll(void)
      * 0x8c38 does, but CH58x RF_Rx arms receive mode with the buffer
      * as an auto-response payload — the opposite of what a master
      * poll needs. A master must TX first; the slave replies.) */
-    /* Stock-shaped: consume the app-payload queue if present. Send
-     * [ctrl][buf[0]][buf[1]] (3 bytes) and clear pending. Otherwise
-     * send the default LEN=1 [ctrl] poll. Per 2026-05-17 user
-     * feedback, this matches stock event 0x02 behaviour (queued app
-     * packet OR LEN=1 poll, same slot, same cadence). */
+    /* Stock-shaped: the queued app payload [ctrl][buf[0]][buf[1]] (3 bytes)
+     * or the default LEN=1 [ctrl] poll, same slot, same cadence (stock event
+     * 0x02; 2026-05-17 user feedback).
+     *
+     * The relay stays queued until the keyboard answers a poll carrying it
+     * (rf_led_relay_phase). RF_Tx()'s return can't stand in for that: on
+     * CH592 it is not a per-frame ACK, and gating on it re-sent the relay on
+     * EVERY poll -- the link went silent and never recovered (bench-observed
+     * 2026-06-14). So a relay poll that went unanswered is followed by a plain
+     * gap poll, which keeps the link fed even for a keyboard that ignores LEN-3
+     * polls, and the tries are bounded by RF_LED_RELAY_MAX_MISSES. The radio
+     * is shut above, so the sink has taken every answer to earlier polls. */
     uint8_t status;
-    if (rf_app_tx_pending) {
+    uint8_t send_led = 0u;
+    uint8_t phase    = rf_led_relay_phase;
+    if (phase == RF_LED_RELAY_SENT || phase == RF_LED_RELAY_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_GAP_SENT;   /* unanswered: the gap */
+    } else {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;       /* an unanswered gap spends nothing */
+        if (rf_app_tx_pending) {
+            if (rf_led_relay_misses < RF_LED_RELAY_MAX_MISSES) {
+                send_led = 1u;
+            } else {
+                rf_app_tx_pending = 0u;
+            }
+        }
+    }
+    if (send_led) {
         /* static lifetime: RF_Tx() may read the payload after this function's
-         * stack frame returns (codex); rf_send_poll runs only in TMOS task
-         * context, so a function-static is safe and matches CH570's static
+         * stack frame returns (codex). rf_send_poll is never re-entered (TMOS
+         * task context on CH592, the poll timer's ISR on CH570), so a
+         * function-static is safe and matches CH570's static
          * connected_app_payload[]. */
         static uint8_t buf3[3];
         buf3[0] = rf_poll_buf[0];
         buf3[1] = rf_app_tx_buf[0];
         buf3[2] = rf_app_tx_buf[1];
+        rf_led_relay_carried = buf3[2];
+        rf_led_relay_phase   = RF_LED_RELAY_SENT;
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  buf3, sizeof(buf3));
-        /* Decrement UNCONDITIONALLY: the relay is sent exactly rf_app_tx_pending
-         * times (bounded), then normal LEN=1 polls resume. The success-gated
-         * form (CH570 parity) re-sends the LEN=3 relay on EVERY poll whenever
-         * RF_Tx() returns non-zero -- which starves the connected poll exchange,
-         * so supervision tears the link down (bench-observed 2026-06-14: the
-         * relay fires once, then the link goes silent and never recovers). On
-         * CH592 RF_Tx()'s return is not a clean per-frame ACK signal, so gating
-         * on it is wrong here. A relay missed on a genuine TX failure is re-sent
-         * by the next host LED change / reconnect re-sync anyway. */
         (void)status;
-        rf_app_tx_pending--;
     } else {
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  rf_poll_buf, RF_POLL_TX_LEN);
@@ -4018,8 +4105,9 @@ void RF_SetLEDState(uint8_t led)
     /* Forward the host's HID LED output report (CapsLock/NumLock/ScrollLock) to
      * the keyboard. Called from the foreground (Main_Circulation) on a host LED
      * change. Latch the byte and, if connected, queue the relay DIRECTLY for the
-     * next poll (rf_send_poll sends [ctrl][0xA1][led]). When not connected, the
-     * burst-promote re-syncs the current rf_led_state on the next connect.
+     * next poll (rf_send_poll sends [ctrl][0xA1][led] until the keyboard
+     * answers one). When not connected, the next promote (burst or EV10)
+     * re-syncs the current rf_led_state.
      *
      * NO IRQ critical section here -- but not because nothing preempts: the
      * burst-promote producer runs in the rf_phy_event_sink IRQ-tail callback,
