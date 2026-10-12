@@ -106,13 +106,15 @@ static void usb_hid_callback(uint8_t tag, const uint8_t *data, uint8_t len)
     (void)len;
 }
 
-/* Stock parity: relay the host LED to the keyboard ONCE per change (and once at
- * connect/reconnect, handled by the rf_task promote re-sync). No periodic
- * heartbeat, no fast-resync burst, no RTC-epoch timing -- matching the production
- * dongle, which relays on-change + on-connect only; the keyboard latches the LED.
- * RF_SetLEDState stores the state always and queues a single LEN-3 relay only when
- * connected. last_led=0xFF (impossible 3-bit value) forces the first iteration
- * after RF start to sync the current state (matches the CH570 main loop). */
+/* Relay the host LED to the keyboard on each change (and at every connect or
+ * reconnect, handled by the rf_task promote re-sync). No periodic heartbeat, no
+ * RTC-epoch timing -- like the production dongle, which relays on-change +
+ * on-connect only; the keyboard latches the LED. RF_SetLEDState stores the state
+ * always and queues the LEN-3 relay only when connected; rf_task keeps it queued
+ * until the keyboard answers a poll carrying it, or a listening keyboard has
+ * let a bounded number go unanswered. last_led=0xFF (impossible 3-bit
+ * value) forces the first iteration after RF start to sync the current state
+ * (matches the CH570 main loop). */
 #if DONGLE_PM_IDLE
 /* File-scope so pm_idle_try's masked re-check can compare the live host LED
  * state against what was last relayed (a SET_REPORT that lands after this
