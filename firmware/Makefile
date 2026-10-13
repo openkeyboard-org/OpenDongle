@@ -55,7 +55,7 @@ PYTHON ?= /usr/bin/python3 -I
 
 .PHONY: all ch570 ch592 ch570-factory ch592-factory \
 	ch570-factory-flash ch592-factory-flash \
-	ch570-print-build-id ch592-print-build-id \
+	ch570-print-build-id ch592-print-build-id ch570-ram-report \
 	ch570-openboot ch592-openboot openboot-test \
 	ch570-bundle ch592-bundle bundles \
 	aes-hw-build aes-hw-validate \
@@ -126,6 +126,11 @@ ch570-print-build-id:
 	@$(MAKE) --no-print-directory -C ch570 \
 	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
 	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" print-build-id
+
+ch570-ram-report:
+	@$(MAKE) --no-print-directory -C ch570 \
+	    MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" SDK="$(CH570_SDK)" \
+	    OPENBOOT_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" OPENBOOT="$(OPENBOOT)" ram-report
 
 ch592-print-build-id:
 	@$(MAKE) --no-print-directory -C ch592 \

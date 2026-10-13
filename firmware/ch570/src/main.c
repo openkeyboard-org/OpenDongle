@@ -15,6 +15,7 @@
 #endif
 
 #include "CH57x_common.h"
+#include "dongle_chip.h"   /* DONGLE_HIGHCODE_* SRAM-placement classes */
 #include "version.h"
 #include "dongle_platform.h"
 #include "sched.h"
@@ -532,7 +533,7 @@ static void st_periodic_exit_locked(void)
     st_periodic_slot_p1 = 0u;           /* now one-shot domain */
 }
 
-__HIGH_CODE
+DONGLE_HIGHCODE_COLD
 void st_set(uint8_t slot, uint32_t delta, st_cb_t cb)
 {
     uint32_t s = __risc_v_disable_irq();
@@ -569,7 +570,7 @@ void st_set_at(uint8_t slot, uint32_t deadline, st_cb_t cb)
     (void)__risc_v_enable_irq(s);
 }
 
-__HIGH_CODE
+DONGLE_HIGHCODE_COLD
 void st_cancel(uint8_t slot)
 {
     uint32_t s = __risc_v_disable_irq();
