@@ -1,5 +1,6 @@
 CERN Open Hardware Licence Version 2 - Weakly Reciprocal
 
+
 Preamble
 
 CERN has developed this licence to promote collaboration among
@@ -7,7 +8,7 @@ hardware designers and to provide a legal tool which supports the
 freedom to use, study, modify, share and distribute hardware designs
 and products based on those designs. Version 2 of the CERN Open
 Hardware Licence comes in three variants: CERN-OHL-P (permissive); and
-two reciprocal licences: this licence, CERN- OHL-W (weakly reciprocal)
+two reciprocal licences: this licence, CERN-OHL-W (weakly reciprocal)
 and CERN-OHL-S (strongly reciprocal).
 
 The CERN-OHL-W is copyright CERN 2020. Anyone is welcome to use it, in
@@ -53,12 +54,12 @@ their development.
   1.7 'Available Component' means any part, sub-assembly, library or
       code which:
 
-      a) is licensed to You as Complete Source under a Compatible
-         Licence; or
+       a) is licensed to You as Complete Source under a Compatible
+          Licence; or
 
-      b) is available, at the time a Product or the Source containing
-         it is first Conveyed, to You and any other prospective
-         licensees
+       b) is available, at the time a Product or the Source containing
+          it is first Conveyed, to You and any other prospective
+          licensees
 
            i) with sufficient rights and information (including any
               configuration and programming files and information
@@ -70,13 +71,13 @@ their development.
 
   1.8 'External Material' means anything (including Source) which:
 
-      a) is only combined with Covered Source in such a way that it
-         interfaces with the Covered Source using a documented
-         interface which is described in the Covered Source; and
+       a) is only combined with Covered Source in such a way that it
+          interfaces with the Covered Source using a documented
+          interface which is described in the Covered Source; and
 
-      b) is not a derivative of or contains Covered Source, or, if it
-         is, it is solely to the extent necessary to facilitate such
-         interfacing.
+       b) is not a derivative of or contains Covered Source, or, if it
+          is, it is solely to the extent necessary to facilitate such
+          interfacing.
 
   1.9 'Complete Source' means the set of all Source necessary to Make
       a Product, in the preferred form for making modifications,
@@ -130,7 +131,7 @@ their development.
       or any other similar right.
 
 
-3 Copying, modifying and Conveying Covered Source
+3 Copying, Modifying and Conveying Covered Source
 
   3.1 You may copy and Convey verbatim copies of Covered Source, in
       any medium, provided You retain all Notices.
@@ -241,7 +242,7 @@ subsection 3.2.
   7.1 Subject to the terms and conditions of this Licence, each
       Licensor hereby grants to You a perpetual, worldwide,
       non-exclusive, no-charge, royalty-free, irrevocable (except as
-      stated in subsections 7.2 and 8.4) patent license to Make, have
+      stated in subsections 7.2 and 8.4) patent licence to Make, have
       Made, use, offer to sell, sell, import, and otherwise transfer
       the Covered Source and Products, where such licence applies only
       to those patent claims licensable by such Licensor that are
