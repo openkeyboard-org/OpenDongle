@@ -42,6 +42,7 @@
 #define CMD_FAULT       0x93
 #define CMD_CRYPT_DIAG  0x98    /* read-only link-encryption counters (was 0x94 on the pre-merge branches; 0x94 is RfPoke) */
 #define ACK_CRYPT_DIAG  0x98
+#define CMD_KEX_BENCH   0x99    /* bench builds only: time one X25519 */
 #define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
 #define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
                                   * (DONGLE_STACK_WATERMARK) */
@@ -317,6 +318,52 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
 #endif
     send_status4(0x00);
 }
+
+#if DONGLE_KEX_BENCH
+#include "x25519.h"
+#include "hal_timing.h"
+/* CMD 0x99 (KEX_BENCH builds only): run one X25519 scalar multiplication and
+ * report what it cost in HCLK cycles. Each step is timed with interrupts
+ * masked, so the figures are the arithmetic alone; the radio is starved for
+ * the duration, which is the point of measuring before integrating.
+ * Reply: [0x99][24][total][max step][min step][steps][out 0..7], u32 LE. */
+static void handle_kex_bench(void)
+{
+    x25519_ctx_t ctx;   /* on the stack: the bench image has no static RAM to spare */
+    uint8_t k[32], out[32], resp[2u + 24u] = {0};
+    uint32_t total = 0u, max = 0u, min = 0xFFFFFFFFu, n = 0u;
+    int more;
+    uint8_t i;
+
+    for (i = 0; i < 32u; i++) {
+        k[i] = (uint8_t)(i + 1u);
+    }
+    x25519_begin(&ctx, k, x25519_base_point);
+    do {
+        uint32_t irq = __risc_v_disable_irq();
+        uint32_t t0 = hal_now();
+        uint32_t dt;
+        more = x25519_step(&ctx);
+        dt = hal_now() - t0;
+        (void)__risc_v_enable_irq(irq);
+        total += dt;
+        if (dt > max) { max = dt; }
+        if (dt < min) { min = dt; }
+        n++;
+    } while (more);
+    (void)x25519_finish(&ctx, out);
+    resp[0] = CMD_KEX_BENCH;
+    resp[1] = 24u;
+    put_le32(&resp[2], total);
+    put_le32(&resp[6], max);
+    put_le32(&resp[10], min);
+    put_le32(&resp[14], n);
+    for (i = 0; i < 8u; i++) {
+        resp[18u + i] = out[i];
+    }
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
 
 static void handle_bond_clear(void)
 {
@@ -698,6 +745,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_BOND_WRITE:  handle_bond_write(data, len); break;
     case CMD_BOND_READ:   handle_bond_read(); break;
     case CMD_BOND_CLEAR:  handle_bond_clear(); break;
+#if DONGLE_KEX_BENCH
+    case CMD_KEX_BENCH:   handle_kex_bench(); break;
+#endif
     case CMD_VERSION:     handle_version(); break;
     case CMD_STATUS:      handle_status(); break;
     case CMD_RF_DIAG:     handle_rf_diag(data, len); break;

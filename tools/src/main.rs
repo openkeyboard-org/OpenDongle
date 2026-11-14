@@ -145,6 +145,11 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond"])]
     crypt_diag: bool,
 
+    /// BENCH: time one X25519 scalar multiplication on the device (command
+    /// 0x99, KEX_BENCH firmware only). The radio is starved while it runs.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond", "crypt_diag"])]
+    kex_bench: bool,
+
     /// With --status or --diag: number of samples (default 1, at least 1)
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     samples: u32,
@@ -185,7 +190,7 @@ struct Cli {
 impl Cli {
     fn show_info(&self) -> bool {
         self.info
-            || (!self.enter_bootloader && !self.fault && !self.status && !self.diag && self.rf_poke.is_none() && self.provision_link_key.is_none() && !self.clear_bond && !self.crypt_diag)
+            || (!self.enter_bootloader && !self.fault && !self.status && !self.diag && self.rf_poke.is_none() && self.provision_link_key.is_none() && !self.clear_bond && !self.crypt_diag && !self.kex_bench)
     }
 
     /// --samples/--period-ms only mean something to the two samplers.
@@ -235,7 +240,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // opened confirm from enumeration alone that the path is the interface the
     // selectors describe; a mismatch is a refusal, not a note. Discovered
     // devices are matched on those selectors already and are not affected.
-    if cli.fault || cli.status || cli.diag || cli.rf_poke.is_some() || cli.provision_link_key.is_some() || cli.clear_bond || cli.crypt_diag {
+    if cli.fault || cli.status || cli.diag || cli.rf_poke.is_some() || cli.provision_link_key.is_some() || cli.clear_bond || cli.crypt_diag || cli.kex_bench {
         if let Some(path) = cli.hidraw.as_deref() {
             require_path_identity(&api, path, cli.vid, cli.pid, cli.interface)?;
         }
@@ -327,6 +332,23 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     }
     if !cli.sampler_args_valid() {
         return Err(anyhow!("--samples/--period-ms apply only to --status or --diag"));
+    }
+    if cli.kex_bench {
+        let r = iap::op_kex_bench(&dev)?.ok_or_else(|| anyhow!("KexBench: no response (not a KEX_BENCH build?)"))?;
+        if r.len() < 26 || r[0] != 0x99 || r[1] != 24 {
+            return Err(anyhow!("KexBench: unexpected reply; raw={}", iap::hexsp(&r, 8)));
+        }
+        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        let (total, max, min, n) = (word(2), word(6), word(10), word(14));
+        let us = |cycles: u32| f64::from(cycles) / 60.0;
+        println!("x25519 on device (60 MHz, interrupts masked per step):");
+        println!("  steps           {n}");
+        println!("  total           {total} cycles ({:.1} ms)", us(total) / 1000.0);
+        println!("  mean step       {:.1} us", us(total) / f64::from(n));
+        println!("  longest step    {max} cycles ({:.1} us)", us(max));
+        println!("  shortest step   {min} cycles ({:.1} us)", us(min));
+        println!("  result[0..8]    {}", iap::hexsp(&r[18..26], 8));
+        return Ok(ExitCode::SUCCESS);
     }
     if cli.crypt_diag {
         let r = iap::op_crypt_diag(&dev)?.ok_or_else(|| anyhow!("CryptDiag: no response (timeout)"))?;

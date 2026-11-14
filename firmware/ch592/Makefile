@@ -377,6 +377,23 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
 APP_SRC += $(COMMON)/src/rf_crypt.c
+# BENCH ONLY: time one X25519 scalar multiplication on the chip (IAP 0x99).
+# KEX_BENCH=1 runs everything from flash, =2 the multiplication from SRAM.
+# Measured 2026-11-14 on a CH592 dongle at 60 MHz, interrupts masked per step,
+# 5,097 steps per scalar multiplication:
+#   =1  609 ms total, longest step 232 us, mean 119 us
+#   =2  306 ms total, longest step 121 us, mean  60 us (fe_mul is ~260 B of SRAM)
+# Flash executes in place at roughly ten cycles an instruction here, so what
+# is left in the =2 figure is mostly the flash-resident add/sub/fold and the
+# step dispatch around each multiplication.
+KEX_BENCH ?= 0
+ifneq ($(KEX_BENCH),0)
+APP_SRC += $(COMMON)/src/x25519.c
+CFLAGS += -DDONGLE_KEX_BENCH=$(KEX_BENCH)
+ifeq ($(KEX_BENCH),2)
+CFLAGS += -DX25519_MUL_IN_RAM=1
+endif
+endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this
 # is the whole backend -- no software cipher is linked here, unlike CH570.

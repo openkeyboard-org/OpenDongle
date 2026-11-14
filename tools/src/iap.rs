@@ -254,6 +254,11 @@ pub fn op_bond_read(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_BOND_READ, &[]), READ_TIMEOUT_MS)
 }
 
+/// BENCH: time one X25519 scalar multiplication (KEX_BENCH firmware only).
+pub fn op_kex_bench(dev: &IapDevice) -> Result<Response> {
+    dev.xfer(&packet_simple(0x99, &[]), 5000)
+}
+
 /// Link-encryption counters (read-only, unarmed).
 pub fn op_crypt_diag(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_CRYPT_DIAG, &[]), READ_TIMEOUT_MS)

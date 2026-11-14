@@ -12,6 +12,17 @@
  */
 #include "x25519.h"
 
+/* Where the multiplication lives. Nearly all of a scalar multiplication is
+ * spent in fe_mul's inner loop, so a port whose flash executes in place slowly
+ * can put just that routine (about 260 bytes) in RAM with X25519_MUL_IN_RAM=1
+ * and leave the rest in flash. Measured on a CH592 at 60 MHz: see the
+ * KEX_BENCH note in the CH592 Makefile. */
+#if defined(X25519_MUL_IN_RAM) && X25519_MUL_IN_RAM
+#define X25519_HOT __attribute__((section(".highcode"), noinline))
+#else
+#define X25519_HOT
+#endif
+
 enum { R_X1, R_X2, R_Z2, R_X3, R_Z3, R_T0, R_T1, R_T2, R_T3 };
 enum { PH_LADDER, PH_INVERT_SQ, PH_INVERT_MUL, PH_FINAL, PH_DONE };
 enum { OP_ADD, OP_SUB, OP_MUL, OP_A24 };
@@ -71,6 +82,7 @@ static void fe_sub(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
     }
 }
 
+X25519_HOT
 static void fe_mul(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
 {
     uint32_t p[16];
