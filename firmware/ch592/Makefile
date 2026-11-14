@@ -377,22 +377,20 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
 APP_SRC += $(COMMON)/src/rf_crypt.c
-# BENCH ONLY: time one X25519 scalar multiplication on the chip (IAP 0x99).
-# KEX_BENCH=1 runs everything from flash; 2, 3 and 4 select
-# X25519_ARITH_IN_RAM=1, 2 and 3 (see x25519.c for what each moves to SRAM).
+# Link-key exchange (DONGLE_KEX in dongle_target.h): X25519 + AES-CMAC,
+# docs/key-establishment.md. X25519_RAM selects X25519_ARITH_IN_RAM (x25519.c):
+# 0 everything in flash, 1 multiply/add/subtract in SRAM, 2 plus the constant
+# multiply and the swap, 3 plus the step dispatcher. Timings are in the
+# commit that last changed x25519.c's arithmetic; 2 is 110 ms per scalar
+# multiplication for 618 bytes of SRAM.
+X25519_RAM ?= 2
+APP_SRC += $(COMMON)/src/x25519.c $(COMMON)/src/kex_kdf.c $(COMMON)/src/kex_proto.c
+CFLAGS += -DX25519_ARITH_IN_RAM=$(X25519_RAM)
+# BENCH ONLY: KEX_BENCH=1 adds IAP 0x99, which times one X25519 scalar
+# multiplication on the chip (`opendongle --kex-bench`).
 KEX_BENCH ?= 0
 ifneq ($(KEX_BENCH),0)
-APP_SRC += $(COMMON)/src/x25519.c
 CFLAGS += -DDONGLE_KEX_BENCH=$(KEX_BENCH)
-ifeq ($(KEX_BENCH),2)
-CFLAGS += -DX25519_ARITH_IN_RAM=1
-endif
-ifeq ($(KEX_BENCH),3)
-CFLAGS += -DX25519_ARITH_IN_RAM=2
-endif
-ifeq ($(KEX_BENCH),4)
-CFLAGS += -DX25519_ARITH_IN_RAM=3
-endif
 endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this

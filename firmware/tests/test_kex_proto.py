@@ -54,7 +54,8 @@ static void put(const unsigned char *p, size_t n){ for (size_t i = 0; i < n; i++
  *       2 the keyboard is handed an all-zero dongle public key;
  *       3 AES fault on the first derivation block either end runs;
  *       4 expire the dongle at slot 40; 5 flip a bit in a keyboard CONFIRM;
- *       6 replace every dongle CONFIRM chunk with zeros. */
+ *       6 replace every dongle CONFIRM chunk with zeros;
+ *       7 at slot 300 the connection is replaced: both ends kex_rewind(). */
 int main(int argc, char **argv){
     unsigned char dpriv[32], kpriv[32], dpre[KEX_T_PREFIX_BYTES], kpre[KEX_T_PREFIX_BYTES], dmac[6], kmac[6];
     static kex_t dg, kb;
@@ -73,6 +74,10 @@ int main(int argc, char **argv){
     for (slot = 0; slot < maxslots; slot++) {
         if (mode == 3 && kex_state(&dg) == KEX_DH && g_fail_at < 0) g_fail_at = g_blocks;
         if (mode == 4 && slot == 40) kex_expire(&dg);
+        if (mode == 7 && slot == 300) {
+            if (kex_rewind(&dg)) return 4;
+            if (kex_rewind(&kb)) return 5;
+        }
         kex_work(&dg, (unsigned)steps);
         kex_work(&kb, (unsigned)steps);
         if (kex_tx(&dg, f)) {
@@ -187,6 +192,13 @@ class KexProtoTest(unittest.TestCase):
                     self.assert_agreed(res, m)
                     self.assertEqual(res["kb_early"], 0)
                     self.assertEqual(res["kb_conf_early"], 0)
+
+    def test_a_new_connection_keeps_the_key_pairs(self):
+        """Both ends rewind mid-exchange and still agree, on the same key pairs."""
+        for steps in (2, 9, 40):       # rewinds landing in keygen, in the secret, after
+            m = self.material()
+            res = self.run_kex(m, steps=steps, mode=7)
+            self.assert_agreed(res, m)
 
     def test_a_tampered_public_key_fragment_yields_no_key(self):
         m = self.material()

@@ -370,6 +370,33 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             println!("  boot KAT        run={} fail={}", r[38], r[39]);
             println!("  plaintext drop  {}", word(40));
         }
+        // Link-key exchange counters (0x9A), where the firmware has them.
+        if let Ok(Some(k)) = dev.xfer(&iap::packet_simple(0x9A, &[]), 500) {
+            if k.len() >= 10 && k[0] == 0x9A && k[1] >= 8 {
+                const FAIL: [&str; 6] = ["none", "low-order key", "AES engine", "confirmation", "peer abort", "timeout"];
+                const STATE: [&str; 7] = ["idle", "keygen", "public keys", "shared secret", "confirm", "done", "failed"];
+                println!("key exchange:");
+                println!("  started         {}", k[2]);
+                println!("  completed       {}", k[3]);
+                println!("  last failure    {}", FAIL.get(k[4] as usize).unwrap_or(&"?"));
+                println!("  state           {}", STATE.get(k[5] as usize).unwrap_or(&"?"));
+                println!("  entropy samples {}", u16::from_le_bytes([k[6], k[7]]));
+                println!("  commit failures {}", k[8]);
+                println!("  tried this link {}", k[9]);
+                if k[1] >= 20 && k.len() >= 22 {
+                    println!("  failures        {}", k[19]);
+                    println!("  dongle x25519   phase {} count {}", k[20], k[21]);
+                    let p = &k[10..18];
+                    println!("keyboard status (frames received: {}):", k[18]);
+                    println!("  state           {}", STATE.get(p[0] as usize).unwrap_or(&"?"));
+                    println!("  last failure    {}", FAIL.get(p[1] as usize).unwrap_or(&"?"));
+                    println!("  candidate={} keys_ready={} dongle_confirm_ok={} dongle_pub_mask=0x{:X} dongle_conf_mask=0x{:X}",
+                        p[2] & 1, (p[2] >> 1) & 1, (p[2] >> 2) & 1, p[2] >> 4, p[6]);
+                    println!("  x25519          phase {} count {} op {}", p[3], p[4], p[5]);
+                    println!("  sessions ok     {}", p[7]);
+                }
+            }
+        }
         return Ok(ExitCode::SUCCESS);
     }
     if cli.clear_bond {

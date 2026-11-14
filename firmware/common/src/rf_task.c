@@ -974,6 +974,10 @@ static void rf_send_poll(void);
 static void rf_crypt_silence_set_deadline(void);
 static void rf_crypt_rx_flush(void);
 static void rf_crypt_kbd_last_reset(void);
+#if DONGLE_KEX
+static void rf_kex_service(void);
+static void rf_kex_poll_tick(void);
+#endif
 #endif
 static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
@@ -2043,6 +2047,62 @@ static volatile uint8_t rf_crypt_work_session;
 #define rf_crypt_post_rx()      do { rf_crypt_work_rx = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
 #define rf_crypt_post_session() do { rf_crypt_work_session = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
 
+#if DONGLE_KEX
+/* ---------------------------------------------------------- link-key exchange
+ *
+ * After a fresh pair with a keyboard that advertised encryption, the two ends
+ * agree a link key over the air (kex_proto.c: X25519, confirmed with AES-CMAC)
+ * and the dongle writes it to the bond exactly as a host BondWrite would. It
+ * runs once per pairing: a bond that already holds a key never starts one.
+ *
+ * Everything here is task context. The radio IRQ sink only queues a received
+ * exchange frame on the crypto FIFO; rf_send_poll (task context on TMOS)
+ * sends an exchange frame in a poll slot in place of the poll, and the
+ * keyboard answers it as it answers a poll. The arithmetic is done a few
+ * steps per poll by a third work latch, behind the verify drain.
+ *
+ * PRIVATE KEY. There is no hardware random source. The pool below collects
+ * the SysTick stamp the IRQ sink already takes at every connected reception
+ * (60 MHz, so 16.7 ns resolution, against a frame timed by the keyboard's own
+ * crystal) and the dispatch time of the poll that follows, and a key is drawn
+ * only after RF_KEX_ENTROPY_SAMPLES of them, conditioned through AES-CMAC and
+ * mixed with the chip's unique ID. How many bits a sample is really worth has
+ * NOT been measured; the threshold is the design document's 1/4 bit per
+ * sample for 256 bits, and that estimate is the weakest part of this. */
+#include "kex_proto.h"
+
+/* Upper bound on steps per slot. The real limit is time: the loop stops
+ * RF_KEX_POLL_MARGIN_TICKS before the next poll is due, so the arithmetic
+ * uses whatever dead time the slot has and never makes a poll late. */
+#ifndef RF_KEX_STEPS_PER_POLL
+#define RF_KEX_STEPS_PER_POLL   12u
+#endif
+#define RF_KEX_POLL_MARGIN_TICKS 9000u   /* 150 us at 60 MHz; a step is <= ~34 us */
+#define RF_KEX_MAX_FAILURES     3u       /* then no more attempts until a re-pair or reboot */
+#define RF_KEX_ENTROPY_SAMPLES  1024u
+#define RF_KEX_TIMEOUT_POLLS    6860u    /* about 6 s of 875 us poll slots */
+
+static kex_t            rf_kex;
+static volatile uint8_t rf_kex_active;        /* an exchange is running            */
+static uint8_t          rf_kex_tried;         /* already attempted this connection */
+static uint32_t         rf_kex_epoch;         /* rfd_connected_promotes at start   */
+static uint16_t         rf_kex_polls;         /* poll slots since the start        */
+static uint32_t         rf_kex_poll_tsys;     /* when the last poll slot began     */
+static uint8_t          rf_kex_failures;      /* consecutive failed attempts       */
+static uint8_t          rf_kex_slot;          /* alternates exchange frame / poll  */
+static volatile uint8_t rf_crypt_work_kex;
+static uint32_t         rf_kex_pool[8];
+static uint16_t         rf_kex_samples;
+static uint8_t          rf_kex_pool_at;
+static uint32_t         rf_kex_last_stamp;
+/* IAP 0x9A */
+uint8_t rf_kex_stat_starts, rf_kex_stat_done, rf_kex_stat_last_fail, rf_kex_stat_commit_fail;
+static uint8_t rf_kex_peer_status[8];     /* the keyboard's last status frame */
+static uint8_t rf_kex_peer_status_n;
+
+#define rf_kex_post_work() do { rf_crypt_work_kex = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+#endif
+
 /* SPSC frame FIFO: the IRQ sink produces, the crypt RX work item (task context) consumes.
  * Entries hold the LEN-covered bytes (from rxBuf[2]). A ring of N slots holds
  * N-1 frames; N=2 (one in-flight frame) is what keeps CH570 under its 2 KB
@@ -2325,6 +2385,248 @@ static uint8_t rf_crypt_kbd_repeat(uint8_t tag, const uint8_t *body, uint8_t n)
     return same;
 }
 #endif
+
+#if DONGLE_KEX
+/* One entropy sample into the pool (task context). */
+static void rf_kex_absorb(uint32_t s)
+{
+    uint8_t i = rf_kex_pool_at;
+
+    rf_kex_pool[i] = ((rf_kex_pool[i] << 7) | (rf_kex_pool[i] >> 25)) ^ s;
+    rf_kex_pool[i] += rf_kex_pool[(i + 3u) & 7u];
+    rf_kex_pool_at = (uint8_t)((i + 1u) & 7u);
+}
+
+/* Draw a 32-byte private scalar from the pool and re-key the pool so the
+ * draw cannot be reconstructed from what is left. Returns 0 on success. */
+static int rf_kex_draw(uint8_t priv[32])
+{
+    uint8_t key[16], msg[16u + 8u + 1u], next[32];
+    uint8_t uid[8] __attribute__((aligned(4)));
+    uint8_t i;
+    int rc;
+
+    GET_UNIQUE_ID(uid);
+    for (i = 0; i < 16u; i++) {
+        key[i] = (uint8_t)(rf_kex_pool[i >> 2] >> (8u * (i & 3u)));
+        msg[i] = (uint8_t)(rf_kex_pool[4u + (i >> 2)] >> (8u * (i & 3u)));
+    }
+    for (i = 0; i < 8u; i++) {
+        msg[16u + i] = uid[i];
+    }
+    msg[24] = 0u;
+    rc = kex_cmac(key, msg, sizeof(msg), &priv[0]);
+    msg[24] = 1u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &priv[16]);
+    msg[24] = 2u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[0]);
+    msg[24] = 3u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[16]);
+    for (i = 0; i < 32u; i++) {
+        rf_kex_pool[i >> 2] ^= (uint32_t)next[i] << (8u * (i & 3u));
+    }
+    rf_kex_samples = 0u;
+    tmos_memset(key, 0, sizeof(key));
+    tmos_memset(msg, 0, sizeof(msg));
+    tmos_memset(next, 0, sizeof(next));
+    return rc;
+}
+
+static void rf_kex_stop(void)
+{
+    rf_kex_active = 0u;
+    kex_reset(&rf_kex);
+}
+
+/* Once per poll slot, connected, task context: feed the pool, notice a new
+ * connection, and start an exchange when one is due. */
+static void rf_kex_poll_tick(void)
+{
+    uint32_t now = hal_now();
+    uint32_t stamp = rf_last_conn_rx_tsys;
+
+    rf_kex_poll_tsys = now;
+    if (stamp != rf_kex_last_stamp) {           /* a reception since last poll */
+        rf_kex_last_stamp = stamp;
+        rf_kex_absorb(stamp);
+        /* SysTick runs from the crystal, the RTC counter from the 32 kHz RC
+         * oscillator: their relative phase is the one physically independent
+         * quantity available here. */
+        rf_kex_absorb(now ^ (rtc_read_32k() << 16));
+        if (rf_kex_samples < 0xFFFFu) {
+            rf_kex_samples++;
+        }
+    }
+    if (rf_kex_epoch != rfd_connected_promotes) {
+        /* A new connection. An exchange that has not got past the shared
+         * secret keeps its key pair and carries on (the keyboard drops the
+         * link whenever it rests, and redoing the key generation each time
+         * meant the exchange never finished); anything further along is
+         * abandoned and started afresh. */
+        rf_kex_epoch = rfd_connected_promotes;
+        rf_kex_polls = 0u;
+        if (rf_kex_active && kex_rewind(&rf_kex) != 0) {
+            rf_kex_stop();
+        }
+        rf_kex_tried = rf_kex_active;
+    }
+    if (rf_kex_active) {
+        if (rf_kex_polls < 0xFFFFu) {
+            rf_kex_polls++;
+        }
+        return;
+    }
+    /* Start only for a peer that advertised encryption, on a persisted and
+     * confirmed bond that has no key, once per connection, with a full pool. */
+    if (rf_kex_tried || rf_kex_failures >= RF_KEX_MAX_FAILURES
+        || !rf_crypt_peer_capable || rf_crypt_bond_enc
+        || !rf_bond_valid || !rf_bond_persisted || rf_bond_tombstone
+#if RF_CONFIRM_BEFORE_PERSIST
+        || rf_confirm_state != RF_CONFIRM_STATE_NONE
+#endif
+        || rf_kex_samples < RF_KEX_ENTROPY_SAMPLES) {
+        return;
+    }
+    {
+        uint8_t priv[32], prefix[KEX_T_PREFIX_BYTES];
+        uint8_t i;
+
+        rf_kex_tried = 1u;
+        if (rf_kex_draw(priv) != 0) {
+            rf_kex_stat_last_fail = (uint8_t)KEX_FAIL_ENGINE;
+            return;
+        }
+        /* Transcript prefix. The minimal exchange binds the two identities
+         * and the suite label; the design's beacon and pair-ACK bytes are
+         * not included yet. MACs are in on-air byte order on both ends. */
+        for (i = 0; i < KEX_T_PREFIX_BYTES; i++) {
+            prefix[i] = 0u;
+        }
+        prefix[0] = 'O'; prefix[1] = 'K'; prefix[2] = 'X'; prefix[3] = '1';
+        prefix[4] = 0xA6u; prefix[5] = 2u;
+        for (i = 0; i < 6u; i++) {
+            prefix[6u + i] = rf_peer_mac[i];
+            prefix[12u + i] = rf_pair_ack15[9u + i];
+        }
+        kex_start(&rf_kex, KEX_ROLE_DONGLE, priv, prefix, &rf_pair_ack15[9], rf_peer_mac);
+        tmos_memset(priv, 0, sizeof(priv));
+        rf_kex_polls = 0u;
+        rf_kex_stat_starts++;
+        rf_kex_active = 1u;
+    }
+}
+
+/* The exchange finished: write the key to the bond and activate it, exactly
+ * as a host BondWrite does (save, read back, apply to the running task). */
+static void rf_kex_commit(void)
+{
+    bond_record_t rec __attribute__((aligned(4)));
+    bond_record_t back __attribute__((aligned(4)));
+    uint8_t ok = 0u;
+
+    if (kex_take_link_key(&rf_kex, rec.link_key) == 0) {
+        uint8_t lk[16];
+
+        tmos_memcpy(lk, rec.link_key, 16);
+        /* The bond on flash must still be the one the exchange ran for: same
+         * keyboard, still keyless. A host BondWrite or a re-pair in between
+         * would otherwise get this key written into a different bond. */
+        if (bond_load(&rec) && !(rec.flags & BOND_FLAG_ENC_KEY)
+            && tmos_memcmp(rec.peer_mac, rf_kex.peer_mac, 6)) {
+            tmos_memcpy(rec.link_key, lk, 16);
+            rec.flags |= (uint8_t)(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+            rec.checksum = bond_checksum(&rec);
+            if (bond_key_flags_valid(&rec) && bond_save(&rec) == 0
+                && bond_load(&back) && bond_tuple_equal(&back, &rec)) {
+                (void)RF_ApplyBondRecord(&rec);
+                ok = 1u;
+            }
+        }
+        tmos_memset(lk, 0, sizeof(lk));
+    }
+    tmos_memset(&rec, 0, sizeof(rec));
+    tmos_memset(&back, 0, sizeof(back));
+    if (ok) {
+        rf_kex_stat_done++;
+        rf_kex_stat_last_fail = 0u;
+        rf_kex_failures = 0u;
+    } else {
+        rf_kex_stat_commit_fail++;
+        rf_kex_failures++;
+    }
+    rf_kex_stop();
+}
+
+/* The exchange's work latch (task context): a few steps of arithmetic, then
+ * act on the outcome. */
+static void rf_kex_service(void)
+{
+    kex_state_t st;
+
+    if (!rf_kex_active) {
+        return;
+    }
+    /* The bond changed under the exchange (a host BondWrite gave it a key,
+     * a clear tombstoned it): the exchange no longer applies, and its CMACs
+     * must not replace an AES key that is now in use. */
+    if (rf_crypt_bond_enc || !rf_bond_valid || rf_bond_tombstone) {
+        rf_kex_stop();
+        return;
+    }
+    if (rf_state != RF_STATE_CONNECTED) {
+        return;                       /* resumes, rewound, on the next connection */
+    }
+    /* One step at a time until the slot's dead time is used up. */
+    {
+        uint32_t slot_ticks = (uint32_t)rf_conn_interval * 1875u;   /* 1/32000 s units at 60 MHz */
+        uint32_t rx_seen = rf_last_conn_rx_tsys;
+        uint8_t n;
+
+        st = kex_state(&rf_kex);
+        for (n = 0; n < RF_KEX_STEPS_PER_POLL; n++) {
+            if (rf_last_conn_rx_tsys != rx_seen) {
+                break;                /* the reply arrived: let its handling run */
+            }
+            if ((uint32_t)(hal_now() - rf_kex_poll_tsys) + RF_KEX_POLL_MARGIN_TICKS >= slot_ticks) {
+                break;
+            }
+            st = kex_work(&rf_kex, 1u);
+            if (st != KEX_KEYGEN && st != KEX_DH) {
+                break;                /* nothing left to compute right now */
+            }
+        }
+    }
+    if (st == KEX_DONE) {
+        rf_kex_commit();
+    } else if (st == KEX_FAILED) {
+        rf_kex_stat_last_fail = (uint8_t)kex_failure(&rf_kex);
+        if (rf_kex.abort_tx == 0u) {     /* the peer has been told */
+            rf_kex_failures++;
+            rf_kex_stop();
+        }
+    } else if (rf_kex_polls >= RF_KEX_TIMEOUT_POLLS) {
+        kex_expire(&rf_kex);
+    }
+}
+
+uint8_t RF_KexDiag(uint8_t out[20])
+{
+    tmos_memcpy(&out[8], rf_kex_peer_status, 8);
+    out[16] = rf_kex_peer_status_n;
+    out[17] = rf_kex_failures;
+    out[18] = rf_kex_active ? rf_kex.x.phase : 0u;
+    out[19] = rf_kex_active ? (uint8_t)rf_kex.x.count : 0u;
+    out[0] = rf_kex_stat_starts;
+    out[1] = rf_kex_stat_done;
+    out[2] = rf_kex_stat_last_fail;
+    out[3] = rf_kex_active ? (uint8_t)kex_state(&rf_kex) : 0u;
+    out[4] = (uint8_t)rf_kex_samples;
+    out[5] = (uint8_t)(rf_kex_samples >> 8);
+    out[6] = rf_kex_stat_commit_fail;
+    out[7] = rf_kex_tried;
+    return 20u;
+}
+#endif /* DONGLE_KEX */
 
 /* Control-byte feedback for a frame the CONNECTED handler admits (stock
  * PROTOCOL.md formula, bit 1 = the keyboard's fresh-packet indicator; we flip
@@ -2707,6 +3009,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             {
 #if DONGLE_RF_CRYPT
                 uint8_t enc_handled = 0u;
+                uint8_t queue = 0u;      /* hand this frame to the task */
                 if (rf_crypt_bond_enc) {
                     if (rf_crypt_encrypted_body_len(rxBuf[3], len)) {
                         /* Encrypted HID frame: copy out and defer verify+decrypt
@@ -2723,9 +3026,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                          * a report the dongle never accepted. A frame the
                          * FIFO refuses is not acked either, so the keyboard
                          * retransmits it. */
-                        if (rf_crypt_fifo_push(&rxBuf[2], len)) {
-                            rf_crypt_post_rx();
-                        }
+                        queue = 1u;
                         enc_handled = 1u;
                     } else if (rf_proto_hid_report_tag_for_peer(rxBuf, len,
                                                                 rf_peer_mac)) {
@@ -2736,6 +3037,19 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                         rf_crypt_plain_drop++;
                         enc_handled = 1u;
                     }
+                }
+#if DONGLE_KEX
+                /* A link-key exchange frame from the keyboard: queue it for
+                 * the task, like an encrypted frame. It is no HID report, so
+                 * the classifier below ignores it; it still refreshes
+                 * supervision as any connected reception does. */
+                else if (rf_kex_active && len == KEX_FRAME_LEN && rxBuf[3] == KEX_TAG_UP) {
+                    queue = 1u;
+                }
+#endif
+                /* One queueing site for both kinds of frame. */
+                if (queue && rf_crypt_fifo_push(&rxBuf[2], len)) {
+                    rf_crypt_post_rx();
                 }
                 if (!enc_handled)
 #endif
@@ -3342,7 +3656,12 @@ static uint16_t rf_process_event_body(uint8_t task_id, uint16_t events);
 /* Latched crypto work outstanding (and still wanted). */
 static inline uint8_t rf_crypt_work_pending(void)
 {
+#if DONGLE_KEX
+    return (uint8_t)(!rf_quiesced
+                     && (rf_crypt_work_rx | rf_crypt_work_session | rf_crypt_work_kex));
+#else
     return (uint8_t)(!rf_quiesced && (rf_crypt_work_rx | rf_crypt_work_session));
+#endif
 }
 
 /* The executor entry. The body's own "keep RF_EVT_WAKE in the return value"
@@ -3440,6 +3759,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         /* The crypto events sit above RF_EVT_PERSIST_BOND, outside the sweep. */
         rf_crypt_work_rx = 0u;
         rf_crypt_work_session = 0u;
+#if DONGLE_KEX
+        rf_crypt_work_kex = 0u;
+#endif
         rf_crypt_announce_count = 0u;
         rf_crypt_fifo_head = rf_crypt_fifo_tail;
 #endif
@@ -3716,6 +4038,19 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
 #endif
         rf_arm_post_poll_rx();
+#if DONGLE_KEX
+        /* The exchange's arithmetic runs HERE: after the receiver is armed
+         * for the keyboard's reply, in the few hundred microseconds spent
+         * waiting for it. The reply itself is taken by the radio IRQ, which
+         * preempts the arithmetic; rf_kex_service stops when it sees one, and
+         * in any case before the next poll is due. Two placements that did
+         * not work (bench 2026-11-14): straight after the poll transmit,
+         * which delayed THIS arm past the reply and lost it; and after the
+         * reply, where there is almost no time left in the slot. */
+        if (rf_kex_active && rf_state == RF_STATE_CONNECTED) {
+            rf_kex_post_work();
+        }
+#endif
         return events ^ RF_EVT_POST_POLL_RX;
     }
 
@@ -3783,6 +4118,20 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             uint8_t h = rf_crypt_fifo_head;
             uint8_t otag = 0u, obody[RF_CRYPT_MAX_BODY], on = 0u;
             rf_crypt_status_t st;
+#if DONGLE_KEX
+            if (rf_crypt_fifo_len[h] == KEX_FRAME_LEN
+                && rf_crypt_fifo_buf[h][1] == KEX_TAG_UP) {
+                if ((rf_crypt_fifo_buf[h][2] >> 4) == 15u) {
+                    /* The keyboard's status frame (IAP 0x9A shows the last). */
+                    tmos_memcpy(rf_kex_peer_status, &rf_crypt_fifo_buf[h][3], 8);
+                    rf_kex_peer_status_n++;
+                } else if (rf_kex_active) {
+                    kex_rx(&rf_kex, &rf_crypt_fifo_buf[h][2]);
+                }
+                rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
+                continue;
+            }
+#endif
 #if RF_CRYPT_DIAG_PREV_SESSION
             /* Bench: mark the CCM window so the RF status callback can count
              * BB/LLE interrupts that land mid-verify (they touch AES_STA). */
@@ -3849,7 +4198,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         return events;
     }
-    /* Both latches clear: the wake is spent. A post that lands after this
+#if DONGLE_KEX
+    if (rf_crypt_work_kex) {
+        rf_crypt_work_kex = 0u;
+        rf_kex_service();
+        return events;
+    }
+#endif
+    /* Every latch clear: the wake is spent. A post that lands after this
      * line sets the bit again in the executor's own pending word. */
     events &= (uint16_t)~RF_EVT_WAKE;
 #endif /* DONGLE_RF_CRYPT */
@@ -4420,6 +4776,31 @@ static void rf_send_poll(void)
                                  rf_crypt_session_tx, RF_CRYPT_LEN_SESSION);
         (void)status;
         return;
+    }
+#endif
+#if DONGLE_KEX && RF_TASK_EXECUTOR_TMOS
+    rf_kex_poll_tick();
+    if (rf_kex_active) {
+        /* static lifetime: the radio may read the payload after this returns. */
+        static uint8_t kxf[KEX_FRAME_LEN];
+
+        /* Every other slot stays an ordinary poll. A keyboard that does not
+         * implement the exchange ignores these frames without answering, and
+         * a link made only of them would lapse; half the slots keeps it up
+         * while the attempt times out. */
+        rf_kex_slot ^= 1u;
+        if (rf_kex_slot && kex_tx(&rf_kex, &kxf[2])) {
+            /* An exchange frame takes this slot in place of the poll; the
+             * keyboard answers it as it answers a poll. Like an announce
+             * slot, it ends any LED relay exchange in progress. */
+            kxf[0] = rf_poll_buf[0];
+            kxf[1] = KEX_TAG_DOWN;
+            rf_led_relay_phase = RF_LED_RELAY_IDLE;
+            status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
+                                     kxf, sizeof(kxf));
+            (void)status;
+            return;
+        }
     }
 #endif
     uint8_t send_led = 0u;

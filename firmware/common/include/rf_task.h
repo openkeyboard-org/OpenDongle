@@ -58,6 +58,12 @@ void RF_TaskInit(void);
  * once per main-loop pass ahead of any idle decision. See rf_task.c. */
 uint8_t RF_CryptWorkKick(void);
 #endif
+#if DONGLE_KEX
+/* IAP 0x9A: link-key exchange counters. Fills 8 bytes: starts, completed,
+ * last failure (kex_fail_t), current state (kex_state_t, 0 when idle),
+ * entropy samples (u16 LE), commit failures, tried-this-connection. */
+uint8_t RF_KexDiag(uint8_t out[20]);
+#endif
 
 /* Register a callback for received HID reports */
 void RF_SetHIDCallback(rf_hid_cb_t cb);

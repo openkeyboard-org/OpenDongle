@@ -280,6 +280,34 @@ int kex_tx(kex_t *k, uint8_t payload[KEX_PAYLOAD_BYTES])
     return 1;
 }
 
+int kex_rewind(kex_t *k)
+{
+    unsigned i;
+
+    if (k->state == KEX_KEYGEN) {
+        return 0;                     /* nothing of the peer's is held yet */
+    }
+    if (k->state != KEX_PUB && k->state != KEX_DH) {
+        return 1;                     /* the scalar is gone, or it is over */
+    }
+    /* Drop everything that came from the old connection, including a shared
+     * secret half computed; the key pair stays. */
+    for (i = 0; i < 32u; i++) {
+        k->peer_pub[i] = 0u;
+    }
+    for (i = 0; i < 16u; i++) {
+        k->peer_conf[i] = 0u;
+    }
+    k->peer_pub_mask = 0u;
+    k->peer_conf_mask = 0u;
+    k->peer_conf_ok = 0u;
+    k->keys_ready = 0u;
+    k->x_busy = 0u;
+    k->tx_next = 0u;
+    k->state = KEX_PUB;
+    return 0;
+}
+
 void kex_expire(kex_t *k)
 {
     if (k->state != KEX_DONE && k->state != KEX_FAILED && k->state != KEX_IDLE) {

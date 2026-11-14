@@ -76,6 +76,13 @@
  * until a key is provisioned, so it does not change plaintext behaviour. */
 #define DONGLE_RF_CRYPT 1
 
+/* Negotiate the link key over the air after pairing (X25519, rf_task.c
+ * "link-key exchange"), instead of having a host provision it. Needs
+ * DONGLE_RF_CRYPT. */
+#ifndef DONGLE_KEX
+#define DONGLE_KEX 1
+#endif
+
 /* PRODUCT-path stale-output-abort hardening (rf_crypt.h has the full story):
  * the CH592 AES engine shares the BLE baseband's register cluster and
  * silently returns the previous block's output when a BLEB interrupt aborts

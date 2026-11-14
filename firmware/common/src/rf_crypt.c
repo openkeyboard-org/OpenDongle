@@ -109,6 +109,23 @@ static hal_aes_status_t rf_crypt_aes_block(const uint8_t *in, uint8_t *out)
 #endif
 }
 
+#if DONGLE_KEX
+/* kex_kdf.h port hooks: the exchange's CMAC blocks go through the same
+ * (double-computed on CH592) block as everything else here. Setting the key
+ * replaces the engine's key; the exchange only runs on a bond that has no
+ * link key yet, and its result is installed through RF_ApplyBondRecord. */
+int kex_aes_set_key(const uint8_t key[16])
+{
+    hal_aes_set_key(key);
+    return 0;
+}
+
+int kex_aes_block(const uint8_t in[16], uint8_t out[16])
+{
+    return (rf_crypt_aes_block(in, out) == HAL_AES_OK) ? 0 : 1;
+}
+#endif
+
 /* CCM flags byte for the CBC-MAC B0 block: Adata | ((M-2)/2)<<3 | (L-1).
  * M=8, L=2 -> 0x59 with AAD present. */
 static uint8_t ccm_b0_flags(uint8_t have_aad)

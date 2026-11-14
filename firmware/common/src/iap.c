@@ -42,6 +42,7 @@
 #define CMD_FAULT       0x93
 #define CMD_CRYPT_DIAG  0x98    /* read-only link-encryption counters (was 0x94 on the pre-merge branches; 0x94 is RfPoke) */
 #define ACK_CRYPT_DIAG  0x98
+#define CMD_KEX_DIAG    0x9A    /* read-only link-key exchange counters */
 #define CMD_KEX_BENCH   0x99    /* bench builds only: time one X25519 */
 #define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
 #define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
@@ -368,6 +369,18 @@ static void handle_kex_bench(void)
     }
     put_le32(&resp[26], t_begin);
     put_le32(&resp[30], t_finish);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
+#if DONGLE_KEX
+/* CMD 0x9A: link-key exchange counters (RF_KexDiag). Read-only, unarmed. */
+static void handle_kex_diag(void)
+{
+    uint8_t resp[2u + 20u] = {0};
+
+    resp[0] = CMD_KEX_DIAG;
+    resp[1] = RF_KexDiag(&resp[2]);
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif
@@ -752,6 +765,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_BOND_WRITE:  handle_bond_write(data, len); break;
     case CMD_BOND_READ:   handle_bond_read(); break;
     case CMD_BOND_CLEAR:  handle_bond_clear(); break;
+#if DONGLE_KEX
+    case CMD_KEX_DIAG:    handle_kex_diag(); break;
+#endif
 #if DONGLE_KEX_BENCH
     case CMD_KEX_BENCH:   handle_kex_bench(); break;
 #endif

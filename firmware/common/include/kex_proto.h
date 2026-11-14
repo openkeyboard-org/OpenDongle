@@ -122,6 +122,14 @@ void kex_rx(kex_t *k, const uint8_t payload[KEX_PAYLOAD_BYTES]);
  * should use it, 0 when the port should send what it normally would. */
 int kex_tx(kex_t *k, uint8_t payload[KEX_PAYLOAD_BYTES]);
 
+/* The connection the exchange was running on ended and a new one began. An
+ * end still generating its key pair, or that has it and has not yet finished
+ * the shared secret, keeps the key pair and forgets everything received from
+ * the peer, so the expensive half is not redone. Returns 0 when the exchange
+ * can continue on the new connection, nonzero when it cannot (the caller
+ * should kex_reset() and start afresh). */
+int kex_rewind(kex_t *k);
+
 /* The port's deadline passed: fail with KEX_FAIL_TIMEOUT unless already
  * DONE. */
 void kex_expire(kex_t *k);
