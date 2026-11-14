@@ -14,6 +14,7 @@ hidapi = "2"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 crc32fast = "1"
+getrandom = "0.3"
 
 [profile.release]
 strip = true

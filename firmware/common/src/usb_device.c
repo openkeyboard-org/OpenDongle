@@ -49,6 +49,17 @@ __attribute__((aligned(4))) static uint8_t EP6_Buf[64 + 64];
  *   EP5 RX mode, and a 128 B EP5_Buf.
  */
 #define EP_OUT(buf)  (buf)
+
+/* Zero the OUT half of the EP6 buffer (the IAP command just handled, or one
+ * a bus reset cancelled). Inline: one caller is the USB interrupt. */
+static inline __attribute__((always_inline)) void usb_ep6_out_wipe(void)
+{
+    volatile uint8_t *p = EP_OUT(EP6_Buf);
+
+    for (uint8_t i = 0; i < 64u; i++) {
+        p[i] = 0;
+    }
+}
 #define EP1_IN()     (EP1_Buf)
 #define EP2_IN()     (EP2_Buf)
 #define EP3_IN()     (EP3_Buf)
@@ -665,6 +676,7 @@ static __attribute__((noinline)) void USB_BusReset(void)
      * copies and checksums its record, so that fails validation, not state. */
     iap_pkt_pending = 0;
     iap_pkt_len = 0;
+    usb_ep6_out_wipe();       /* a cancelled command may be a key or a seed */
     if (usb_bus_reset_cb)
         usb_bus_reset_cb();
 
@@ -1387,6 +1399,14 @@ void USB_PollEP6(void)
         return;
     if (ep6_out_cb)
         ep6_out_cb(EP_OUT(EP6_Buf), iap_pkt_len);
+    /* The command has been acted on; do not keep its bytes (a link key or an
+     * entropy seed) in the endpoint buffer until the next one overwrites
+     * them. The whole OUT half, not iap_pkt_len: a bus reset zeroes that
+     * from the ISR. EP6 OUT NAKs until the re-ACK below; only a bus reset
+     * re-opens it sooner, and it clears this buffer itself, with the host
+     * still to address and configure the device before EP6 carries anything
+     * again. */
+    usb_ep6_out_wipe();
     iap_pkt_pending = 0;
     /* Re-ACK EP6 OUT. Same shared-register hazard as USB_SendEP6: the ISR's
      * EP6-IN completion RMWs R8_UEP6_CTRL, so mask IRQs around this RMW. */

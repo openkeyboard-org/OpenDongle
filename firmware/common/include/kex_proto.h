@@ -54,6 +54,18 @@
 #define KEX_MSG_CONFIRM 2u
 #define KEX_MSG_ABORT   3u
 
+/* Host entropy seed. One packet, the same bytes on both transports: the
+ * dongle takes it as an IAP command on its USB interface, the keyboard's
+ * radio module takes it from its host MCU on the UART.
+ *   [KEX_SEED_CMD][KEX_SEED_BYTES][seed:32][sum of every byte before it]
+ * The port folds the seed into its entropy pool at the next private-key
+ * draw. It adds to what the pool collected and never replaces it, so a seed
+ * an attacker knows costs nothing; without one the key rests on the pool
+ * alone (best effort). */
+#define KEX_SEED_CMD      0x9Cu
+#define KEX_SEED_BYTES    32u
+#define KEX_SEED_PACKET   (KEX_SEED_BYTES + 3u)
+
 /* Transcript prefix, supplied by the port, identical bytes on both ends:
  *   "OKX1"(4) || 0xA6 || cap_version (2) || beacon, ctrl zeroed (10)
  *   || pair-ACK, ctrl zeroed (15)

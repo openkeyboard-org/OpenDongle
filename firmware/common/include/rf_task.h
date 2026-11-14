@@ -59,12 +59,20 @@ void RF_TaskInit(void);
 uint8_t RF_CryptWorkKick(void);
 #endif
 #if DONGLE_KEX
-/* IAP 0x9A: link-key exchange counters. Fills 20 bytes: starts, completed,
+/* IAP 0x9A: link-key exchange counters. Fills 22 bytes: starts, completed,
  * last failure (kex_fail_t), current state (kex_state_t, 0 when idle),
  * entropy samples (u16 LE), commit failures, tried-this-connection; the
  * keyboard's last status frame (8) and how many arrived (wraps); failures
- * (low nibble) and heap refusals (high nibble); the X25519 phase and count. */
-uint8_t RF_KexDiag(uint8_t out[20]);
+ * (low nibble) and heap refusals (high nibble); the X25519 phase and count;
+ * host seeds received (wraps); draws that folded one (bits 0-6, saturating)
+ * with bit 7 set while a seed is waiting. */
+uint8_t RF_KexDiag(uint8_t out[22]);
+
+/* IAP 0x9C: a 32-byte entropy seed from the host (kex_proto.h, KEX_SEED_*).
+ * Held until the next private-key draw folds it into the pool, then wiped;
+ * a later seed replaces one still waiting. RAM only: it is lost at reset.
+ * Safe to call from the USB interrupt. */
+void RF_KexSeed(const uint8_t seed[32]);
 #endif
 
 /* Register a callback for received HID reports */

@@ -763,6 +763,35 @@ units/reboots/temperatures on both dies. Until measured, warm-entry keyboard
 keygen (pairing by key-chord without a reboot) is the top residual risk after
 TOFU, and the fail-stop stands: no threshold, no keygen.
 
+### Host seed (implemented in the minimal exchange)
+
+Neither radio chip has a random number generator, so each end also takes a
+32-byte seed from whatever sits behind it that does. One packet serves both
+transports (`kex_proto.h`, `KEX_SEED_*`):
+
+    [0x9C][0x20][seed:32][sum of every byte before it]
+
+- **Dongle:** IAP command `0x9C` on the USB interface, unarmed, answered
+  `[0x9C][1][status]` (0 taken, 1 wrong length, 2 every byte the same).
+  `opendongle --kex-seed` sends 32 bytes from the computer's generator;
+  `--kex-seed <HEX64>` sends the bytes given.
+- **Keyboard module:** the same 35 bytes as a UART frame from the keyboard's
+  MCU, ACKed like any other frame. The MCU sends it only to a module that
+  answered its `A6 5A` query with `5B 3A`: to a module that does not parse
+  `0x9C` the seed is noise in which a command could turn up by chance. The
+  MK65MX's STM32U073 fills it from its hardware generator on every new link.
+
+Either end holds the seed in RAM until its next private-key draw, XORs it over
+the whole pool before the CMAC squeeze, and wipes it. It is only ever mixed
+in: a seed an attacker knows or chose leaves the scalar no easier to guess
+than the pool alone, and with no seed the draw is what it was. A seed does not
+survive a reset, so the dongle wants it after it is plugged in and before
+pairing. `opendongle --crypt-diag` shows how many seeds the dongle received
+and used, and whether the keyboard's last draw was seeded.
+
+This does not retire the release gates above: a dongle nobody seeds still
+rests on the pool, and an eavesdropper needs only one end's scalar.
+
 ---
 
 ## 14. CH570 enablement gate

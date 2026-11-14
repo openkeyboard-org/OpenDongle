@@ -386,6 +386,17 @@ APP_SRC += $(COMMON)/src/rf_crypt.c
 X25519_RAM ?= 2
 APP_SRC += $(COMMON)/src/x25519.c $(COMMON)/src/kex_kdf.c $(COMMON)/src/kex_proto.c
 CFLAGS += -DX25519_ARITH_IN_RAM=$(X25519_RAM)
+# The BLE library's heap (MEM_BUF in src/main.c; the SDK's CONFIG.h defaults
+# it to 6144). Measured on the bench with the heap watermark
+# (EXTRA_CFLAGS=-DDONGLE_HEAP_WATERMARK=1, common/include/heap_watermark.h,
+# 2026-11-14): 1804 bytes touched after start-up and a bonded reconnect, 2368
+# at the peak of a fresh pairing, which is when the key exchange's context
+# (544 bytes) is allocated. Nothing beyond 2368 was ever written. 4096 leaves
+# 1728 bytes above that peak and gives 2048 back to .data/.bss. The library
+# checks only that the size is not zero. Measure again before lowering it or
+# after anything new allocates from the heap.
+BLE_MEMHEAP ?= 4096
+CFLAGS += -DBLE_MEMHEAP_SIZE=$(BLE_MEMHEAP)
 # BENCH ONLY: KEX_BENCH=1 adds IAP 0x99, which times one X25519 scalar
 # multiplication on the chip (`opendongle --kex-bench`).
 KEX_BENCH ?= 0

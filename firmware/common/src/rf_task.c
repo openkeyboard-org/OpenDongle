@@ -2105,6 +2105,9 @@ static uint32_t         rf_kex_pool[8];
 static uint16_t         rf_kex_samples;
 static uint8_t          rf_kex_pool_at;
 static uint32_t         rf_kex_last_stamp;
+static uint8_t          rf_kex_seed[KEX_SEED_BYTES];   /* host seed, until the next draw */
+static volatile uint8_t rf_kex_seed_fresh;
+static uint8_t          rf_kex_stat_seeds, rf_kex_stat_seeded_draws;
 /* IAP 0x9A */
 uint8_t rf_kex_stat_starts, rf_kex_stat_done, rf_kex_stat_last_fail, rf_kex_stat_commit_fail;
 uint8_t rf_kex_stat_alloc_fail;
@@ -2417,6 +2420,20 @@ static int rf_kex_draw(uint8_t priv[32])
     uint8_t i;
     int rc;
 
+    /* A host seed, if one is waiting: XORed over the whole pool, so the pool
+     * is at least as unpredictable as the better of the two. Cleared before
+     * it is read; a seed that arrives while this runs is kept for the next
+     * draw (whatever part of it was folded here does no harm). */
+    if (rf_kex_seed_fresh) {
+        rf_kex_seed_fresh = 0u;
+        for (i = 0; i < KEX_SEED_BYTES; i++) {
+            rf_kex_pool[i >> 2] ^= (uint32_t)rf_kex_seed[i] << (8u * (i & 3u));
+            rf_kex_seed[i] = 0u;
+        }
+        if (rf_kex_stat_seeded_draws < 0x7Fu) {
+            rf_kex_stat_seeded_draws++;
+        }
+    }
     GET_UNIQUE_ID(uid);
     for (i = 0; i < 16u; i++) {
         key[i] = (uint8_t)(rf_kex_pool[i >> 2] >> (8u * (i & 3u)));
@@ -2640,8 +2657,22 @@ static void rf_kex_service(void)
     }
 }
 
-uint8_t RF_KexDiag(uint8_t out[20])
+void RF_KexSeed(const uint8_t seed[32])
 {
+    uint8_t i;
+
+    rf_kex_seed_fresh = 0u;
+    for (i = 0; i < KEX_SEED_BYTES; i++) {
+        rf_kex_seed[i] = seed[i];
+    }
+    rf_kex_seed_fresh = 1u;
+    rf_kex_stat_seeds++;
+}
+
+uint8_t RF_KexDiag(uint8_t out[22])
+{
+    out[20] = rf_kex_stat_seeds;
+    out[21] = (uint8_t)(rf_kex_stat_seeded_draws | (rf_kex_seed_fresh ? 0x80u : 0u));
     tmos_memcpy(&out[8], rf_kex_peer_status, 8);
     out[16] = rf_kex_peer_status_n;
     out[17] = (uint8_t)(rf_kex_failures | (rf_kex_stat_alloc_fail << 4));
@@ -2655,7 +2686,7 @@ uint8_t RF_KexDiag(uint8_t out[20])
     out[5] = (uint8_t)(rf_kex_samples >> 8);
     out[6] = rf_kex_stat_commit_fail;
     out[7] = rf_kex_tried;
-    return 20u;
+    return 22u;
 }
 #endif /* DONGLE_KEX */
 

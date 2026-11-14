@@ -12,6 +12,7 @@
 #include "dongle_platform.h"
 #include "dongle_target.h"      /* HAL_TICKS_PER_US (IAP_Service deadlines) */
 #include "stack_watermark.h"    /* measurement builds only (0x96) */
+#include "heap_watermark.h"     /* measurement builds only (0x9B) */
 #include "hal_timing.h"         /* hal_now (IAP_Service deadlines) */
 #include "dongle_image_id.h"
 #include "openboot_app.h"       /* openboot_request_update (noreturn) */
@@ -20,6 +21,9 @@
 #include "rf_task.h"            /* RF_TombstoneBond (N06), RF_Quiesce* (0x85) */
 #if DONGLE_RF_CRYPT
 #include "rf_crypt.h"           /* RF_CRYPT_DIAG_PREV_SESSION + its counters */
+#if DONGLE_KEX
+#include "kex_proto.h"          /* KEX_SEED_* (0x9C) */
+#endif
 #endif
 #endif
 
@@ -43,10 +47,13 @@
 #define CMD_CRYPT_DIAG  0x98    /* read-only link-encryption counters (was 0x94 on the pre-merge branches; 0x94 is RfPoke) */
 #define ACK_CRYPT_DIAG  0x98
 #define CMD_KEX_DIAG    0x9A    /* read-only link-key exchange counters */
+#define CMD_KEX_SEED    0x9C    /* a 32-byte entropy seed for the next exchange (kex_proto.h) */
 #define CMD_KEX_BENCH   0x99    /* bench builds only: time one X25519 */
 #define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
 #define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
                                   * (DONGLE_STACK_WATERMARK) */
+#define CMD_HEAP_WATERMARK 0x9B  /* read-only; measurement builds only
+                                  * (DONGLE_HEAP_WATERMARK) */
 #define CMD_RX_SHAPE    0x97    /* read-only; bench builds only -- receptions
                                  * rejected before any other counter sees them */
 
@@ -377,10 +384,52 @@ static void handle_kex_bench(void)
 /* CMD 0x9A: link-key exchange counters (RF_KexDiag). Read-only, unarmed. */
 static void handle_kex_diag(void)
 {
-    uint8_t resp[2u + 20u] = {0};
+    uint8_t resp[2u + 22u] = {0};
 
     resp[0] = CMD_KEX_DIAG;
     resp[1] = RF_KexDiag(&resp[2]);
+    USB_SendEP6(resp, sizeof(resp));
+}
+
+/* CMD 0x9C: an entropy seed from the host, [0x9C][32][seed][sum] -- the same
+ * packet the keyboard's module takes from its MCU (kex_proto.h). Answers
+ * [0x9C][1][status]: 0 taken, 1 wrong length, 2 refused (every byte the same,
+ * which is a host generator that is not working). Unarmed: a seed is only
+ * ever XORed into the pool, so one from a hostile host cannot make the key
+ * easier to guess, and nothing persistent changes. */
+_Static_assert(CMD_KEX_SEED == KEX_SEED_CMD, "seed command byte is shared with the keyboard UART");
+static void handle_kex_seed(const uint8_t *data, uint8_t len)
+{
+    uint8_t resp[3] = { CMD_KEX_SEED, 1u, 0u };
+
+    if (len != KEX_SEED_BYTES) {
+        resp[2] = 1u;
+    } else {
+        /* Work on a copy: a bus reset clears the endpoint buffer from the
+         * USB interrupt, and a seed checked there and used afterwards could
+         * be all zeros by the time it is used. A copy torn by a reset is
+         * either refused below or a shorter seed; neither does harm. */
+        uint8_t seed[KEX_SEED_BYTES];
+        volatile uint8_t *w = seed;
+        uint8_t i, same = 1u;
+
+        for (i = 0u; i < KEX_SEED_BYTES; i++) {
+            seed[i] = data[i];
+        }
+        for (i = 1u; i < KEX_SEED_BYTES; i++) {
+            if (seed[i] != seed[0]) {
+                same = 0u;
+            }
+        }
+        if (same) {
+            resp[2] = 2u;
+        } else {
+            RF_KexSeed(seed);
+        }
+        for (i = 0u; i < KEX_SEED_BYTES; i++) {
+            w[i] = 0u;
+        }
+    }
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif
@@ -692,6 +741,20 @@ static void handle_stack_watermark(void)
 }
 #endif
 
+#if DONGLE_HEAP_WATERMARK
+/* CMD 0x9B: how much of the BLE library heap has been touched since boot
+ * (heap_watermark.h has the layout). Read-only, unarmed (sizes and offsets
+ * only, and never in a product build). */
+static void handle_heap_watermark(void)
+{
+    uint8_t resp[2u + HEAP_WATERMARK_BYTES] = {0};
+
+    resp[0] = CMD_HEAP_WATERMARK;
+    resp[1] = heap_watermark_fill(&resp[2]);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
 /* Read-only RF diagnostics page (command 0x92, optional 1-byte page selector,
  * default page 0). Unarmed like the fault page: it is the readout for a unit
  * whose runtime state is the thing under investigation, and arming is a
@@ -767,6 +830,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_BOND_CLEAR:  handle_bond_clear(); break;
 #if DONGLE_KEX
     case CMD_KEX_DIAG:    handle_kex_diag(); break;
+    case CMD_KEX_SEED:    handle_kex_seed(data, len); break;
 #endif
 #if DONGLE_KEX_BENCH
     case CMD_KEX_BENCH:   handle_kex_bench(); break;
@@ -785,6 +849,9 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
 #endif
 #if DONGLE_STACK_WATERMARK
     case CMD_STACK_WATERMARK: handle_stack_watermark(); break;
+#endif
+#if DONGLE_HEAP_WATERMARK
+    case CMD_HEAP_WATERMARK: handle_heap_watermark(); break;
 #endif
     default:              break;
     }

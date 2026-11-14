@@ -44,6 +44,7 @@
 #include "usb_device.h"
 #include "iap.h"
 #include "stack_watermark.h"
+#include "heap_watermark.h"
 #include "uart_diag.h"
 #include "pm_ch592.h"
 
@@ -68,6 +69,72 @@
 #endif
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
+
+#if DONGLE_HEAP_WATERMARK
+/* Measurement builds only (heap_watermark.h). */
+#define HEAP_WM_WORDS (BLE_MEMHEAP_SIZE / 4u)
+
+static uint32_t heap_wm_boot_untouched;
+static uint32_t heap_wm_boot_top;
+
+void heap_watermark_paint(void)
+{
+    for (uint32_t i = 0; i < HEAP_WM_WORDS; i++) {
+        MEM_BUF[i] = HEAP_WATERMARK_PATTERN;
+    }
+}
+
+/* out[0] untouched bytes, [1] end of the highest touched word, [2] largest
+ * untouched run in bytes, [3] where that run starts. */
+static void heap_wm_scan(uint32_t out[4])
+{
+    uint32_t untouched = 0, top = 0, run = 0, best = 0, best_at = 0;
+
+    for (uint32_t i = 0; i < HEAP_WM_WORDS; i++) {
+        if (MEM_BUF[i] == HEAP_WATERMARK_PATTERN) {
+            untouched++;
+            run++;
+            if (run > best) {
+                best = run;
+                best_at = i + 1u - run;
+            }
+        } else {
+            run = 0;
+            top = i + 1u;
+        }
+    }
+    out[0] = untouched * 4u;
+    out[1] = top * 4u;
+    out[2] = best * 4u;
+    out[3] = best_at * 4u;
+}
+
+void heap_watermark_mark_boot(void)
+{
+    uint32_t v[4];
+
+    heap_wm_scan(v);
+    heap_wm_boot_untouched = v[0];
+    heap_wm_boot_top = v[1];
+}
+
+uint8_t heap_watermark_fill(uint8_t *out)
+{
+    uint32_t v[7];
+
+    v[0] = (uint32_t)BLE_MEMHEAP_SIZE;
+    heap_wm_scan(&v[1]);
+    v[5] = heap_wm_boot_untouched;
+    v[6] = heap_wm_boot_top;
+    for (uint32_t i = 0; i < 7u; i++) {
+        out[4u * i]      = (uint8_t)v[i];
+        out[4u * i + 1u] = (uint8_t)(v[i] >> 8);
+        out[4u * i + 2u] = (uint8_t)(v[i] >> 16);
+        out[4u * i + 3u] = (uint8_t)(v[i] >> 24);
+    }
+    return HEAP_WATERMARK_BYTES;
+}
+#endif /* DONGLE_HEAP_WATERMARK */
 
 #if (defined(BLE_MAC)) && (BLE_MAC == TRUE)
 const uint8_t MacAddr[6] = {0x84, 0xC2, 0xE4, 0x03, 0x02, 0x02};
@@ -224,6 +291,9 @@ int main(void)
     SysTick->SR = 0;
     PFIC_ClearPendingIRQ(SysTick_IRQn);
 #endif
+#if DONGLE_HEAP_WATERMARK
+    heap_watermark_paint();   /* before the library is handed the heap */
+#endif
     CH59x_BLEInit();
     HAL_Init();
 #if DONGLE_PM_CLK_GATE
@@ -276,5 +346,8 @@ int main(void)
     UartDiag_Init();
 #endif
 
+#if DONGLE_HEAP_WATERMARK
+    heap_watermark_mark_boot();
+#endif
     Main_Circulation();
 }

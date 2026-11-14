@@ -36,6 +36,10 @@ pub const CMD_RF_DIAG: u8 = 0x92;
 pub const CMD_RF_POKE: u8 = 0x94;
 pub const CMD_FAULT: u8 = 0x93;
 pub const CMD_CRYPT_DIAG: u8 = 0x98;
+/// A 32-byte entropy seed for the next link-key exchange. The keyboard's radio
+/// module takes the identical packet from its MCU over the UART.
+pub const CMD_KEX_SEED: u8 = 0x9C;
+pub const KEX_SEED_BYTES: usize = 32;
 /// Reboot into the OpenBoot bootloader (armed session only). Body is the
 /// 4-byte ENTER_BOOTLOADER_MAGIC, little-endian; the device replies status
 /// 0, quiesces RF, drains the reply, and resets into OpenBoot.
@@ -264,6 +268,12 @@ pub fn op_crypt_diag(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_CRYPT_DIAG, &[]), READ_TIMEOUT_MS)
 }
 
+/// Hand the dongle an entropy seed (unarmed; the firmware only ever mixes it
+/// into its own pool). Reply `[0x9C][1][status]`.
+pub fn op_kex_seed(dev: &IapDevice, seed: &[u8; KEX_SEED_BYTES]) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_KEX_SEED, seed), READ_TIMEOUT_MS)
+}
+
 /// BondClear (armed session only): firmware-side erase with readback.
 pub fn op_bond_clear(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_BOND_CLEAR, &[]), READ_TIMEOUT_MS)
@@ -353,6 +363,25 @@ mod tests {
 
     fn to_hex(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
+    }
+
+    // The seed packet is a cross-transport contract: after the HID report id
+    // it is [9C][20][seed:32][sum], the 35 bytes the keyboard's MCU sends its
+    // radio module over the UART (OpenController keyboard_uart.c, QMK
+    // opencontroller_protocol.c).
+    #[test]
+    fn kex_seed_packet_is_the_uart_frame() {
+        let mut seed = [0u8; KEX_SEED_BYTES];
+        for (i, b) in seed.iter_mut().enumerate() {
+            *b = (0x11 * i + 3) as u8;
+        }
+        let p = packet_simple(CMD_KEX_SEED, &seed);
+        assert_eq!(p[0], 0x00);
+        assert_eq!(&p[1..3], &[0x9C, 0x20]);
+        assert_eq!(&p[3..35], &seed);
+        let sum = p[1..35].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        assert_eq!(p[35], sum);
+        assert!(p[36..].iter().all(|&b| b == 0));
     }
 
     // Golden vectors generated from flash_dongle.py (65-byte reports).
