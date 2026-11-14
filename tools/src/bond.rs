@@ -155,6 +155,15 @@ fn format_mac(mac: &[u8; 6]) -> String {
         .join(":")
 }
 
+/// The record's bytes for display, with the link-key field masked. The
+/// firmware already zeroes it; this is so a key can never reach a terminal
+/// or a log through this tool even if a device does not.
+fn raw_without_key(raw: &[u8; BOND_RECORD_LEN]) -> String {
+    let mut shown = *raw;
+    shown[28..44].fill(0);
+    format!("{} (link key bytes 28..43 masked)", hexsp(&shown, shown.len()))
+}
+
 /// `line`: see the call sites; part of the diagnostics readout.
 fn line(label: &str, value: impl std::fmt::Display) -> String {
     format!("  {label:<16}{value}")
@@ -224,7 +233,7 @@ fn render_bond(read: &BondRead) -> Vec<String> {
                     }
                 ),
             ));
-            lines.push(line("raw", hexsp(&record.raw, record.raw.len())));
+            lines.push(line("raw", raw_without_key(&record.raw)));
         }
         BondRead::Valid(record) => {
             lines.push(line("valid", "yes"));
@@ -269,7 +278,7 @@ fn render_bond(read: &BondRead) -> Vec<String> {
                 "checksum",
                 format!("0x{:08X} (valid)", record.checksum),
             ));
-            lines.push(line("raw", hexsp(&record.raw, record.raw.len())));
+            lines.push(line("raw", raw_without_key(&record.raw)));
         }
     }
     lines
@@ -307,12 +316,18 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
 /// accept a new pair until it is reset, so the operator must replug the dongle;
 /// after that it stays in pairing until a keyboard pairs.
 pub fn clear_bond(dev: &IapDevice) -> Result<()> {
-    let arm = op_arm(dev)?;
-    check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
-    let reply = op_bond_clear(dev);
+    // From the moment ARM is sent the session may be armed, even if its reply
+    // is lost: every exit below goes through the disarm.
+    let armed = op_arm(dev).and_then(|arm| check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None));
+    let reply = match armed {
+        Ok(()) => op_bond_clear(dev),
+        Err(e) => Err(e),
+    };
     // The disarm reply after a clear has been seen as a status frame rather
-    // than the usual ack, so it is sent for effect and not checked.
-    let _ = op_disarm(dev);
+    // than the usual ack, so only a transport failure is reported.
+    if op_disarm(dev).is_err() {
+        eprintln!("warning: disarm not confirmed; replug the dongle to be sure the session is closed");
+    }
     let reply = reply?.ok_or_else(|| anyhow::anyhow!("BondClear: no response (timeout)"))?;
     if reply.len() < 3 || reply[0] != ACK_OK {
         bail!("BondClear: unexpected reply; raw={}", hexsp(&reply, 8));
@@ -368,10 +383,11 @@ fn record_with_link_key(
 /// key establishment yet, so both ends are handed the same key out of band;
 /// this is the receiver half. The device activates it live.
 pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
-    let arm = op_arm(dev)?;
-    check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
-
+    // From the moment ARM is sent the session may be armed, even if its reply
+    // is lost: every exit below goes through the disarm.
     let outcome = (|| -> Result<u8> {
+        let arm = op_arm(dev)?;
+        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
         let response = op_bond_read(dev)?
             .ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
         let record = match decode_response(&response)? {
@@ -386,8 +402,9 @@ pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
         }
         Ok(reply[2])
     })();
-    // Always attempt to disarm, including after an error above.
-    let _ = op_disarm(dev);
+    if op_disarm(dev).is_err() {
+        eprintln!("warning: disarm not confirmed; replug the dongle to be sure the session is closed");
+    }
 
     match outcome? {
         0x00 => {
@@ -598,7 +615,10 @@ mod tests {
             text.contains("checksum        stored 0x00000000 computed 0x00000000 (match)"),
             "{text}"
         );
-        assert!(text.ends_with(&format!("  raw             {}", hexsp(&raw, raw.len()))));
+        assert!(text.ends_with(&format!(
+            "  raw             {} (link key bytes 28..43 masked)",
+            hexsp(&raw, raw.len())
+        )));
 
         let erased = rendered(&response(1, &[0xFF; BOND_RECORD_LEN]));
         assert!(!erased.contains("may indicate"), "{erased}");

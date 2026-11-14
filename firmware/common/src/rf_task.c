@@ -973,6 +973,7 @@ static void rf_send_poll(void);
 /* Task-context: recompute the silence deadline from rf_conn_interval. */
 static void rf_crypt_silence_set_deadline(void);
 static void rf_crypt_rx_flush(void);
+static void rf_crypt_kbd_last_reset(void);
 #endif
 static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
@@ -1211,6 +1212,7 @@ static void rf_send_keys_up_on_link_loss(void)
      * Drop them here, ahead of the release below, so the deferred drain cannot
      * forward a key-down after the all-keys-up. */
     rf_crypt_rx_flush();
+    rf_crypt_kbd_last_reset();
 #endif
     if (rf_state != RF_STATE_CONNECTED) {
         return;
@@ -2281,6 +2283,47 @@ static void rf_crypt_rx_flush(void)
 {
     rf_crypt_fifo_head = rf_crypt_fifo_tail;
 }
+
+/* The boot-keyboard state last forwarded on this link, so a verified frame
+ * that only repeats it is not forwarded again. The keyboard repeats state on
+ * purpose: an idle keepalive every ~28 ms, and a fresh seal of an unacked
+ * report on every poll. Forwarding those would hand USB a stream of unchanged
+ * reports, and usb_hid_in_ready() requests a remote wake for ANY report while
+ * the host is suspended -- an idle keyboard would wake a sleeping host. A
+ * boot-keyboard report is the whole key state, so dropping an exact repeat
+ * loses nothing. Mouse and consumer bodies are NOT covered: relative motion
+ * may legitimately repeat, and deduplicating it needs a report identity the
+ * frame does not carry yet. */
+static uint8_t rf_crypt_kbd_last[8];
+
+/* Task context. Zeros = all keys up, which is what the host holds after any
+ * link loss (rf_send_keys_up_on_link_loss) and at boot. */
+static void rf_crypt_kbd_last_reset(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < sizeof(rf_crypt_kbd_last); i++) {
+        rf_crypt_kbd_last[i] = 0u;
+    }
+}
+
+/* Returns 1 for a boot-keyboard body identical to the last one forwarded;
+ * otherwise records it (when it is a boot-keyboard body) and returns 0. */
+static uint8_t rf_crypt_kbd_repeat(uint8_t tag, const uint8_t *body, uint8_t n)
+{
+    uint8_t i, same = 1u;
+
+    if (tag != RF_PROTO_HID_TAG || n != sizeof(rf_crypt_kbd_last)) {
+        return 0u;
+    }
+    for (i = 0; i < sizeof(rf_crypt_kbd_last); i++) {
+        if (rf_crypt_kbd_last[i] != body[i]) {
+            same = 0u;
+        }
+        rf_crypt_kbd_last[i] = body[i];
+    }
+    return same;
+}
 #endif
 
 /* Control-byte feedback for a frame the CONNECTED handler admits (stock
@@ -2290,12 +2333,9 @@ static void rf_crypt_rx_flush(void)
  * retires it, one to the gap after an unanswered relay poll spends a try.
  * Forced inline: it runs in the radio IRQ sink, and a flash-resident call
  * there is the shape that degraded the link. */
-static inline __attribute__((always_inline)) void rf_connected_admit_feedback(uint8_t rx_ctrl)
+static inline __attribute__((always_inline)) void rf_connected_relay_answer(void)
 {
-    uint8_t phase;
-
-    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rx_ctrl);
-    phase = rf_led_relay_phase;
+    uint8_t phase = rf_led_relay_phase;
     if (phase == RF_LED_RELAY_ON_AIR) {
         rf_led_relay_phase = RF_LED_RELAY_IDLE;
         if (rf_app_tx_buf[1] == rf_led_relay_carried) {
@@ -2305,6 +2345,12 @@ static inline __attribute__((always_inline)) void rf_connected_admit_feedback(ui
         rf_led_relay_phase = RF_LED_RELAY_IDLE;
         rf_led_relay_misses++;
     }
+}
+
+static inline __attribute__((always_inline)) void rf_connected_admit_feedback(uint8_t rx_ctrl)
+{
+    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rx_ctrl);
+    rf_connected_relay_answer();
 }
 
 /* ---------- RF status callback (runs in interrupt context) ---------- */
@@ -2719,6 +2765,20 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * above swallowed, or one the classifier rejects, must not be
                  * acked. */
                 if (len == 1u || hid_tag != 0u) {
+#if DONGLE_RF_CRYPT
+                    /* On an encryption-required bond the control bit is the
+                     * acknowledgement of a VERIFIED frame and nothing else
+                     * (the drain advances it). A bare reply here still counts
+                     * for supervision, confirmation and the LED relay, but it
+                     * must not advance the bit: the keyboard sends a bare
+                     * reply whenever no seal is ready, and letting that move
+                     * the bit made the next poll look like an ack for a
+                     * report that was lost or never verified. Only LEN-1 and
+                     * non-HID frames reach this branch on such a bond. */
+                    if (rf_crypt_bond_enc) {
+                        rf_connected_relay_answer();
+                    } else
+#endif
                     rf_connected_admit_feedback(rxBuf[2]);
                 }
 #if DONGLE_DELIVERY_COUNTERS
@@ -3537,6 +3597,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * reach here having delivered a key-down. Drop what is queued and
              * release, now that CONNECTED is already left. */
             rf_crypt_rx_flush();
+            rf_crypt_kbd_last_reset();
             if (rf_crypt_bond_enc) {
                 rf_release_keys();
             }
@@ -3751,12 +3812,21 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 uint32_t fb_irq = __risc_v_disable_irq();
                 if (rf_state == RF_STATE_CONNECTED) {
                     rf_connected_admit_feedback(rx_ctrl);
+#if RF_CONFIRM_BEFORE_PERSIST
+                    /* An authenticated frame from the peer confirms the
+                     * tentative fresh-pair session at least as well as a bare
+                     * reply does. Latch only, as the sink does; the persist is
+                     * armed by the next RX re-arm, which every reception posts. */
+                    if (rf_confirm_state == RF_CONFIRM_STATE_WAIT_RX) {
+                        rf_confirm_state = RF_CONFIRM_STATE_WAIT_REARM;
+                    }
+#endif
                 }
                 (void)__risc_v_enable_irq(fb_irq);
                 rf_crypt_ok_count++;
                 rf_crypt_last_auth_tsys = hal_now();  /* authenticated liveness */
                 rf_crypt_announce_count = 0u;    /* keyboard has the session nonce */
-                if (rf_hid_callback) {
+                if (rf_hid_callback && !rf_crypt_kbd_repeat(otag, obody, on)) {
                     rf_hid_callback(otag, obody, on);
                 }
             } else {

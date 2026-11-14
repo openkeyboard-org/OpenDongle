@@ -173,15 +173,16 @@ void Main_Circulation(void)
          * fill per pass, one 127-byte frame per second. */
         UartDiag_Service();
 #endif
+#if DONGLE_RF_CRYPT
+        /* Every pass, power management or not: latched crypto work re-posts
+         * its wake, which covers a post lost inside TMOS and (through the PM
+         * post latch) keeps the idle decision below from sleeping past it. */
+        (void)RF_CryptWorkKick();
+#endif
 #if DONGLE_PM_IDLE
         /* Idle the core until the next interrupt if, and only if, this
          * iteration left nothing queued and the RF/USB state admits it
          * (pm_ch592.c carries the veto list and the SEVONPEND-WFE sequence). */
-#if DONGLE_RF_CRYPT
-        /* Before the idle decision: latched crypto work re-posts its wake
-         * (and with it the PM post latch), so it is never slept past. */
-        (void)RF_CryptWorkKick();
-#endif
         pm_idle_try(entry_work);
 #endif
     }

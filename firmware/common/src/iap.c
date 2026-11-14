@@ -373,6 +373,15 @@ static void handle_bond_read(void)
         }
         rec.checksum = bond_checksum(&rec);
         redacted = 0x02u;
+    } else if (!valid) {
+        /* An INVALID record is redacted too, unconditionally. A keyed record
+         * whose header or checksum is damaged fails validation with its key
+         * bytes intact, and returning it verbatim handed the key to any host
+         * that could corrupt -- or merely find corrupted -- the page. Nothing
+         * is recomputed: the view is already marked invalid. */
+        for (uint8_t i = 0; i < sizeof(rec.link_key); i++) {
+            rec.link_key[i] = 0u;
+        }
     }
 
     uint8_t resp[3 + sizeof(bond_record_t)];
