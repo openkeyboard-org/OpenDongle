@@ -2073,16 +2073,25 @@ static volatile uint8_t rf_crypt_work_session;
 
 /* Upper bound on steps per slot. The real limit is time: the loop stops
  * RF_KEX_POLL_MARGIN_TICKS before the next poll is due, so the arithmetic
- * uses whatever dead time the slot has and never makes a poll late. */
+ * uses whatever dead time the slot has without making a poll late. One step
+ * is the exception: the last one of the shared secret also derives the keys
+ * (about 0.9 ms of AES-CMAC in one call), which costs one slot per exchange. */
 #ifndef RF_KEX_STEPS_PER_POLL
 #define RF_KEX_STEPS_PER_POLL   12u
 #endif
 #define RF_KEX_POLL_MARGIN_TICKS 9000u   /* 150 us at 60 MHz; a step is <= ~34 us */
-#define RF_KEX_MAX_FAILURES     3u       /* then no more attempts until a re-pair or reboot */
+#define RF_KEX_MAX_FAILURES     3u       /* then no more attempts until a new pairing or a reboot */
 #define RF_KEX_ENTROPY_SAMPLES  1024u
 #define RF_KEX_TIMEOUT_POLLS    6860u    /* about 6 s of 875 us poll slots */
 
-static kex_t            rf_kex;
+/* The exchange context is about half a kilobyte and is needed for about a
+ * second, once per pairing, so it is borrowed from the TMOS heap for that
+ * time instead of occupying .bss for good. Task context only; the pointer is
+ * valid exactly while rf_kex_active is set. rf_kex_mem is what the allocator
+ * returned (its alignment is not documented, so the context is placed at the
+ * next word boundary inside a slightly larger block). */
+static kex_t           *rf_kex;
+static uint8_t         *rf_kex_mem;
 static volatile uint8_t rf_kex_active;        /* an exchange is running            */
 static uint8_t          rf_kex_tried;         /* already attempted this connection */
 static uint32_t         rf_kex_epoch;         /* rfd_connected_promotes at start   */
@@ -2090,6 +2099,7 @@ static uint16_t         rf_kex_polls;         /* poll slots since the start     
 static uint32_t         rf_kex_poll_tsys;     /* when the last poll slot began     */
 static uint8_t          rf_kex_failures;      /* consecutive failed attempts       */
 static uint8_t          rf_kex_slot;          /* alternates exchange frame / poll  */
+static uint32_t         rf_kex_aa;            /* the bond's session AA at the start */
 static volatile uint8_t rf_crypt_work_kex;
 static uint32_t         rf_kex_pool[8];
 static uint16_t         rf_kex_samples;
@@ -2097,6 +2107,7 @@ static uint8_t          rf_kex_pool_at;
 static uint32_t         rf_kex_last_stamp;
 /* IAP 0x9A */
 uint8_t rf_kex_stat_starts, rf_kex_stat_done, rf_kex_stat_last_fail, rf_kex_stat_commit_fail;
+uint8_t rf_kex_stat_alloc_fail;
 static uint8_t rf_kex_peer_status[8];     /* the keyboard's last status frame */
 static uint8_t rf_kex_peer_status_n;
 
@@ -2434,8 +2445,13 @@ static int rf_kex_draw(uint8_t priv[32])
 
 static void rf_kex_stop(void)
 {
-    rf_kex_active = 0u;
-    kex_reset(&rf_kex);
+    rf_kex_active = 0u;           /* first: nothing may use the context after this */
+    if (rf_kex_mem) {
+        kex_reset(rf_kex);        /* wipe before the memory goes back */
+        (void)tmos_msg_deallocate(rf_kex_mem);
+    }
+    rf_kex_mem = 0;
+    rf_kex = 0;
 }
 
 /* Once per poll slot, connected, task context: feed the pool, notice a new
@@ -2465,7 +2481,7 @@ static void rf_kex_poll_tick(void)
          * abandoned and started afresh. */
         rf_kex_epoch = rfd_connected_promotes;
         rf_kex_polls = 0u;
-        if (rf_kex_active && kex_rewind(&rf_kex) != 0) {
+        if (rf_kex_active && kex_rewind(rf_kex) != 0) {
             rf_kex_stop();
         }
         rf_kex_tried = rf_kex_active;
@@ -2478,6 +2494,9 @@ static void rf_kex_poll_tick(void)
     }
     /* Start only for a peer that advertised encryption, on a persisted and
      * confirmed bond that has no key, once per connection, with a full pool. */
+    if (!rf_bond_persisted) {
+        rf_kex_failures = 0u;         /* a new pairing gets its own attempts */
+    }
     if (rf_kex_tried || rf_kex_failures >= RF_KEX_MAX_FAILURES
         || !rf_crypt_peer_capable || rf_crypt_bond_enc
         || !rf_bond_valid || !rf_bond_persisted || rf_bond_tombstone
@@ -2492,8 +2511,17 @@ static void rf_kex_poll_tick(void)
         uint8_t i;
 
         rf_kex_tried = 1u;
+        rf_kex_mem = tmos_msg_allocate((uint16_t)(sizeof(kex_t) + 3u));
+        if (rf_kex_mem == 0) {
+            /* No heap for it now: not an exchange failure, just not this
+             * connection. Counted so a heap that can never spare it shows. */
+            rf_kex_stat_alloc_fail++;
+            return;
+        }
+        rf_kex = (kex_t *)(((uintptr_t)rf_kex_mem + 3u) & ~(uintptr_t)3u);
         if (rf_kex_draw(priv) != 0) {
             rf_kex_stat_last_fail = (uint8_t)KEX_FAIL_ENGINE;
+            rf_kex_stop();
             return;
         }
         /* Transcript prefix. The minimal exchange binds the two identities
@@ -2508,9 +2536,10 @@ static void rf_kex_poll_tick(void)
             prefix[6u + i] = rf_peer_mac[i];
             prefix[12u + i] = rf_pair_ack15[9u + i];
         }
-        kex_start(&rf_kex, KEX_ROLE_DONGLE, priv, prefix, &rf_pair_ack15[9], rf_peer_mac);
+        kex_start(rf_kex, KEX_ROLE_DONGLE, priv, prefix, &rf_pair_ack15[9], rf_peer_mac);
         tmos_memset(priv, 0, sizeof(priv));
         rf_kex_polls = 0u;
+        rf_kex_aa = rf_bond_aa;
         rf_kex_stat_starts++;
         rf_kex_active = 1u;
     }
@@ -2524,7 +2553,7 @@ static void rf_kex_commit(void)
     bond_record_t back __attribute__((aligned(4)));
     uint8_t ok = 0u;
 
-    if (kex_take_link_key(&rf_kex, rec.link_key) == 0) {
+    if (kex_take_link_key(rf_kex, rec.link_key) == 0) {
         uint8_t lk[16];
 
         tmos_memcpy(lk, rec.link_key, 16);
@@ -2532,7 +2561,8 @@ static void rf_kex_commit(void)
          * keyboard, still keyless. A host BondWrite or a re-pair in between
          * would otherwise get this key written into a different bond. */
         if (bond_load(&rec) && !(rec.flags & BOND_FLAG_ENC_KEY)
-            && tmos_memcmp(rec.peer_mac, rf_kex.peer_mac, 6)) {
+            && rec.session_aa == rf_kex_aa
+            && tmos_memcmp(rec.peer_mac, rf_kex->peer_mac, 6)) {
             tmos_memcpy(rec.link_key, lk, 16);
             rec.flags |= (uint8_t)(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
             rec.checksum = bond_checksum(&rec);
@@ -2569,7 +2599,8 @@ static void rf_kex_service(void)
     /* The bond changed under the exchange (a host BondWrite gave it a key,
      * a clear tombstoned it): the exchange no longer applies, and its CMACs
      * must not replace an AES key that is now in use. */
-    if (rf_crypt_bond_enc || !rf_bond_valid || rf_bond_tombstone) {
+    if (rf_crypt_bond_enc || !rf_bond_valid || rf_bond_tombstone
+        || rf_bond_aa != rf_kex_aa) {
         rf_kex_stop();
         return;
     }
@@ -2582,7 +2613,7 @@ static void rf_kex_service(void)
         uint32_t rx_seen = rf_last_conn_rx_tsys;
         uint8_t n;
 
-        st = kex_state(&rf_kex);
+        st = kex_state(rf_kex);
         for (n = 0; n < RF_KEX_STEPS_PER_POLL; n++) {
             if (rf_last_conn_rx_tsys != rx_seen) {
                 break;                /* the reply arrived: let its handling run */
@@ -2590,7 +2621,7 @@ static void rf_kex_service(void)
             if ((uint32_t)(hal_now() - rf_kex_poll_tsys) + RF_KEX_POLL_MARGIN_TICKS >= slot_ticks) {
                 break;
             }
-            st = kex_work(&rf_kex, 1u);
+            st = kex_work(rf_kex, 1u);
             if (st != KEX_KEYGEN && st != KEX_DH) {
                 break;                /* nothing left to compute right now */
             }
@@ -2599,13 +2630,13 @@ static void rf_kex_service(void)
     if (st == KEX_DONE) {
         rf_kex_commit();
     } else if (st == KEX_FAILED) {
-        rf_kex_stat_last_fail = (uint8_t)kex_failure(&rf_kex);
-        if (rf_kex.abort_tx == 0u) {     /* the peer has been told */
+        rf_kex_stat_last_fail = (uint8_t)kex_failure(rf_kex);
+        if (rf_kex->abort_tx == 0u) {     /* the peer has been told */
             rf_kex_failures++;
             rf_kex_stop();
         }
     } else if (rf_kex_polls >= RF_KEX_TIMEOUT_POLLS) {
-        kex_expire(&rf_kex);
+        kex_expire(rf_kex);
     }
 }
 
@@ -2613,13 +2644,13 @@ uint8_t RF_KexDiag(uint8_t out[20])
 {
     tmos_memcpy(&out[8], rf_kex_peer_status, 8);
     out[16] = rf_kex_peer_status_n;
-    out[17] = rf_kex_failures;
-    out[18] = rf_kex_active ? rf_kex.x.phase : 0u;
-    out[19] = rf_kex_active ? (uint8_t)rf_kex.x.count : 0u;
+    out[17] = (uint8_t)(rf_kex_failures | (rf_kex_stat_alloc_fail << 4));
+    out[18] = rf_kex_active ? rf_kex->x.phase : 0u;
+    out[19] = rf_kex_active ? (uint8_t)rf_kex->x.count : 0u;
     out[0] = rf_kex_stat_starts;
     out[1] = rf_kex_stat_done;
     out[2] = rf_kex_stat_last_fail;
-    out[3] = rf_kex_active ? (uint8_t)kex_state(&rf_kex) : 0u;
+    out[3] = rf_kex_active ? (uint8_t)kex_state(rf_kex) : 0u;
     out[4] = (uint8_t)rf_kex_samples;
     out[5] = (uint8_t)(rf_kex_samples >> 8);
     out[6] = rf_kex_stat_commit_fail;
@@ -4126,7 +4157,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                     tmos_memcpy(rf_kex_peer_status, &rf_crypt_fifo_buf[h][3], 8);
                     rf_kex_peer_status_n++;
                 } else if (rf_kex_active) {
-                    kex_rx(&rf_kex, &rf_crypt_fifo_buf[h][2]);
+                    kex_rx(rf_kex, &rf_crypt_fifo_buf[h][2]);
                 }
                 rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
                 continue;
@@ -4789,7 +4820,7 @@ static void rf_send_poll(void)
          * a link made only of them would lapse; half the slots keeps it up
          * while the attempt times out. */
         rf_kex_slot ^= 1u;
-        if (rf_kex_slot && kex_tx(&rf_kex, &kxf[2])) {
+        if (rf_kex_slot && kex_tx(rf_kex, &kxf[2])) {
             /* An exchange frame takes this slot in place of the poll; the
              * keyboard answers it as it answers a poll. Like an announce
              * slot, it ends any LED relay exchange in progress. */

@@ -59,9 +59,11 @@ void RF_TaskInit(void);
 uint8_t RF_CryptWorkKick(void);
 #endif
 #if DONGLE_KEX
-/* IAP 0x9A: link-key exchange counters. Fills 8 bytes: starts, completed,
+/* IAP 0x9A: link-key exchange counters. Fills 20 bytes: starts, completed,
  * last failure (kex_fail_t), current state (kex_state_t, 0 when idle),
- * entropy samples (u16 LE), commit failures, tried-this-connection. */
+ * entropy samples (u16 LE), commit failures, tried-this-connection; the
+ * keyboard's last status frame (8) and how many arrived (wraps); failures
+ * (low nibble) and heap refusals (high nibble); the X25519 phase and count. */
 uint8_t RF_KexDiag(uint8_t out[20]);
 #endif
 

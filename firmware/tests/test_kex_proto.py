@@ -55,7 +55,9 @@ static void put(const unsigned char *p, size_t n){ for (size_t i = 0; i < n; i++
  *       3 AES fault on the first derivation block either end runs;
  *       4 expire the dongle at slot 40; 5 flip a bit in a keyboard CONFIRM;
  *       6 replace every dongle CONFIRM chunk with zeros;
- *       7 at slot 300 the connection is replaced: both ends kex_rewind(). */
+ *       7 at slot 300 the connection is replaced: both ends kex_rewind();
+ *       8 both ends are first fed CONFIRM fragments left over from another
+ *         exchange, as a peer still repeating an abandoned one would send. */
 int main(int argc, char **argv){
     unsigned char dpriv[32], kpriv[32], dpre[KEX_T_PREFIX_BYTES], kpre[KEX_T_PREFIX_BYTES], dmac[6], kmac[6];
     static kex_t dg, kb;
@@ -71,6 +73,15 @@ int main(int argc, char **argv){
 
     kex_start(&dg, KEX_ROLE_DONGLE, dpriv, dpre, dmac, kmac);
     kex_start(&kb, KEX_ROLE_KEYBOARD, kpriv, kpre, kmac, dmac);
+    if (mode == 8) {
+        unsigned char stale[KEX_PAYLOAD_BYTES];
+        for (int frag = 0; frag < 2; frag++) {
+            stale[0] = (unsigned char)((KEX_MSG_CONFIRM << 4) | (frag << 2) | KEX_VERSION);
+            memset(stale + 1, 0x5A + frag, 8);
+            kex_rx(&dg, stale);
+            kex_rx(&kb, stale);
+        }
+    }
     for (slot = 0; slot < maxslots; slot++) {
         if (mode == 3 && kex_state(&dg) == KEX_DH && g_fail_at < 0) g_fail_at = g_blocks;
         if (mode == 4 && slot == 40) kex_expire(&dg);
@@ -199,6 +210,10 @@ class KexProtoTest(unittest.TestCase):
             m = self.material()
             res = self.run_kex(m, steps=steps, mode=7)
             self.assert_agreed(res, m)
+
+    def test_leftover_confirmations_do_not_poison_a_fresh_exchange(self):
+        m = self.material()
+        self.assert_agreed(self.run_kex(m, mode=8), m)
 
     def test_a_tampered_public_key_fragment_yields_no_key(self):
         m = self.material()

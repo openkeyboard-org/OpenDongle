@@ -201,7 +201,12 @@ void kex_rx(kex_t *k, const uint8_t payload[KEX_PAYLOAD_BYTES])
         k->peer_pub_mask |= (uint8_t)(1u << frag);
         break;
     case KEX_MSG_CONFIRM:
-        if (frag > 1u || k->state == KEX_DONE) {
+        /* Only once our own public-key exchange has reached the shared
+         * secret. A confirmation heard earlier cannot belong to this
+         * exchange -- the peer cannot have derived anything yet -- and
+         * keeping it (first copy wins) would make the real one, when it
+         * comes, lose to a leftover from an exchange the peer abandoned. */
+        if (frag > 1u || (k->state != KEX_DH && k->state != KEX_CONFIRM)) {
             return;
         }
         if (k->peer_conf_mask & (uint8_t)(1u << frag)) {
@@ -284,14 +289,13 @@ int kex_rewind(kex_t *k)
 {
     unsigned i;
 
-    if (k->state == KEX_KEYGEN) {
-        return 0;                     /* nothing of the peer's is held yet */
-    }
-    if (k->state != KEX_PUB && k->state != KEX_DH) {
+    if (k->state != KEX_KEYGEN && k->state != KEX_PUB && k->state != KEX_DH) {
         return 1;                     /* the scalar is gone, or it is over */
     }
-    /* Drop everything that came from the old connection, including a shared
-     * secret half computed; the key pair stays. */
+    /* Drop everything that came from the old connection -- public-key
+     * fragments can arrive during key generation too -- including a shared
+     * secret half computed. The key pair, or the key generation still in
+     * progress, stays. */
     for (i = 0; i < 32u; i++) {
         k->peer_pub[i] = 0u;
     }
@@ -302,9 +306,11 @@ int kex_rewind(kex_t *k)
     k->peer_conf_mask = 0u;
     k->peer_conf_ok = 0u;
     k->keys_ready = 0u;
-    k->x_busy = 0u;
     k->tx_next = 0u;
-    k->state = KEX_PUB;
+    if (k->state != KEX_KEYGEN) {
+        k->x_busy = 0u;
+        k->state = KEX_PUB;
+    }
     return 0;
 }
 
