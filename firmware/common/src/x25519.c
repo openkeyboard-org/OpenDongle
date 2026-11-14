@@ -12,88 +12,146 @@
  */
 #include "x25519.h"
 
-/* Where the multiplication lives. Nearly all of a scalar multiplication is
- * spent in fe_mul's inner loop, so a port whose flash executes in place slowly
- * can put just that routine (about 260 bytes) in RAM with X25519_MUL_IN_RAM=1
- * and leave the rest in flash. Measured on a CH592 at 60 MHz: see the
- * KEX_BENCH note in the CH592 Makefile. */
-#if defined(X25519_MUL_IN_RAM) && X25519_MUL_IN_RAM
-#define X25519_HOT __attribute__((section(".highcode"), noinline))
-#else
-#define X25519_HOT
+/* Where the arithmetic lives. A port whose flash executes in place slowly can
+ * move the inner routines to RAM:
+ *   X25519_ARITH_IN_RAM=1  multiply, square, add, subtract
+ *   X25519_ARITH_IN_RAM=2  those plus the small-constant multiply and the
+ *                          conditional swap
+ *   X25519_ARITH_IN_RAM=3  those plus the step dispatcher
+ * Timings on a CH592 at 60 MHz are in the commit that last changed this file. */
+#ifndef X25519_ARITH_IN_RAM
+#define X25519_ARITH_IN_RAM 0
 #endif
+#define X25519_RAM __attribute__((section(".highcode"), noinline))
+#if X25519_ARITH_IN_RAM >= 1
+#define X25519_HOT X25519_RAM
+#else
+#define X25519_HOT __attribute__((noinline))
+#endif
+#if X25519_ARITH_IN_RAM >= 2
+#define X25519_HOT2 X25519_RAM
+#else
+#define X25519_HOT2 __attribute__((noinline))
+#endif
+#if X25519_ARITH_IN_RAM >= 3
+#define X25519_HOT_STEP __attribute__((section(".highcode")))
+#else
+#define X25519_HOT_STEP
+#endif
+#define X25519_INLINE static inline __attribute__((always_inline))
 
 enum { R_X1, R_X2, R_Z2, R_X3, R_Z3, R_T0, R_T1, R_T2, R_T3 };
-enum { PH_LADDER, PH_INVERT_SQ, PH_INVERT_MUL, PH_FINAL, PH_DONE };
-enum { OP_ADD, OP_SUB, OP_MUL, OP_A24 };
+enum { PH_LADDER, PH_INVERT, PH_FINAL, PH_DONE };
 
 const uint8_t x25519_base_point[X25519_KEY_BYTES] = { 9 };
 
-/* r += 38 * c, c small; then once more for the carry that can produce. */
-static void fe_fold(uint32_t r[8], uint32_t c)
+/* Zero n words through a volatile pointer, so the stores survive. Scratch
+ * that held secret-derived values is wiped with this, never with plain
+ * assignments, which the compiler is free to drop. */
+X25519_INLINE void wipe_words(uint32_t *p, unsigned n)
 {
-    uint64_t t = (uint64_t)c * 38u;
-    int i, pass;
+    volatile uint32_t *v = p;
 
-    for (pass = 0; pass < 2; pass++) {
-        for (i = 0; i < 8; i++) {
-            t += r[i];
-            r[i] = (uint32_t)t;
-            t >>= 32;
-        }
-        t *= 38u;   /* a carry out of the top is worth 38 again; 0 on pass 2 */
+    while (n--) {
+        *v++ = 0u;
     }
 }
 
-static void fe_add(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
+/* r += 38 * c, for c <= 121664 (so 38 * c fits a word; the callers give at
+ * most 1, 38 and 121664). If the addition carries out of the top, the wrapped
+ * value is below 38 * c, so the 38 that carry is worth lands in limb 0
+ * without a further carry. Always inlined: it runs wherever its caller does. */
+X25519_INLINE void fe_fold(uint32_t r[8], uint32_t c)
+{
+    uint32_t carry = c * 38u;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        uint32_t old = r[i];
+        uint32_t sum = old + carry;
+        r[i] = sum;
+        carry = (uint32_t)(sum < old);
+    }
+    r[0] += ((uint32_t)0 - carry) & 38u;
+}
+
+/* r = low(p) + 38 * high(p), folded: the tail of every multiplication. */
+X25519_INLINE void fe_reduce(uint32_t r[8], const uint32_t p[16])
 {
     uint64_t t = 0;
     int i;
 
     for (i = 0; i < 8; i++) {
-        t += (uint64_t)a[i] + b[i];
+        t += (uint64_t)p[i] + (uint64_t)p[i + 8] * 38u;
         r[i] = (uint32_t)t;
         t >>= 32;
     }
-    fe_fold(r, (uint32_t)t);
+    fe_fold(r, (uint32_t)t);          /* t <= 38 */
 }
 
+X25519_HOT
+static void fe_add(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
+{
+    uint32_t carry = 0;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        uint32_t ai = a[i];
+        uint32_t s = ai + b[i];
+        uint32_t v = s + carry;
+        carry = (uint32_t)(s < ai) | (uint32_t)(v < s);
+        r[i] = v;
+    }
+    fe_fold(r, carry);
+}
+
+X25519_HOT
 static void fe_sub(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
 {
     uint32_t borrow = 0;
-    int i, pass;
+    uint32_t sub;
+    int i;
 
     for (i = 0; i < 8; i++) {
-        uint64_t t = (uint64_t)a[i] - b[i] - borrow;
-        r[i] = (uint32_t)t;
-        borrow = (uint32_t)(t >> 63);
+        uint32_t ai = a[i], bi = b[i];
+        uint32_t d = ai - bi;
+        uint32_t v = d - borrow;
+        borrow = (uint32_t)(ai < bi) | (uint32_t)(d < borrow);
+        r[i] = v;
     }
-    /* A borrow out of the top added 2^256 = 38 too much: take 38 back off,
-     * and once more if that itself borrows (r was then below 38). */
-    for (pass = 0; pass < 2; pass++) {
-        uint32_t sub = borrow * 38u;
-        borrow = 0;
-        for (i = 0; i < 8; i++) {
-            uint64_t t = (uint64_t)r[i] - sub - borrow;
-            r[i] = (uint32_t)t;
-            borrow = (uint32_t)(t >> 63);
-            sub = 0;
-        }
+    /* A borrow out of the top added 2^256 = 38 too much: take 38 back off.
+     * If that itself borrows, the wrapped value's limb 0 is at least
+     * 2^32 - 38, so the second 38 comes off limb 0 alone. */
+    sub = borrow * 38u;
+    for (i = 0; i < 8; i++) {
+        uint32_t old = r[i];
+        r[i] = old - sub;
+        sub = (uint32_t)(old < sub);
     }
+    r[0] -= ((uint32_t)0 - sub) & 38u;
 }
 
+/* Self-contained on purpose: no call leaves this routine (the first row is
+ * written rather than accumulated, so the product needs no zeroing, which the
+ * compiler would turn into a memset call into flash), and the reduction is
+ * inline. r may alias a or b: nothing is written to r until the whole product
+ * is formed. */
 X25519_HOT
 static void fe_mul(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
 {
     uint32_t p[16];
+    uint32_t carry = 0;
     uint64_t t;
     int i, j;
 
-    for (i = 0; i < 16; i++) {
-        p[i] = 0;
+    for (j = 0; j < 8; j++) {
+        t = (uint64_t)a[0] * b[j] + carry;
+        p[j] = (uint32_t)t;
+        carry = (uint32_t)(t >> 32);
     }
-    for (i = 0; i < 8; i++) {
-        uint32_t carry = 0;
+    p[8] = carry;
+    for (i = 1; i < 8; i++) {
+        carry = 0;
         for (j = 0; j < 8; j++) {
             t = (uint64_t)a[i] * b[j] + p[i + j] + carry;
             p[i + j] = (uint32_t)t;
@@ -101,19 +159,18 @@ static void fe_mul(uint32_t r[8], const uint32_t a[8], const uint32_t b[8])
         }
         p[i + 8] = carry;
     }
-    /* low + 38 * high */
-    t = 0;
-    for (i = 0; i < 8; i++) {
-        t += (uint64_t)p[i] + (uint64_t)p[i + 8] * 38u;
-        r[i] = (uint32_t)t;
-        t >>= 32;
-    }
-    fe_fold(r, (uint32_t)t);
-    for (i = 0; i < 16; i++) {
-        p[i] = 0;
-    }
+    fe_reduce(r, p);
+    wipe_words(p, 16);
 }
 
+/* Squaring is a multiplication. A dedicated routine (36 limb products
+ * instead of 64, column by column) was written, tested and measured on a
+ * CH592 with the arithmetic in SRAM: it made a scalar multiplication 6%
+ * SLOWER and cost 470 more bytes of SRAM, because without a carry flag the
+ * three-word column accumulator costs more than the 28 products it skips. */
+#define fe_sq(r, a) fe_mul((r), (a), (a))
+
+X25519_HOT2
 static void fe_mul_a24(uint32_t r[8], const uint32_t a[8])
 {
     uint64_t t = 0;
@@ -124,9 +181,10 @@ static void fe_mul_a24(uint32_t r[8], const uint32_t a[8])
         r[i] = (uint32_t)t;
         t >>= 32;
     }
-    fe_fold(r, (uint32_t)t);
+    fe_fold(r, (uint32_t)t);          /* t <= 121664 */
 }
 
+X25519_HOT2
 static void fe_cswap(uint32_t a[8], uint32_t b[8], uint32_t swap)
 {
     uint32_t mask = (uint32_t)0 - swap;
@@ -139,27 +197,81 @@ static void fe_cswap(uint32_t a[8], uint32_t b[8], uint32_t swap)
     }
 }
 
-/* One Montgomery ladder step (RFC 7748 section 5), as field operations over
- * the register file. T0..T3 are scratch. */
-static const uint8_t ladder_prog[18][4] = {
-    { OP_ADD, R_T0, R_X2, R_Z2 },   /* A  = x2 + z2            */
-    { OP_SUB, R_T1, R_X2, R_Z2 },   /* B  = x2 - z2            */
-    { OP_ADD, R_T2, R_X3, R_Z3 },   /* C  = x3 + z3            */
-    { OP_SUB, R_T3, R_X3, R_Z3 },   /* D  = x3 - z3            */
-    { OP_MUL, R_T3, R_T3, R_T0 },   /* DA = D * A              */
-    { OP_MUL, R_T2, R_T2, R_T1 },   /* CB = C * B              */
-    { OP_ADD, R_X3, R_T3, R_T2 },   /*      DA + CB            */
-    { OP_MUL, R_X3, R_X3, R_X3 },   /* x3 = (DA + CB)^2        */
-    { OP_SUB, R_Z3, R_T3, R_T2 },   /*      DA - CB            */
-    { OP_MUL, R_Z3, R_Z3, R_Z3 },   /*      (DA - CB)^2        */
-    { OP_MUL, R_Z3, R_Z3, R_X1 },   /* z3 = x1 * (DA - CB)^2   */
-    { OP_MUL, R_T0, R_T0, R_T0 },   /* AA = A^2                */
-    { OP_MUL, R_T1, R_T1, R_T1 },   /* BB = B^2                */
-    { OP_MUL, R_X2, R_T0, R_T1 },   /* x2 = AA * BB            */
-    { OP_SUB, R_T1, R_T0, R_T1 },   /* E  = AA - BB            */
-    { OP_A24, R_T2, R_T1, R_T1 },   /*      a24 * E            */
-    { OP_ADD, R_T2, R_T0, R_T2 },   /*      AA + a24 * E       */
-    { OP_MUL, R_Z2, R_T1, R_T2 },   /* z2 = E * (AA + a24 * E) */
+/* Reduce to the canonical value below p and store it little-endian. Returns
+ * the OR of the limbs (zero exactly when the value is zero). */
+static uint32_t fe_tobytes(uint8_t out[32], const uint32_t a[8])
+{
+    uint32_t v[8], t[8];
+    uint32_t top, mask, acc = 0;
+    uint64_t c;
+    int i, pass;
+
+    for (i = 0; i < 8; i++) {
+        v[i] = a[i];
+    }
+    /* Fold bit 255 down (2^255 = 19) twice: after the first pass v is below
+     * 2^255 + 19, after the second below 2^255. */
+    for (pass = 0; pass < 2; pass++) {
+        top = v[7] >> 31;
+        v[7] &= 0x7FFFFFFFu;
+        c = (uint64_t)top * 19u;
+        for (i = 0; i < 8; i++) {
+            c += v[i];
+            v[i] = (uint32_t)c;
+            c >>= 32;
+        }
+    }
+    /* Subtract p when v >= p: t = v + 19 has bit 255 set exactly then, and t
+     * with that bit cleared is v - p. */
+    c = 19u;
+    for (i = 0; i < 8; i++) {
+        c += v[i];
+        t[i] = (uint32_t)c;
+        c >>= 32;
+    }
+    mask = (uint32_t)0 - (t[7] >> 31);
+    t[7] &= 0x7FFFFFFFu;
+    for (i = 0; i < 8; i++) {
+        v[i] = (v[i] & ~mask) | (t[i] & mask);
+        out[4 * i]     = (uint8_t)v[i];
+        out[4 * i + 1] = (uint8_t)(v[i] >> 8);
+        out[4 * i + 2] = (uint8_t)(v[i] >> 16);
+        out[4 * i + 3] = (uint8_t)(v[i] >> 24);
+        acc |= v[i];
+    }
+    wipe_words(v, 8);
+    wipe_words(t, 8);
+    return acc;
+}
+
+/* Inversion: T0 = z2^(p-2), p-2 = 2^255 - 21, by the usual addition chain --
+ * 254 squarings and 11 multiplications instead of the 254 + 252 of plain
+ * square-and-multiply. Each row is {dst, a, b, n}: n == 0 is dst = a * b;
+ * n > 0 is dst = a^(2^n) (b unused). The exponent is public, so the schedule
+ * is too. Comments give the exponent held in the destination. */
+static const uint8_t invert_prog[22][4] = {
+    { R_T0, R_Z2, 0,    1   },   /* 2                         */
+    { R_T1, R_T0, 0,    2   },   /* 8                         */
+    { R_T1, R_Z2, R_T1, 0   },   /* 9                         */
+    { R_T0, R_T0, R_T1, 0   },   /* 11                        */
+    { R_T2, R_T0, 0,    1   },   /* 22                        */
+    { R_T1, R_T1, R_T2, 0   },   /* 31 = 2^5 - 1              */
+    { R_T2, R_T1, 0,    5   },   /* 2^10 - 2^5                */
+    { R_T1, R_T2, R_T1, 0   },   /* 2^10 - 1                  */
+    { R_T2, R_T1, 0,    10  },   /* 2^20 - 2^10               */
+    { R_T2, R_T2, R_T1, 0   },   /* 2^20 - 1                  */
+    { R_T3, R_T2, 0,    20  },   /* 2^40 - 2^20               */
+    { R_T2, R_T3, R_T2, 0   },   /* 2^40 - 1                  */
+    { R_T2, R_T2, 0,    10  },   /* 2^50 - 2^10               */
+    { R_T1, R_T2, R_T1, 0   },   /* 2^50 - 1                  */
+    { R_T2, R_T1, 0,    50  },   /* 2^100 - 2^50              */
+    { R_T2, R_T2, R_T1, 0   },   /* 2^100 - 1                 */
+    { R_T3, R_T2, 0,    100 },   /* 2^200 - 2^100             */
+    { R_T2, R_T3, R_T2, 0   },   /* 2^200 - 1                 */
+    { R_T2, R_T2, 0,    50  },   /* 2^250 - 2^50              */
+    { R_T1, R_T2, R_T1, 0   },   /* 2^250 - 1                 */
+    { R_T1, R_T1, 0,    5   },   /* 2^255 - 2^5               */
+    { R_T0, R_T1, R_T0, 0   },   /* 2^255 - 21                */
 };
 
 void x25519_begin(x25519_ctx_t *ctx,
@@ -199,121 +311,119 @@ void x25519_begin(x25519_ctx_t *ctx,
     ctx->phase = PH_LADDER;
 }
 
+X25519_HOT_STEP
 int x25519_step(x25519_ctx_t *ctx)
 {
+#define REG(n) (ctx->r[R_##n])
     switch (ctx->phase) {
-    case PH_LADDER: {
-        const uint8_t *ins = ladder_prog[ctx->op];
-
-        if (ctx->op == 0u) {
+    case PH_LADDER:
+        /* One Montgomery ladder step (RFC 7748 section 5), one field
+         * operation per call. T0..T3 are scratch. The case index is the
+         * position in the step, never anything secret. */
+        switch (ctx->op) {
+        case 0: {
             uint8_t bit = (uint8_t)((ctx->k[ctx->count >> 3] >> (ctx->count & 7u)) & 1u);
             ctx->swap ^= bit;
-            fe_cswap(ctx->r[R_X2], ctx->r[R_X3], ctx->swap);
-            fe_cswap(ctx->r[R_Z2], ctx->r[R_Z3], ctx->swap);
+            fe_cswap(REG(X2), REG(X3), ctx->swap);
+            fe_cswap(REG(Z2), REG(Z3), ctx->swap);
             ctx->swap = bit;
+            fe_add(REG(T0), REG(X2), REG(Z2));      /* A  = x2 + z2            */
+            break;
         }
-        switch (ins[0]) {
-        case OP_ADD: fe_add(ctx->r[ins[1]], ctx->r[ins[2]], ctx->r[ins[3]]); break;
-        case OP_SUB: fe_sub(ctx->r[ins[1]], ctx->r[ins[2]], ctx->r[ins[3]]); break;
-        case OP_MUL: fe_mul(ctx->r[ins[1]], ctx->r[ins[2]], ctx->r[ins[3]]); break;
-        default:     fe_mul_a24(ctx->r[ins[1]], ctx->r[ins[2]]);             break;
+        case 1:  fe_sub(REG(T1), REG(X2), REG(Z2)); break;   /* B  = x2 - z2            */
+        case 2:  fe_add(REG(T2), REG(X3), REG(Z3)); break;   /* C  = x3 + z3            */
+        case 3:  fe_sub(REG(T3), REG(X3), REG(Z3)); break;   /* D  = x3 - z3            */
+        case 4:  fe_mul(REG(T3), REG(T3), REG(T0)); break;   /* DA = D * A              */
+        case 5:  fe_mul(REG(T2), REG(T2), REG(T1)); break;   /* CB = C * B              */
+        case 6:  fe_add(REG(X3), REG(T3), REG(T2)); break;   /*      DA + CB            */
+        case 7:  fe_sq(REG(X3), REG(X3));           break;   /* x3 = (DA + CB)^2        */
+        case 8:  fe_sub(REG(Z3), REG(T3), REG(T2)); break;   /*      DA - CB            */
+        case 9:  fe_sq(REG(Z3), REG(Z3));           break;   /*      (DA - CB)^2        */
+        case 10: fe_mul(REG(Z3), REG(Z3), REG(X1)); break;   /* z3 = x1 * (DA - CB)^2   */
+        case 11: fe_sq(REG(T0), REG(T0));           break;   /* AA = A^2                */
+        case 12: fe_sq(REG(T1), REG(T1));           break;   /* BB = B^2                */
+        case 13: fe_mul(REG(X2), REG(T0), REG(T1)); break;   /* x2 = AA * BB            */
+        case 14: fe_sub(REG(T1), REG(T0), REG(T1)); break;   /* E  = AA - BB            */
+        case 15: fe_mul_a24(REG(T2), REG(T1));      break;   /*      a24 * E            */
+        case 16: fe_add(REG(T2), REG(T0), REG(T2)); break;   /*      AA + a24 * E       */
+        default: fe_mul(REG(Z2), REG(T1), REG(T2)); break;   /* z2 = E * (AA + a24 * E) */
         }
         if (++ctx->op == 18u) {
             ctx->op = 0u;
             if (ctx->count == 0u) {
-                int i;
-                fe_cswap(ctx->r[R_X2], ctx->r[R_X3], ctx->swap);
-                fe_cswap(ctx->r[R_Z2], ctx->r[R_Z3], ctx->swap);
-                /* Invert z2: T0 = z2^(p-2), p-2 = 2^255 - 21. The exponent's
-                 * bits are all ones except bits 2 and 4, so: start from z2,
-                 * then for each bit from 253 down to 0 square, and multiply by
-                 * z2 unless the bit is 2 or 4. The exponent is public. */
-                for (i = 0; i < 8; i++) {
-                    ctx->r[R_T0][i] = ctx->r[R_Z2][i];
-                }
-                ctx->count = 253u;
-                ctx->phase = PH_INVERT_SQ;
+                /* RFC 7748 swaps once more here, by the last scalar bit
+                 * processed. That is bit 0, which the clamp in
+                 * x25519_begin() always clears, so the swap is by zero and
+                 * is omitted -- it must come back if the clamp ever goes. */
+                ctx->count = 0u;          /* squarings done in the current row */
+                ctx->phase = PH_INVERT;
             } else {
                 ctx->count--;
             }
         }
         return 1;
-    }
-    case PH_INVERT_SQ:
-        fe_mul(ctx->r[R_T0], ctx->r[R_T0], ctx->r[R_T0]);
-        if (ctx->count != 2u && ctx->count != 4u) {
-            ctx->phase = PH_INVERT_MUL;
+    case PH_INVERT: {
+        const uint8_t *ins = invert_prog[ctx->op];
+
+        if (ins[3] == 0u) {
+            fe_mul(ctx->r[ins[0]], ctx->r[ins[1]], ctx->r[ins[2]]);
         } else {
-            ctx->count--;          /* never the last bit: 2 and 4 are not 0 */
+            /* First squaring reads the source; the rest square in place. */
+            fe_sq(ctx->r[ins[0]], ctx->count ? ctx->r[ins[0]] : ctx->r[ins[1]]);
+            if (++ctx->count < ins[3]) {
+                return 1;
+            }
+            ctx->count = 0u;
         }
-        return 1;
-    case PH_INVERT_MUL:
-        fe_mul(ctx->r[R_T0], ctx->r[R_T0], ctx->r[R_Z2]);
-        if (ctx->count == 0u) {
+        if (++ctx->op == 22u) {
             ctx->phase = PH_FINAL;
-        } else {
-            ctx->count--;
-            ctx->phase = PH_INVERT_SQ;
         }
         return 1;
+    }
     case PH_FINAL:
-        fe_mul(ctx->r[R_X2], ctx->r[R_X2], ctx->r[R_T0]);
+        fe_mul(REG(X2), REG(X2), REG(T0));
         ctx->phase = PH_DONE;
         return 0;
     default:
         return 0;
     }
+#undef REG
 }
 
 int x25519_finish(x25519_ctx_t *ctx, uint8_t out[X25519_KEY_BYTES])
 {
-    uint32_t v[8], t[8];
-    uint32_t top, mask, acc = 0;
-    uint64_t c;
-    int i, pass;
-    volatile uint8_t *wipe = (volatile uint8_t *)ctx;
+    uint32_t acc = fe_tobytes(out, ctx->r[R_X2]);
 
-    for (i = 0; i < 8; i++) {
-        v[i] = ctx->r[R_X2][i];
-    }
-    /* Fold bit 255 down (2^255 = 19) twice: v is then below 2^255 + 19... and
-     * after the second pass below 2^255. */
-    for (pass = 0; pass < 2; pass++) {
-        top = v[7] >> 31;
-        v[7] &= 0x7FFFFFFFu;
-        c = (uint64_t)top * 19u;
-        for (i = 0; i < 8; i++) {
-            c += v[i];
-            v[i] = (uint32_t)c;
-            c >>= 32;
-        }
-    }
-    /* v < 2^255. Subtract p when v >= p: t = v + 19 has bit 255 set exactly
-     * then, and t with that bit cleared is v - p. */
-    c = 19u;
-    for (i = 0; i < 8; i++) {
-        c += v[i];
-        t[i] = (uint32_t)c;
-        c >>= 32;
-    }
-    mask = (uint32_t)0 - (t[7] >> 31);
-    t[7] &= 0x7FFFFFFFu;
-    for (i = 0; i < 8; i++) {
-        v[i] = (v[i] & ~mask) | (t[i] & mask);
-    }
-
-    for (i = 0; i < 8; i++) {
-        out[4 * i]     = (uint8_t)v[i];
-        out[4 * i + 1] = (uint8_t)(v[i] >> 8);
-        out[4 * i + 2] = (uint8_t)(v[i] >> 16);
-        out[4 * i + 3] = (uint8_t)(v[i] >> 24);
-        acc |= v[i];
-        v[i] = 0;
-        t[i] = 0;
-    }
-    for (i = 0; i < (int)sizeof(*ctx); i++) {
-        wipe[i] = 0;
-    }
+    wipe_words((uint32_t *)(void *)ctx, sizeof(*ctx) / sizeof(uint32_t));
     ctx->phase = PH_DONE;
     return acc == 0u;
 }
+
+#ifdef X25519_TEST_HOOKS
+/* Host tests only: run one primitive on full-width operands and return the
+ * canonical result. alias 0: separate destination; 1: destination is a;
+ * 2: destination is a and b is a too. */
+void x25519_test_op(int op, int alias, const uint32_t a_in[8], const uint32_t b_in[8],
+                    uint8_t out[32])
+{
+    uint32_t a[8], b[8], r[8];
+    uint32_t *dst = alias ? a : r;
+    const uint32_t *bp = (alias == 2) ? a : b;
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        a[i] = a_in[i];
+        b[i] = b_in[i];
+        r[i] = 0xA5A5A5A5u;
+    }
+    switch (op) {
+    case 0: fe_add(dst, a, bp); break;
+    case 1: fe_sub(dst, a, bp); break;
+    case 2: fe_mul(dst, a, bp); break;
+    case 3: fe_sq(dst, a); break;
+    case 4: fe_mul_a24(dst, a); break;
+    default: for (i = 0; i < 8; i++) { dst[i] = a[i]; } break;   /* canonicalise only */
+    }
+    (void)fe_tobytes(out, dst);
+}
+#endif

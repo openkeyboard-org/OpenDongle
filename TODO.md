@@ -510,7 +510,7 @@ the build id for no functional gain, or expands scope beyond the import:
     addresses that no longer match the link: the stack starts at `0x20005FF0`
     (not `0x20006000`), `_susrstack` is `0x200060D0`, and `_ebss` is
     `0x20004360` (not `0x20003718`). The claim the comment is making — that the
-    `0x20005C00` sentinel sits above `.bss` and survives the clear — is still
+    `0x20005FC0` sentinel sits above `.bss` and survives the clear — is still
     true, and `.fault_keep` is its own `NOLOAD` section, so this is an accuracy
     fix rather than a defect.
 - **The OpenBoot checkout is the one pinned input nothing validates.** Its bytes

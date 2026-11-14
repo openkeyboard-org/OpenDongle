@@ -8,7 +8,7 @@
  * 875 us poll grid, so it is a state machine: x25519_begin() loads the work
  * area, each x25519_step() performs ONE field operation (a multiplication at
  * most) and returns, and x25519_finish() produces the result. The caller
- * decides how many steps fit in the time it has. About 5,100 steps make one
+ * decides how many steps fit in the time it has. About 4,900 steps make one
  * scalar multiplication.
  *
  * Constant time with respect to the scalar and the point: no secret-dependent

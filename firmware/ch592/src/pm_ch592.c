@@ -360,7 +360,7 @@ static inline uint8_t pm_settled(uint32_t deadline, uint32_t r0)
 
 /* RAM-resident by default, flash-resident in halt builds: the vendor LowPower_Halt is 328 B of
  * RAM code (it must be, since it powers flash off before its WFI) and the product already links
- * at ~93 % of RAM against the fault-retention block at 0x20005C00. The planner is the right
+ * at ~93 % of RAM against the fault-retention block at 0x20005FC0. The planner is the right
  * thing to move out: it runs UNMASKED, before the idle mask, so XIP here costs fetch time and
  * not grid time, and pm_ch592.o's symbols are linked after the radio path that link.ld pins,
  * so moving it perturbs no receive-path address (PR #40). */

@@ -215,9 +215,101 @@ class X25519Test(unittest.TestCase):
             self.assertEqual(zero, 1, u.hex())
 
 
-# 255 ladder steps of 18 operations, 254 squarings and 252 multiplications for
-# the inversion, and the final multiplication.
-STEPS = 255 * 18 + 254 + 252 + 1
+
+OPS_HARNESS = r"""
+#include <stdint.h>
+#include <stdio.h>
+void x25519_test_op(int op, int alias, const uint32_t a[8], const uint32_t b[8], uint8_t out[32]);
+static int hexval(char c){ return (c>='0'&&c<='9') ? c-'0' : c-'a'+10; }
+static void limbs(const char *s, uint32_t out[8]){
+    for (int i = 0; i < 8; i++) {
+        uint32_t v = 0;
+        for (int j = 3; j >= 0; j--) v = (v << 8) | (uint32_t)(hexval(s[2*(4*i+j)]) << 4 | hexval(s[2*(4*i+j)+1]));
+        out[i] = v;
+    }
+}
+int main(void){
+    int op, alias; char a[80], b[80];
+    while (scanf("%d %d %79s %79s", &op, &alias, a, b) == 4) {
+        uint32_t la[8], lb[8]; uint8_t out[32];
+        limbs(a, la); limbs(b, lb);
+        x25519_test_op(op, alias, la, lb, out);
+        for (int i = 0; i < 32; i++) printf("%02x", out[i]);
+        printf("\n");
+    }
+    return 0;
+}
+"""
+
+
+class FieldPrimitiveTest(unittest.TestCase):
+    """Each field primitive, directly, on full-width operands.
+
+    The ladder never feeds these routines a value with bit 255 set from the
+    outside (x25519_begin clears it) and random inputs almost never reach the
+    second carry or borrow correction, so the end-to-end vectors alone leave
+    the folds untested at their limits. Every operand here is any value below
+    2^256, in all three aliasing modes.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cc = find_cc()
+        if cc is None:
+            raise unittest.SkipTest("no host C compiler")
+        cls.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(cls.tmp.name)
+        (tmp / "ops.c").write_text(OPS_HARNESS)
+        cls.exe = tmp / "x25519_ops"
+        subprocess.run(
+            [cc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror", "-DX25519_TEST_HOOKS",
+             f"-I{INC}", str(tmp / "ops.c"), str(X25519_C), "-o", str(cls.exe)],
+            check=True,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_all_primitives_at_the_extremes_and_at_random(self):
+        rng = random.Random(0xFE25519)
+        top = 2**256 - 1
+        edge = [0, 1, 2, 18, 19, 37, 38, 39, P - 1, P, P + 1, 2 * P - 1, 2 * P, 2 * P + 1,
+                top, top - 1, top - 37, top - 38, 2**255, 2**255 - 1, 2**255 + 18,
+                2**32 - 1, 2**32, 2**64 - 1, 2**128, 2**224 - 1, 2**224, 2**256 - 2**32,
+                2**256 - 2**224, int("55" * 32, 16), int("aa" * 32, 16)]
+        values = edge + [rng.getrandbits(256) for _ in range(40)]
+        ref = {
+            0: lambda a, b: (a + b) % P,
+            1: lambda a, b: (a - b) % P,
+            2: lambda a, b: (a * b) % P,
+            3: lambda a, b: (a * a) % P,
+            4: lambda a, b: (a * A24) % P,
+            5: lambda a, b: a % P,
+        }
+        lines, want = [], []
+        for op in ref:
+            pairs = [(a, b) for a in edge for b in edge] if op < 3 else [(a, 0) for a in values]
+            pairs += [(rng.getrandbits(256), rng.getrandbits(256)) for _ in range(200)]
+            for a, b in pairs:
+                for alias in (0, 1, 2):
+                    bb = a if alias == 2 else b
+                    lines.append(f"{op} {alias} {a.to_bytes(32, 'little').hex()} "
+                                 f"{b.to_bytes(32, 'little').hex()}")
+                    want.append((op, alias, a, bb, ref[op](a, bb)))
+        proc = subprocess.run([str(self.exe)], input="\n".join(lines) + "\n",
+                              capture_output=True, text=True, check=True)
+        got = proc.stdout.split()
+        self.assertEqual(len(got), len(want))
+        for g, (op, alias, a, b, w) in zip(got, want):
+            self.assertEqual(int.from_bytes(bytes.fromhex(g), "little"), w,
+                             f"op {op} alias {alias} a={a:#x} b={b:#x}")
+        self.assertGreater(len(want), 9000)
+
+
+# 255 ladder steps of 18 operations, 254 squarings and 11 multiplications for
+# the inversion's addition chain, and the final multiplication.
+STEPS = 255 * 18 + 254 + 11 + 1
 
 
 if __name__ == "__main__":

@@ -211,21 +211,25 @@ SECTIONS
     PROVIDE( _end = _ebss);
     PROVIDE( end = . );
 
-    /* WHERE THE BLOCK SITS. It was at 0x20005800 until link encryption was
-     * merged with the power-management code: together their statics and
-     * SRAM-resident code no longer fit below that address (short by 496 B),
-     * while 0x20005830..0x20005FF0 above the block was unused. The block moved
-     * up 1 KiB to 0x20005C00, which is all that changed: .data/.bss gain that
-     * 1 KiB, and 0x20005C30..0x200060A0 (1136 B) stays unallocated between the
-     * block and the RF arena / stack floor. The address is still hard-coded in
-     * fault_record.h and startup_CH592_phased.S, and the ASSERTs below still
-     * pin it. A fault record written by firmware built before the move is not
-     * found by firmware built after it (and vice versa) across an update. */
+    /* WHERE THE BLOCK SITS. It was at 0x20005800, with 0x20005830..0x20005FF0
+     * above it unused. Link encryption merged with the power-management code
+     * no longer fit below that address, and the key exchange needs more again
+     * (its context and the SRAM-resident field arithmetic), so the block now
+     * sits at the TOP of that unused span: 0x20005FC0..0x20005FF0, ending
+     * where the .stack output section begins (it cannot go higher: the linker
+     * rejects an overlap with that section, whose low 0xE0 bytes hold the RF
+     * arena rather than stack). Everything between _ebss and the block is free
+     * for .data/.bss to grow into. The cost: a stack overflow used to run
+     * through the arena into ~2 KB of unused RAM before reaching anything; it
+     * now reaches the fault record 176 bytes below the arena. The address is
+     * hard-coded in fault_record.h and startup_CH592_phased.S and pinned by
+     * the ASSERTs below. A fault record written by firmware built before a
+     * move is not found by firmware built after it across an update. */
     /* N23 retained-fault block. The four-byte prefix stays owned by
      * startup_CH592_phased.S; platform_ch592.c contributes the 44-byte
      * versioned record. NOLOAD prevents startup copy/zeroing, and KEEP plus
      * the assertions below make layout drift a link failure. */
-    .fault_keep 0x20005C00 (NOLOAD) :
+    .fault_keep 0x20005FC0 (NOLOAD) :
     {
         _fault_keep_start = .;
         . = . + 4;
@@ -238,7 +242,7 @@ SECTIONS
     /* CODEREVIEW N12b: cap the newlib heap ceiling at the fault-retention
      * block instead of the stack region base, so a large-enough _sbrk growth
      * (vendor stdio retains puts -> __smakebuf_r -> _malloc_r) can no longer
-     * grow the break THROUGH the 0x20005C00 fault block. Only the SDK _sbrk
+     * grow the break THROUGH the 0x20005FC0 fault block. Only the SDK _sbrk
      * consumes _heap_end, so this changes just that bound's relocation — the
      * byte-changing half of N12 that was deferred out of the byte-identical
      * change 4. The N23 NOLOAD section above now defines the linker-owned
@@ -264,11 +268,11 @@ SECTIONS
      * nothing can silently grow into them.
      *
      * (1) Fault retention: fault_handler.S + the startup sentinel keep
-     *     0x20005C00..0x20005C2F (startup prefix + versioned N23 record),
+     *     0x20005FC0..0x20005FEF (startup prefix + versioned N23 record),
      *     which sits between _ebss and the stack region. The real NOLOAD
      *     section above plus the ASSERT below fail the link if .data/.bss
      *     ever reach it. N12b (done in change 10, the next CH592-codegen
-     *     change): _heap_end is now capped at 0x20005C00 (above), so the SDK
+     *     change): _heap_end is now capped at 0x20005FC0 (above), so the SDK
      *     _sbrk can no longer grow the runtime heap THROUGH this block either
      *     -- closing the residual that was deferred out of the byte-identical
      *     change 4 (vendor stdio retains puts -> __smakebuf_r -> _malloc_r).
@@ -288,7 +292,7 @@ SECTIONS
     _susrstack        = _rf_arena_end;
 
     ASSERT(_ebss <= _fault_keep_start,
-        "ERROR: .data/.bss overruns the fault-retention block at 0x20005C00")
+        "ERROR: .data/.bss overruns the fault-retention block at 0x20005FC0")
     ASSERT(_fault_keep_start < _fault_keep_end && _rf_arena_start < _rf_arena_end,
         "ERROR: reserved-region bounds out of order")
     ASSERT(_susrstack == _rf_arena_end && _rf_arena_end <= _eusrstack,
@@ -298,15 +302,15 @@ SECTIONS
     ASSERT(_heap_end <= _rf_arena_start,
         "ERROR: heap ceiling must stay below the BLE RF arena")
     ASSERT(_heap_end == _fault_keep_start,
-        "ERROR: N12b heap cap must equal the fault-block start (0x20005C00)")
+        "ERROR: N12b heap cap must equal the fault-block start (0x20005FC0)")
     /* Pin the absolute address too: the fault/startup assembly hard-codes
-     * 0x20005C00, so a coordinated move of both linker symbols must still trip
+     * 0x20005FC0, so a coordinated move of both linker symbols must still trip
      * this if the assembly is not moved with them. */
-    ASSERT(_fault_keep_start == 0x20005C00,
-        "ERROR: fault block must stay at 0x20005C00 (matches fault_handler.S / startup)")
-    ASSERT(_fault_record_start == 0x20005C04,
+    ASSERT(_fault_keep_start == 0x20005FC0,
+        "ERROR: fault block must stay at 0x20005FC0 (matches fault_handler.S / startup)")
+    ASSERT(_fault_record_start == 0x20005FC4,
         "ERROR: N23 fault record must begin after the four-byte startup prefix")
-    ASSERT(_fault_record_end == 0x20005C30 && _fault_keep_end == 0x20005C30,
+    ASSERT(_fault_record_end == 0x20005FF0 && _fault_keep_end == 0x20005FF0,
         "ERROR: N23 fault record/layout size changed (matches fault_record.h)")
 
     /* CODEREVIEW F01 (+ Codex round-4): the EXACT loadable image size in bytes

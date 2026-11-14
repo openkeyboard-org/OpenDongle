@@ -326,19 +326,22 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
  * report what it cost in HCLK cycles. Each step is timed with interrupts
  * masked, so the figures are the arithmetic alone; the radio is starved for
  * the duration, which is the point of measuring before integrating.
- * Reply: [0x99][24][total][max step][min step][steps][out 0..7], u32 LE. */
+ * Reply: [0x99][32][total][max step][min step][steps][out 0..7][begin][finish],
+ * u32 LE; begin and finish are the costs of those two calls. */
 static void handle_kex_bench(void)
 {
     x25519_ctx_t ctx;   /* on the stack: the bench image has no static RAM to spare */
-    uint8_t k[32], out[32], resp[2u + 24u] = {0};
-    uint32_t total = 0u, max = 0u, min = 0xFFFFFFFFu, n = 0u;
+    uint8_t k[32], out[32], resp[2u + 32u] = {0};
+    uint32_t total = 0u, max = 0u, min = 0xFFFFFFFFu, n = 0u, t_begin, t_finish;
     int more;
     uint8_t i;
 
     for (i = 0; i < 32u; i++) {
         k[i] = (uint8_t)(i + 1u);
     }
+    t_begin = hal_now();
     x25519_begin(&ctx, k, x25519_base_point);
+    t_begin = hal_now() - t_begin;
     do {
         uint32_t irq = __risc_v_disable_irq();
         uint32_t t0 = hal_now();
@@ -351,9 +354,11 @@ static void handle_kex_bench(void)
         if (dt < min) { min = dt; }
         n++;
     } while (more);
+    t_finish = hal_now();
     (void)x25519_finish(&ctx, out);
+    t_finish = hal_now() - t_finish;
     resp[0] = CMD_KEX_BENCH;
-    resp[1] = 24u;
+    resp[1] = 32u;
     put_le32(&resp[2], total);
     put_le32(&resp[6], max);
     put_le32(&resp[10], min);
@@ -361,6 +366,8 @@ static void handle_kex_bench(void)
     for (i = 0; i < 8u; i++) {
         resp[18u + i] = out[i];
     }
+    put_le32(&resp[26], t_begin);
+    put_le32(&resp[30], t_finish);
     USB_SendEP6(resp, sizeof(resp));
 }
 #endif

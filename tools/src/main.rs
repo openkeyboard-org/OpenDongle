@@ -335,7 +335,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     }
     if cli.kex_bench {
         let r = iap::op_kex_bench(&dev)?.ok_or_else(|| anyhow!("KexBench: no response (not a KEX_BENCH build?)"))?;
-        if r.len() < 26 || r[0] != 0x99 || r[1] != 24 {
+        if r.len() < 34 || r[0] != 0x99 || r[1] != 32 {
             return Err(anyhow!("KexBench: unexpected reply; raw={}", iap::hexsp(&r, 8)));
         }
         let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
@@ -347,6 +347,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         println!("  mean step       {:.1} us", us(total) / f64::from(n));
         println!("  longest step    {max} cycles ({:.1} us)", us(max));
         println!("  shortest step   {min} cycles ({:.1} us)", us(min));
+        println!("  begin / finish  {:.1} us / {:.1} us", us(word(26)), us(word(30)));
         println!("  result[0..8]    {}", iap::hexsp(&r[18..26], 8));
         return Ok(ExitCode::SUCCESS);
     }
