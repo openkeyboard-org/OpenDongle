@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cross-platform USB-HID maintenance tool for the OpenDongle dongle (WCH
 //! CH592F / CH570). Reads device/bond/fault status over the vendor IAP
 //! interface and reboots the dongle into the OpenBoot bootloader for
@@ -12,6 +15,7 @@ mod flows;
 mod hex;
 mod iap;
 mod status;
+mod rfdiag;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -24,7 +28,10 @@ use hidapi::HidApi;
 
 use flows::{enter_bootloader, probe};
 use hex::load_firmware;
-use iap::{op_version, IapDevice, DEFAULT_PID, DEFAULT_VID, IAP_INTERFACE};
+use iap::{
+    check, op_arm, op_disarm, op_rf_poke, op_version, require_path_identity, IapDevice,
+    ACK_GETDEVINFO, DEFAULT_PID, DEFAULT_VID, IAP_INTERFACE,
+};
 use status::{read_status, show_status};
 
 /// Parse an integer the way Python's `int(s, 0)` does: 0x/0o/0b prefixes select
@@ -83,6 +90,69 @@ struct Cli {
     #[arg(long, conflicts_with = "enter_bootloader")]
     info: bool,
 
+    /// Read only the retained fault page (command 0x93). Unlike --info this
+    /// does not arm or disarm a session: it issues a single unarmed exchange
+    /// and leaves any existing session state exactly as it found it, so it
+    /// is the readout to use on a unit whose state you are diagnosing.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info"])]
+    fault: bool,
+
+    /// Print one line of link state (connection, last RSSI) from a single
+    /// unarmed Status (0x91) exchange; repeatable with --samples/--period-ms
+    /// for watching state flicker without arming a session.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault"])]
+    status: bool,
+
+    /// Read the RF diagnostics pages (command 0x92: radio arm/event counters,
+    /// executor state, protocol counters) with unarmed exchanges only;
+    /// repeatable with --samples/--period-ms, which then also prints the
+    /// per-second rate of every counter that changed.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status"])]
+    diag: bool,
+
+    /// RF intervention ladder (command 0x94, arms a session): 1 = re-arm RX
+    /// from task context, 2 = shut + vendor re-init + re-arm (CH570 only),
+    /// 3 = shut the radio and leave it deaf (fault injection: the terminal
+    /// camp's liveness watchdog must bring it back within its 200 ms tick),
+    /// 40+N (N = 0..19) = on a live link, mask every interrupt for a nominal
+    /// N poll slots so the polls coalesce into one gap of about N intervals
+    /// (the hop repeat-correction regression check: 5 and 10 must not drop
+    /// the link); 60+M and 70+M (M = 0..9) = a nominal 5- or 6-slot gap plus
+    /// 3*M ticks, the remainder bands. Requested durations: the mask starts
+    /// at an arbitrary phase within the current slot, so the realised gap is
+    /// the request plus that phase.
+    /// Diagnostic: run it on a dongle that is deaf to its keyboard, rung 1
+    /// first; which rung restores the link says whether the software loop or
+    /// the PHY was dead. The firmware refuses rungs 1-3 while a link is up
+    /// and rungs 40-79 unless one is; every rung is refused while quiescing.
+    #[arg(long, value_name = "RUNG", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag"])]
+    rf_poke: Option<u8>,
+
+    /// BENCH: install this 16-byte link key (32 hex characters) on the stored
+    /// bond and activate link encryption (arms a session). The keyboard must
+    /// have advertised encryption at pairing and must be given the same key.
+    /// There is no on-air key establishment yet; do not use a real secret.
+    #[arg(long, value_name = "HEX32", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke"])]
+    provision_link_key: Option<String>,
+
+    /// Erase the stored bond (arms a session). Replug the dongle afterwards:
+    /// it accepts no new pair until reset, then stays in pairing.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key"])]
+    clear_bond: bool,
+
+    /// Print the link-encryption counters (command 0x98, product layout):
+    /// frames verified and frames dropped, by reason. Read-only, unarmed.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond"])]
+    crypt_diag: bool,
+
+    /// With --status or --diag: number of samples (default 1, at least 1)
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    samples: u32,
+
+    /// With --status or --diag: period between samples in milliseconds (default 200)
+    #[arg(long, default_value_t = 200)]
+    period_ms: u64,
+
     /// Reboot the dongle into the OpenBoot bootloader (it re-enumerates under
     /// the same VID:PID on HID usage page 0xFF00; flash there with the
     /// openboot CLI, passing --vid/--pid to match this device)
@@ -114,7 +184,13 @@ struct Cli {
 
 impl Cli {
     fn show_info(&self) -> bool {
-        self.info || !self.enter_bootloader
+        self.info
+            || (!self.enter_bootloader && !self.fault && !self.status && !self.diag && self.rf_poke.is_none() && self.provision_link_key.is_none() && !self.clear_bond && !self.crypt_diag)
+    }
+
+    /// --samples/--period-ms only mean something to the two samplers.
+    fn sampler_args_valid(&self) -> bool {
+        (self.samples == 1 && self.period_ms == 200) || self.status || self.diag
     }
 }
 
@@ -152,6 +228,18 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     }
 
     let api = HidApi::new()?;
+
+    // --hidraw opens whatever path it names, with no check that the node
+    // carries cli.vid/pid/interface (IapDevice::open). --fault and --status
+    // send a vendor report without a prior probe, so before anything is even
+    // opened confirm from enumeration alone that the path is the interface the
+    // selectors describe; a mismatch is a refusal, not a note. Discovered
+    // devices are matched on those selectors already and are not affected.
+    if cli.fault || cli.status || cli.diag || cli.rf_poke.is_some() || cli.provision_link_key.is_some() || cli.clear_bond || cli.crypt_diag {
+        if let Some(path) = cli.hidraw.as_deref() {
+            require_path_identity(&api, path, cli.vid, cli.pid, cli.interface)?;
+        }
+    }
 
     let dev = match IapDevice::open(&api, cli.vid, cli.pid, cli.interface, cli.hidraw.as_deref()) {
         Ok(d) => d,
@@ -230,6 +318,114 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         "device: {}  (VID=0x{:04X} PID=0x{:04X} if={})",
         dev.path, cli.vid, cli.pid, cli.interface
     );
+
+    if cli.fault {
+        // Deliberately before probe(): probe arms and disarms a session, and
+        // the whole point of --fault is to read without touching one.
+        show_fault_info(&dev)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if !cli.sampler_args_valid() {
+        return Err(anyhow!("--samples/--period-ms apply only to --status or --diag"));
+    }
+    if cli.crypt_diag {
+        let r = iap::op_crypt_diag(&dev)?.ok_or_else(|| anyhow!("CryptDiag: no response (timeout)"))?;
+        if r.len() < 2 || r[0] != iap::CMD_CRYPT_DIAG || (r[1] as usize) < 28 || r.len() < 2 + r[1] as usize {
+            return Err(anyhow!("CryptDiag: unexpected reply; raw={}", iap::hexsp(&r, 8)));
+        }
+        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        let n = r[1] as usize;
+        println!("link encryption (payload {n} B{}):", if n == 42 { ", product layout" } else { "" });
+        println!("  verified        {}", word(2));
+        const REASON: [&str; 6] = ["(ok slot)", "shape", "inactive", "mac", "replay", "engine"];
+        for (i, name) in REASON.iter().enumerate().skip(1) {
+            println!("  drop {:<11}{}", name, word(6 + 4 * i));
+        }
+        if n == 42 {
+            println!("  aes redo        {}", word(30));
+            println!("  announce retry  {}", word(34));
+            println!("  boot KAT        run={} fail={}", r[38], r[39]);
+            println!("  plaintext drop  {}", word(40));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.clear_bond {
+        bond::clear_bond(&dev)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(text) = cli.provision_link_key.as_deref() {
+        let key = bond::parse_link_key(text)?;
+        bond::provision_link_key(&dev, &key)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(rung) = cli.rf_poke {
+        // Armed like the bond commands: arm, poke, always disarm.
+        let arm = op_arm(&dev)?;
+        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
+        let poke = op_rf_poke(&dev, rung);
+        let _ = op_disarm(&dev);
+        let response = poke?.ok_or_else(|| anyhow!("RfPoke: no response (timeout)"))?;
+        if response.len() < 4 || response[0] != 0x94 {
+            return Err(anyhow!("RfPoke: unexpected reply; raw={}", iap::hexsp(&response, 8)));
+        }
+        let rc = response[2];
+        println!(
+            "rf-poke rung {rung}: {} (rc=0x{rc:02X}), rf_state={}",
+            match rc {
+                0 => "done",
+                0xE0 => "unknown rung",
+                0xE1 => "refused: not in the state this rung needs (rungs 1-3: the terminal camp; rungs 40-79: a live link)",
+                0xE2 => "refused: quiesced for reboot",
+                0xE3 => "unsupported on this chip (rung 2 on CH59x: a second vendor role init is not validated)",
+                _ => "?",
+            },
+            response[3]
+        );
+        return Ok(ExitCode::from(if rc == 0 { 0 } else { 1 }));
+    }
+    if cli.diag {
+        // 0x92 is unarmed too: sample without a probe. Print full pages each
+        // sample and, from the second sample on, the counter rates.
+        let mut prev: Option<(Vec<rfdiag::Page>, std::time::Instant)> = None;
+        for i in 0..cli.samples {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            println!("--- {now:.3} diag sample {i}");
+            let pages = rfdiag::show_rf_diag(&dev)?;
+            let t = std::time::Instant::now();
+            if let Some((p, pt)) = &prev {
+                for line in rfdiag::rates(p, &pages, t.duration_since(*pt).as_secs_f64()) {
+                    println!("{line}");
+                }
+            }
+            prev = Some((pages, t));
+            if i + 1 < cli.samples {
+                std::thread::sleep(std::time::Duration::from_millis(cli.period_ms));
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.status {
+        // Same reasoning: 0x91 is unarmed, so sample without a probe.
+        for i in 0..cli.samples {
+            let status = read_status(&dev)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            println!(
+                "{now:.3} sample {i:>3}  connection={:<22} rssi={}",
+                status.connection(),
+                status.last_rssi()
+            );
+            if i + 1 < cli.samples {
+                std::thread::sleep(std::time::Duration::from_millis(cli.period_ms));
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
 
     let device_info = probe(&dev)?;
     if cli.show_info() {
@@ -540,6 +736,50 @@ mod tests {
 
         let enter = Cli::try_parse_from(["opendongle", "--enter-bootloader"]).unwrap();
         assert!(!enter.show_info());
+    }
+
+    #[test]
+    fn fault_readout_is_its_own_action() {
+        // --fault must not fall through to the armed --info flow, and it is
+        // exclusive with the actions that arm a session or reboot.
+        let fault = Cli::try_parse_from(["opendongle", "--fault"]).unwrap();
+        assert!(fault.fault);
+        assert!(!fault.show_info());
+        assert!(Cli::try_parse_from(["opendongle", "--fault", "--info"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--fault", "--enter-bootloader"]).is_err());
+    }
+
+    #[test]
+    fn status_sampler_is_its_own_action() {
+        // --status is the unarmed sampler: not the --info flow, exclusive
+        // with the actions that arm or reboot, and the sampling knobs only
+        // make sense alongside it.
+        let status = Cli::try_parse_from(["opendongle", "--status"]).unwrap();
+        assert!(status.status);
+        assert!(!status.show_info());
+        assert_eq!((status.samples, status.period_ms), (1, 200));
+        let sampled = Cli::try_parse_from([
+            "opendongle", "--status", "--samples", "50", "--period-ms", "100",
+        ])
+        .unwrap();
+        assert_eq!((sampled.samples, sampled.period_ms), (50, 100));
+        // The sampling knobs parse on their own (they are shared by --status
+        // and --diag) but are refused at run time without a sampler action.
+        let stray = Cli::try_parse_from(["opendongle", "--samples", "5"]).unwrap();
+        assert!(!stray.sampler_args_valid());
+        let stray = Cli::try_parse_from(["opendongle", "--period-ms", "5"]).unwrap();
+        assert!(!stray.sampler_args_valid());
+        assert!(Cli::try_parse_from(["opendongle", "--status", "--samples", "0"]).is_err());
+        let diag = Cli::try_parse_from(["opendongle", "--diag", "--samples", "3"]).unwrap();
+        assert!(diag.diag && diag.sampler_args_valid() && !diag.show_info());
+        assert!(Cli::try_parse_from(["opendongle", "--diag", "--status"]).is_err());
+        let poke = Cli::try_parse_from(["opendongle", "--rf-poke", "2"]).unwrap();
+        assert_eq!(poke.rf_poke, Some(2));
+        assert!(!poke.show_info());
+        assert!(Cli::try_parse_from(["opendongle", "--rf-poke", "1", "--diag"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--status", "--info"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--status", "--fault"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--status", "--enter-bootloader"]).is_err());
     }
 
     #[test]

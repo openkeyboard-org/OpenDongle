@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Calculate a reproducible 32-bit identity for a firmware source/config set."""
 
 from __future__ import annotations

@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * CH570 N23 reset owner.
  *
  * The vendor startup still owns _start and the runtime vector image. This

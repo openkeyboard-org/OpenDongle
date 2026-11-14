@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- software AES-128 forward cipher.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Portable encrypt-only AES-128. This is the primitive; hal_aes.h is the seam
  * the firmware actually calls. Exposed separately so it can be compiled and

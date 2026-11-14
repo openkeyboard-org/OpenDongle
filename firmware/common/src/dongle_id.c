@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CODEREVIEW F01 — the app-image identity header instance.
  *
  * Placed by the linker at ORIGIN(FLASH) + DONGLE_IMAGE_ID_OFF (0x1020) in the

@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * USB HID Composite Device Driver (shared CH592 / CH582 / CH570)
  *
  * 5-interface HID device: boot keyboard, boot mouse, composite
@@ -17,6 +18,9 @@
 #include "usb_descriptors.h"
 #include "usb_device.h"
 #include "dongle_usb_hal.h"     /* hal_usb_pins_predetach/enable/reattach */
+#if DONGLE_PM_IDLE
+#include "hal_timing.h"         /* hal_now: the EP0-quiet stamp for pm_ch592.c */
+#endif
 
 /* Production HID endpoints use the validated automatic-toggle mode. */
 #define USB_HID_IN_TOG_MODE RB_UEP_AUTO_TOG
@@ -80,13 +84,32 @@ static usb_bus_reset_cb_t usb_bus_reset_cb;
 
 /* USB suspend state. Set when the host stops SOF (RB_UIF_SUSPEND + bus idle),
  * cleared on resume and on bus reset. The dongle is bus-powered and keeps the
- * RF poll dispatching while suspended (the main loop skips LowPower_Idle when
- * this is set — see USB_IsSuspended), so the link survives host sleep. We also
+ * RF poll dispatching while suspended (on CH592 the core idles between polls
+ * under pm_ch592.c's heartbeat-bounded WFE; see USB_IsSuspended for the history
+ * of the older no-WFI rule), so the link survives host sleep. We also
  * suppress HID IN reports while suspended so a key that arrives over RF during
  * host sleep can't be delivered as a stale report the instant the host resumes;
- * the current key state is stashed (usb_kbd_pending) and delivered by the
+ * the current key state is retained in the EP1 queue and delivered by the
  * resume path so the waking keystroke is not lost. */
 static volatile uint8_t usb_suspended;
+static volatile uint16_t usb_suspend_episodes;   /* IAP 0x92 page 4 */
+
+/* ---- Report-delivery observability (IAP 0x92 page 8; read over USB, never SWD,
+ * which would reset the dongle and drop the link). These locate a lost keystroke
+ * at the dongle->USB hop: ep1_arms counts every boot-keyboard report armed onto
+ * EP1; ep1_completions counts host IN completions (the delivery signal);
+ * ep1_overwrites counts a report armed while the previous one had NOT completed
+ * -- the proven single-slot overwrite. arms - completions - overwrites that stay
+ * queued is the loss. All u32; wrap is irrelevant over a bench run. */
+static volatile uint32_t usb_ep1_arms;
+static volatile uint32_t usb_ep1_completions;
+static volatile uint32_t usb_ep1_overwrites;  /* queued transitions replaced by full-queue coalescing */
+static volatile uint8_t  usb_ep1_armed;   /* set on arm, cleared on IN completion / reset */
+#if DONGLE_DELIVERY_COUNTERS
+static volatile uint16_t usb_ep1_arms_down;        /* EP1 armed with a non-zero (key-down) report */
+static volatile uint16_t usb_ep1_completions_down; /* IN completed while the armed report was a key-down */
+static volatile uint8_t  usb_ep1_down_inflight;    /* last-armed report is non-zero; awaiting its IN completion */
+#endif
 
 /* USB remote-wakeup feature. Armed/disarmed by the host via
  * SET/CLEAR_FEATURE(DEVICE_REMOTE_WAKEUP) and reported in GET_STATUS(device).
@@ -115,6 +138,20 @@ static volatile uint8_t usb_wake_inflight;
  * current key state at wake time) or, if none, an all-keys-up flush that closes
  * the stuck-key edge case. */
 static volatile uint8_t usb_resume_clear_kbd;
+/* Set with it on the same edge, one per change-driven endpoint without a
+ * stash: EP2 (mouse) and EP3 (consumer), and EP1 (keyboard) for its stash /
+ * keys-up delivery. USB_PollEP6 sends the reconciliation report for each flag
+ * still set; a FRESH report on that endpoint (one that is actually armed)
+ * clears its flag under the sender's IRQ mask first, because a fresh report
+ * carries the device's whole current state and is the better reconciliation.
+ * The check and the arm happen under one mask in usb_reconcile_keyboard /
+ * usb_arm_mouse / usb_arm_composite, so a fresh press can neither be
+ * overwritten by the flush nor released by it (codex and CodeRabbit reviews of
+ * the suspend fix). For EP1 this also means a report that arrived after resume
+ * outranks the stash captured during suspend: newest wins. */
+static volatile uint8_t usb_reconcile_ep1;
+static volatile uint8_t usb_reconcile_ep2;
+static volatile uint8_t usb_reconcile_ep3;
 
 /* One-slot stash of the newest boot-keyboard report that arrived over RF while
  * the host was suspended and remote-wakeup was armed. HID reports are
@@ -122,9 +159,48 @@ static volatile uint8_t usb_resume_clear_kbd;
  * never re-sent after resume — without this the waking keystroke is lost. The
  * resume path delivers this instead of the all-keys-up flush; newest-wins means
  * a key released before the host actually resumes is stored as all-up, so no
- * key sticks. Keyboard (EP1) only; mouse/consumer stay drop-on-suspend. */
-static volatile uint8_t usb_kbd_pending[8];
-static volatile uint8_t usb_kbd_pending_valid;
+ * key sticks. Keyboard (EP1) only; mouse/consumer stay drop-on-suspend: like
+ * EP1, a report armed when SOF stops is NAKed by USB_SuspendResume so it
+ * cannot replay, and on resume USB_PollEP6 sends all-up / no-key reports on
+ * EP2/EP3 so nothing the host last saw stays pressed. */
+/* ---- EP1 boot-keyboard queue -------------------------------------------
+ * EP1 used to hold exactly ONE report: any new report overwrote the previous one
+ * whenever the host had not yet collected it, destroying a real transition.
+ * Measured on the bench once the module stopped losing the key upstream: with a
+ * tap's down and up drained on consecutive RF polls (~0.87 ms apart) the up
+ * replaced the down inside the host's 1 ms poll interval, losing 4 of 21
+ * key-downs (arms_down 21, completions_down 17, overwrites 4).
+ * Reports are now held in queue-owned storage with exactly ONE transfer in
+ * flight; the head is retired only by its own IN completion. This also replaces
+ * the single-slot suspend stash -- suspend-time arrivals simply enter the queue,
+ * so a whole tap survives a suspend instead of the up clobbering the down.
+ * Capacity is per-chip: CH570 links with only ~32 B above its stack floor. */
+#ifndef DONGLE_EP1_QUEUE_SLOTS
+#define DONGLE_EP1_QUEUE_SLOTS 4u
+#endif
+#if DONGLE_EP1_QUEUE_SLOTS < 2u
+#error "EP1 queue needs >= 2 slots: the overflow path coalesces onto the newest entry, which must never be the in-flight head"
+#endif
+static uint8_t          usb_kbd_q[DONGLE_EP1_QUEUE_SLOTS][8];
+static volatile uint8_t usb_kbd_q_head;    /* retired by the IN completion */
+static volatile uint8_t usb_kbd_q_tail;    /* advanced by the enqueue */
+static volatile uint8_t usb_kbd_q_owned;   /* a transfer is in flight and owns the head */
+static void usb_ep1_service(void);   /* the one place EP1 is armed (defined below) */
+
+/* Cancel the in-flight EP1 transfer WITHOUT retiring its entry. The report was
+ * never collected, so it stays at the head and usb_ep1_service() re-arms it once
+ * the endpoint is usable again. Required EVERYWHERE we force EP1 to NAK: no
+ * completion can arrive for a NAKed endpoint, so leaving ownership set wedges the
+ * queue permanently (codex). If the hardware does complete a transfer we already
+ * cancelled, the completion handler will NOT retire it -- retirement is gated on
+ * the ownership flag this clears -- so the entry is simply re-armed and delivered
+ * again. That is safe: these are absolute key-state reports, so a repeat conveys
+ * the same state and produces no extra key transition. */
+static void usb_ep1_cancel_owned(void)
+{
+    usb_kbd_q_owned = 0;
+    usb_ep1_armed   = 0;
+}
 
 /* IAP EP6-OUT packets are deferred out of the USB ISR. The ISR latches the
  * packet length, NAKs EP6 for flow control, and USB_PollEP6() (called from the
@@ -146,6 +222,34 @@ static uint8_t usb_effective_suspended(void)
 {
     return (uint8_t)((usb_suspended || (R8_USB_MIS_ST & RB_UMS_SUSPEND)) ? 1u : 0u);
 }
+
+#if DONGLE_PM_IDLE
+/* CH592 main-loop idle (ch592/src/pm_ch592.c) inputs. usb_last_setup_tsys is
+ * hal_now() at the last SETUP - the start of the EP0-quiet window during which
+ * the idle never takes the IRQ mask (CSR-0x800 churn is an enumeration hazard
+ * on this silicon). usb_rw_arm_count counts SET_FEATURE(DEVICE_REMOTE_WAKEUP)
+ * for the page-6 suspend/resume oracle. */
+volatile uint32_t usb_last_setup_tsys;
+volatile uint16_t usb_rw_arm_count;
+
+/* One SRAM-resident snapshot of every idle-admission input, so nothing the
+ * idle path evaluates under the IRQ mask fetches flash (USB_IsConfigured,
+ * USB_IsSuspended and USB_GetLEDState are XIP). Taken unmasked before the
+ * quiet passes and again under the mask, where no USB ISR can move it. */
+DONGLE_HIGHCODE_RF_HOT
+uint8_t USB_PmSnapshot(void)
+{
+    uint8_t s = 0u;
+
+    if (usb_config != 0u)                                   s |= USB_PM_CONFIGURED;
+    if (usb_suspended || (R8_USB_MIS_ST & RB_UMS_SUSPEND))  s |= USB_PM_SUSPENDED;
+    if (iap_pkt_pending || usb_resume_clear_kbd)            s |= USB_PM_PENDING;
+    if (usb_wake_request && !usb_wake_inflight)             s |= USB_PM_WAKE_REQ;
+    if (usb_remote_wakeup)                                  s |= USB_PM_RW_ARMED;
+    s |= (uint8_t)((usb_led_state & 7u) << USB_PM_LED_SHIFT);
+    return s;
+}
+#endif /* DONGLE_PM_IDLE */
 
 /* ---------- HID report descriptor lookup ---------- */
 
@@ -331,6 +435,11 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                 /* SET/CLEAR_FEATURE(DEVICE_REMOTE_WAKEUP) — the host arms or
                  * disarms our ability to wake it. bRequest 0x03=SET, 0x01=CLEAR. */
                 usb_remote_wakeup = (uint8_t)(bRequest == 0x03);
+#if DONGLE_PM_IDLE
+                if (bRequest == 0x03) {
+                    usb_rw_arm_count++;   /* page 6: the host armed remote wake */
+                }
+#endif
 #endif
             } else if ((bmReqType & 0x1F) == 0x02 && wValue == 0x0000 && bRequest == 0x01) {
                 /* CLEAR_FEATURE(ENDPOINT_HALT). wIndex bit 7 selects the
@@ -348,7 +457,14 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                 uint8_t ep = wIndex & 0x0F;
                 if (wIndex & 0x80u) {
                     switch (ep) {
-                    case 1: R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 1:
+                        R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK;
+                        usb_ep1_cancel_owned();   /* NAK + DATA0 restart: nothing will complete */
+                        /* Re-arm immediately: unlike suspend, the endpoint is usable
+                         * again right now, and without this a queued report waits for
+                         * the next arrival that may never come. */
+                        usb_ep1_service();
+                        break;
                     case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
                     case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
                     case 5: R8_UEP5_CTRL = (R8_UEP5_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
@@ -356,7 +472,13 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
                     default: err = 0xFF; break;
                     }
                 } else if (ep == 6u) {
-                    R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES)) | UEP_R_RES_ACK;
+                    /* DATA0 restart either way, but re-open admission only when
+                     * no command is latched: re-ACKing under a pending command
+                     * lets the next OUT overwrite EP6_Buf before USB_PollEP6 has
+                     * run the first one, under the first one's length. The poll
+                     * re-ACKs when it finishes. */
+                    R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES))
+                                   | (iap_pkt_pending ? UEP_R_RES_NAK : UEP_R_RES_ACK);
                 } else {
                     err = 0xFF;
                 }
@@ -511,6 +633,23 @@ static __attribute__((noinline)) void USB_BusReset(void)
 {
     R8_USB_DEV_AD = 0;
     usb_config = 0;
+    usb_ep1_armed = 0;
+    /* The host has dropped all key state and will re-enumerate, so a queued
+     * backlog describes a session that no longer exists; ownership is released
+     * because no in-flight transfer survives a reset. Nothing can be stuck: the
+     * host starts with no keys held. */
+    usb_kbd_q_owned = 0;
+    usb_kbd_q_head  = 0;
+    usb_kbd_q_tail  = 0;
+    /* Pre-existing: the resume flush request is only consumed while configured
+     * (USB_PollEP6), so a reset left it set and USB_HasPendingWork()/
+     * USB_PmSnapshot() kept reporting pending USB work until reconfiguration --
+     * holding the PM path out of idle. The flush it asks for is moot now: the
+     * queue above is empty and the host re-enumerates with no keys held. */
+    usb_resume_clear_kbd = 0;
+#if DONGLE_DELIVERY_COUNTERS
+    usb_ep1_down_inflight = 0;
+#endif
     usb_dev_addr = 0;
 
     /* Cancel the deferred IAP state BEFORE the EP6 re-ACK below (2026-08-16
@@ -540,7 +679,9 @@ static __attribute__((noinline)) void USB_BusReset(void)
     usb_remote_wakeup = 0; /* USB spec: feature defaults off after reset */
     usb_wake_request = 0;
     usb_wake_inflight = 0;
-    usb_kbd_pending_valid = 0;  /* drop any stashed wake report across reset */
+    usb_reconcile_ep1 = 0;
+    usb_reconcile_ep2 = 0;
+    usb_reconcile_ep3 = 0;
 }
 
 DONGLE_HIGHCODE_COLD
@@ -552,27 +693,34 @@ static __attribute__((noinline)) void USB_SuspendResume(void)
      * HID IN reports (see USB_Send*). */
     if (R8_USB_MIS_ST & RB_UMS_SUSPEND) {
         usb_suspended = 1;   /* host stopped SOF -- bus is idle */
+        usb_suspend_episodes++;   /* diag: correlate RF loss with host sleep */
         /* NAK any HID report that was armed (T_RES=ACK) but not polled before
-         * SOF stopped, so the host's first IN poll on resume can't return it
-         * as a stale event (CODEREVIEW F12). ALL THREE HID IN endpoints, not
-         * just the keyboard (TODO.md; 2026-08-16 review, finding 9): RF HID is
-         * change-driven, so a mouse/consumer PRESS could sit armed on EP2/EP3
-         * across the suspend while its RELEASE -- arriving during suspend --
-         * was correctly dropped by the usb_hid_in_ready gate; the host then
-         * resumed into a stuck button or held media key. EP5 is inert (nothing
-         * ever arms it) and EP6 is deliberately outside the HID suspend
-         * policy. Mask only T_RES so the data toggle is preserved: the host
-         * never received the NAK'd report, so its expected toggle is unchanged
-         * and the resume re-arm continues the sequence. */
+         * SOF stopped, so the host's first IN poll on resume can't return it as
+         * a stale event: for EP1 ahead of the USB_PollEP6 keys-up flush
+         * (CODEREVIEW F12); for EP2 (mouse) and EP3 (consumer) because their
+         * reports are change-driven, so a press armed at suspend whose
+         * release arrived (and was dropped) during suspend would otherwise
+         * resume as a stuck button or held media key. The mirror case - a
+         * RELEASE armed here and NAKed - is what the all-up flush in
+         * USB_PollEP6 covers on resume.
+         * Mask only T_RES so the data toggle is preserved: the host never
+         * received the NAK'd report, so its expected toggle is unchanged and
+         * the next arm continues the sequence. EP5 is never armed; EP6 (IAP)
+         * is outside the HID suspend policy on purpose. */
         R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
+        usb_ep1_cancel_owned();   /* the NAKed transfer can never complete */
         R8_UEP2_CTRL = (R8_UEP2_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
         R8_UEP3_CTRL = (R8_UEP3_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
     } else {
         /* Resume signalling -- bus active again. On a real suspend->resume
          * edge, ask the main loop to flush an all-keys-up report (see
          * usb_resume_clear_kbd). */
-        if (usb_suspended)
+        if (usb_suspended) {
             usb_resume_clear_kbd = 1;
+            usb_reconcile_ep1 = 1;
+            usb_reconcile_ep2 = 1;
+            usb_reconcile_ep3 = 1;
+        }
         usb_suspended = 0;
         usb_wake_request = 0;   /* host is up -- the wake request is done */
         usb_wake_inflight = 0;  /* end of the wake episode; allow re-arm */
@@ -595,6 +743,9 @@ void USB_IRQHandler(void)
          * and enumeration never starts. Gate on SETUP_ACT instead — the
          * canonical WCH CH59x pattern. */
         if (raw_st & RB_UIS_SETUP_ACT) {
+#if DONGLE_PM_IDLE
+            usb_last_setup_tsys = hal_now();   /* EP0-quiet window starts here */
+#endif
             R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_ACK | UEP_T_RES_NAK;
             USB_EP0_Setup();
         } else
@@ -623,6 +774,20 @@ void USB_IRQHandler(void)
         case UIS_TOKEN_IN | 1:
             R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_NAK;
             R8_UEP1_CTRL ^= RB_UEP_T_TOG;
+            usb_ep1_armed = 0;             /* host consumed the report */
+            usb_ep1_completions++;
+#if DONGLE_DELIVERY_COUNTERS
+            if (usb_ep1_down_inflight) { usb_ep1_completions_down++; usb_ep1_down_inflight = 0; }
+#endif
+            /* This completion belongs to the entry that was in flight: retire
+             * exactly that one, then arm the next queued state. */
+            if (usb_kbd_q_owned) {
+                usb_kbd_q_owned = 0;
+                if (usb_kbd_q_head != usb_kbd_q_tail) {
+                    usb_kbd_q_head++;
+                }
+            }
+            usb_ep1_service();
             break;
 
         /* ---- EP2 IN (boot mouse) ---- */
@@ -664,32 +829,28 @@ void USB_IRQHandler(void)
                 if (rx_len > 64u) rx_len = 64u;
                 iap_pkt_len = rx_len;
                 iap_pkt_pending = 1;
-                /* Latched: NAK until USB_PollEP6 has run the command and
-                 * re-ACK'd -- the flow control described above. */
+                /* Latched: NAK until USB_PollEP6 has run it and re-ACKs. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else if (iap_pkt_pending) {
-                /* An OUT arrived while a prior command is still latched (a
-                 * pipelining host). Stay NAK'd: USB_PollEP6 runs
-                 * ep6_out_cb(EP6_Buf, iap_pkt_len) and only THEN clears the
-                 * flag and re-ACKs, so re-ACKing here lets the SIE drop the next
-                 * packet into EP6_Buf while the callback is still reading it --
-                 * a command executed over another command's bytes, with
-                 * iap_pkt_len still describing the earlier one.
-                 *
-                 * This does NOT re-introduce review finding 8 (endpoint dead
-                 * forever). That happened because the sole re-ACK sits behind
-                 * iap_pkt_pending in USB_PollEP6 and the old path NAK'd without
-                 * ever setting it. Here the flag IS set, so USB_PollEP6 is
-                 * guaranteed to re-ACK once it has consumed the command. */
+                /* Defensive: an OUT completed while a command is pending. The
+                 * SIE's auto-busy (RB_UC_INT_BUSY) NAKs until UIF_TRANSFER is
+                 * cleared below, and the explicit NAK then holds until the
+                 * poll re-ACKs, so ordinary traffic cannot get here; only the
+                 * bus-reset path, which re-ACKs EP6 OUT without cancelling a
+                 * pending command, can admit one, and its DMA has then already
+                 * overwritten EP6_Buf under the old iap_pkt_len (a pre-existing
+                 * exposure, codex). Keep the NAK. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else {
-                /* Toggle mismatch with nothing latched: TOG_OK clear means the
-                 * SIE already ACKed a retransmission we must drop. Keep the
-                 * endpoint live -- nothing else would re-ACK it, which is
-                 * exactly finding 8 -- and let the host retry; IAP is strict
-                 * request/response. The toggle is evaluated from raw_st, the
-                 * sample this dispatch already took: re-reading R8_USB_INT_ST
-                 * here could see a LATER event's flags. */
+                /* Toggle mismatch with nothing pending: the host retried a
+                 * packet whose ACK it lost after we had already taken and run
+                 * it (USB 2.0 8.6.4), or a bus error. The duplicate is
+                 * dropped without advancing the toggle and the endpoint must
+                 * stay live. Before this branch the unconditional NAK left EP6
+                 * OUT NAKed with nothing to re-ACK it, so the vendor interface
+                 * was wedged until a bus reset or a power cycle (TODO defect).
+                 * The toggle is judged from the same status sample as the
+                 * token, not a re-read. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
             }
             break;
@@ -894,29 +1055,140 @@ void USB_ServiceRemoteWake(void)
     }
 }
 
+/* All queue helpers run with IRQs already masked by the caller. */
+static uint8_t usb_kbd_q_count(void)
+{
+    return (uint8_t)(usb_kbd_q_tail - usb_kbd_q_head);
+}
+
+/* Queue one complete keyboard state. Deduped ONLY against the newest queued
+ * state, so down -> up -> same-down is preserved; with the queue empty we do not
+ * dedup at all (re-sending a state the host already has is idempotent, and
+ * keeping a last-completed copy costs SRAM CH570 does not have). A full queue
+ * coalesces onto the newest entry rather than dropping the report: the source
+ * only sends changes, so a discarded all-keys-up would strand a key forever. */
+static void usb_kbd_q_push(const uint8_t report[8])
+{
+    uint8_t n = usb_kbd_q_count();
+    uint8_t *slot;
+
+    if (n != 0u) {
+        const uint8_t *newest = usb_kbd_q[(uint8_t)(usb_kbd_q_tail - 1u) % DONGLE_EP1_QUEUE_SLOTS];
+        uint8_t same = 1u;
+        for (int i = 0; i < 8; i++) {
+            if (newest[i] != report[i]) { same = 0u; break; }
+        }
+        if (same) {
+            return;
+        }
+    }
+    if (n < DONGLE_EP1_QUEUE_SLOTS) {
+        slot = usb_kbd_q[usb_kbd_q_tail % DONGLE_EP1_QUEUE_SLOTS];
+        for (int i = 0; i < 8; i++) {
+            slot[i] = report[i];
+        }
+        usb_kbd_q_tail++;
+    } else {
+        /* Never the in-flight head while full (>= 2 slots, checked above). */
+        slot = usb_kbd_q[(uint8_t)(usb_kbd_q_tail - 1u) % DONGLE_EP1_QUEUE_SLOTS];
+        for (int i = 0; i < 8; i++) {
+            slot[i] = report[i];
+        }
+        /* Surfaced through the existing public overwrite metric: with the queue
+         * in place this is the only path that still discards a transition. */
+        usb_ep1_overwrites++;
+    }
+}
+
+/* The ONE place EP1 is armed. Arms the head only when no transfer is in flight,
+ * so a queued report can never overwrite one the host has not collected. */
+static void usb_ep1_service(void)
+{
+    const uint8_t *e;
+
+    if (usb_kbd_q_owned) {
+        return;                       /* the head is in flight; it must complete first */
+    }
+    if (usb_kbd_q_head == usb_kbd_q_tail) {
+        return;                       /* nothing queued */
+    }
+    if (usb_config == 0u || usb_effective_suspended()) {
+        return;                       /* host is not collecting; the queue retains it */
+    }
+    e = usb_kbd_q[usb_kbd_q_head % DONGLE_EP1_QUEUE_SLOTS];
+    for (int i = 0; i < 8; i++) {
+        EP1_IN()[i] = e[i];
+    }
+    R8_UEP1_T_LEN = 8;
+    usb_kbd_q_owned = 1;
+    usb_ep1_armed = 1;
+    usb_ep1_arms++;
+#if DONGLE_DELIVERY_COUNTERS
+    {   uint8_t nz = e[0]|e[1]|e[2]|e[3]|e[4]|e[5]|e[6]|e[7];
+        usb_ep1_down_inflight = nz ? 1u : 0u;
+        if (nz) usb_ep1_arms_down++; }
+#endif
+    R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
+}
+
+/* A fresh boot-keyboard report. Once it is actually armed it clears the
+ * resume reconciliation flag (it carries the whole current key state); the
+ * suspend-time stash below does not, since nothing reached the host. */
 USB_HID_SEND_HIGHCODE
 void USB_SendKeyboard(const uint8_t report[8])
 {
     uint32_t irq_state = __risc_v_disable_irq();
-    if (!usb_hid_in_ready()) {
-        /* Blocked because the host is suspended and we're waking it: stash the
-         * newest boot-keyboard report so the resume path delivers the current
-         * key state (the waking keystroke) rather than an all-keys-up flush.
-         * The condition is the exact suspend+armed case (not an unconfigured
-         * drop); the stash runs inside the same IRQ-masked section, so it is
-         * atomic vs the resume consumer in USB_PollEP6. */
-        if (usb_config != 0u && usb_remote_wakeup && usb_effective_suspended()) {
-            for (int i = 0; i < 8; i++)
-                usb_kbd_pending[i] = report[i];
-            usb_kbd_pending_valid = 1;
-        }
+
+    /* Keeps the remote-wake side effect in one place: a report offered while the
+     * host is suspended and has armed remote wakeup asks the main loop to drive
+     * the K-state. Remote-wakeup permission governs SIGNALLING only -- queue
+     * admission below is unconditional, so the report itself is never lost. */
+    (void)usb_hid_in_ready();
+
+    if (usb_config != 0u) {
+        usb_kbd_q_push(report);
+        /* A queued report carries the whole current key state, so the resume
+         * all-keys-up flush must not also fire. */
+        usb_reconcile_ep1 = 0;
+    }
+    usb_ep1_service();
+    (void)__risc_v_enable_irq(irq_state);
+}
+
+/* EP1 resume delivery: the key state stashed at wake time (the waking
+ * keystroke, or all-up if it was released before resume), else keys-up so a
+ * pre-suspend held key cannot stay logically stuck. ONE IRQ mask covers the
+ * whole decision - the fresh-report gate, the suspend check, the stash
+ * consumption and the arm - because the pieces interact (codex review):
+ *  - a fresh report armed since the resume edge (usb_reconcile_ep1 clear)
+ *    carries the whole key state and outranks the stash: deliver nothing, and
+ *    LEAVE the stash alone - if the bus has suspended again meanwhile, that
+ *    stash belongs to the new episode and its resume edge (which re-arms the
+ *    flag and usb_resume_clear_kbd) delivers it;
+ *  - the bus already suspended again: same deferral, nothing consumed, and no
+ *    call into usb_hid_in_ready, whose side effect would request a remote
+ *    wake for a flush that is not a keystroke;
+ *  - otherwise consume the stash (or take keys-up), clear the flag and arm.
+ * Called from the main loop only. */
+static void usb_reconcile_keyboard(void)
+{
+    static const uint8_t keys_up[8] = { 0 };
+    uint32_t irq_state = __risc_v_disable_irq();
+
+    if (!usb_reconcile_ep1 || usb_config == 0u || usb_effective_suspended()) {
         (void)__risc_v_enable_irq(irq_state);
         return;
     }
-    for (int i = 0; i < 8; i++)
-        EP1_IN()[i] = report[i];
-    R8_UEP1_T_LEN = 8;
-    R8_UEP1_CTRL = (R8_UEP1_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
+    usb_reconcile_ep1 = 0;
+    /* The queue IS the retained history across the suspend, and draining it
+     * delivers the real transitions in order. Only when nothing was retained do
+     * we synthesise a release, so a key held before the suspend cannot stay
+     * logically stuck. A fresh report that arrived since the resume edge has
+     * already cleared usb_reconcile_ep1, so it is never overridden here. */
+    if (usb_kbd_q_head == usb_kbd_q_tail) {
+        usb_kbd_q_push(keys_up);
+    }
+    usb_ep1_service();
     (void)__risc_v_enable_irq(irq_state);
 }
 
@@ -932,19 +1204,44 @@ void USB_SendKeyboard(const uint8_t report[8])
  * USB_SendKeyboard stash writer and the USB_PollEP6 resume consumer. */
 void USB_ClearPendingKeyboard(void)
 {
+    static const uint8_t keys_up[8] = { 0 };
     uint32_t irq_state = __risc_v_disable_irq();
-    usb_kbd_pending_valid = 0;
+    /* Link loss. Do NOT discard the queue -- those are real transitions the host
+     * still needs. Instead append the release through the queue so it lands in
+     * order behind them. This must happen even while suspended: the RF layer
+     * skips its own all-keys-up in that state, which would otherwise resume with
+     * a key-down and no key-up (a stuck key). Deliberately does not go through
+     * USB_SendKeyboard, so losing the link never requests a remote wake. */
+    if (usb_config != 0u) {
+        usb_kbd_q_push(keys_up);
+    }
+    usb_ep1_service();
     (void)__risc_v_enable_irq(irq_state);
 }
 
+/* Arm EP2 with a 5-byte mouse report. reconcile=0 is a fresh report: it
+ * clears the resume reconciliation flag, since it carries the device's whole
+ * current state. reconcile=1 is the resume all-up flush: it is sent only if
+ * no fresh report has cleared the flag since the resume edge. One IRQ mask
+ * covers the flag decision and the arm, so the two orderings cannot cross. */
 USB_HID_SEND_HIGHCODE
-void USB_SendMouse(const uint8_t report[5])
+static void usb_arm_mouse(const uint8_t report[5], uint8_t reconcile)
 {
     uint32_t irq_state = __risc_v_disable_irq();
-    if (!usb_hid_in_ready()) {
+    if (reconcile) {
+        /* The flush: skipped if a fresh report already reconciled, deferred
+         * (flag kept for the next resume edge) if the bus suspended again or
+         * is unconfigured - checked directly, not through usb_hid_in_ready,
+         * whose side effect would request a remote wake for a flush. */
+        if (!usb_reconcile_ep2 || usb_config == 0u || usb_effective_suspended()) {
+            (void)__risc_v_enable_irq(irq_state);
+            return;
+        }
+    } else if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
-        return;
+        return;                     /* dropped: the flag stays, nothing reached the host */
     }
+    usb_reconcile_ep2 = 0;          /* only a report that is actually armed reconciles */
     for (int i = 0; i < 5; i++)
         EP2_IN()[i] = report[i];
     R8_UEP2_T_LEN = 5;
@@ -953,19 +1250,42 @@ void USB_SendMouse(const uint8_t report[5])
 }
 
 USB_HID_SEND_HIGHCODE
-void USB_SendComposite(const uint8_t *report, uint8_t len)
+void USB_SendMouse(const uint8_t report[5])
+{
+    usb_arm_mouse(report, 0u);
+}
+
+/* EP3 twin of usb_arm_mouse. Only a consumer report (report ID 1) counts as
+ * fresh reconciliation of the consumer state; the other IDs the composite
+ * interface declares (2 sysctl, 3 NKRO, usb_device.h) leave the flag alone. */
+USB_HID_SEND_HIGHCODE
+static void usb_arm_composite(const uint8_t *report, uint8_t len, uint8_t reconcile)
 {
     uint32_t irq_state = __risc_v_disable_irq();
-    if (!usb_hid_in_ready()) {
+    if (reconcile) {
+        /* Same three-way gate as usb_arm_mouse. */
+        if (!usb_reconcile_ep3 || usb_config == 0u || usb_effective_suspended()) {
+            (void)__risc_v_enable_irq(irq_state);
+            return;
+        }
+    } else if (!usb_hid_in_ready()) {
         (void)__risc_v_enable_irq(irq_state);
-        return;
+        return;                     /* dropped: the flag stays, nothing reached the host */
     }
+    if (len != 0u && report[0] == 1u)
+        usb_reconcile_ep3 = 0;      /* only a consumer report that is actually armed reconciles */
     if (len > 16) len = 16;
     for (int i = 0; i < len; i++)
         EP3_IN()[i] = report[i];
     R8_UEP3_T_LEN = len;
     R8_UEP3_CTRL = (R8_UEP3_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
+}
+
+USB_HID_SEND_HIGHCODE
+void USB_SendComposite(const uint8_t *report, uint8_t len)
+{
+    usb_arm_composite(report, len, 0u);
 }
 
 void USB_SendEP6(const uint8_t *data, uint8_t len)
@@ -1018,29 +1338,42 @@ void USB_PollEP6(void)
      * pre-SET_CONFIGURATION enumeration would otherwise call USB_SendKeyboard
      * with usb_config==0, doing pointless IRQ-masked work in the enum window
      * (harmless only because usb_hid_in_ready re-drops it). A bus reset — the
-     * only thing that clears usb_config — also clears usb_kbd_pending_valid, so
+     * only thing that clears usb_config — also empties the EP1 queue, so
      * have_pending implies configured; the gate never drops a real flush. */
     if (usb_resume_clear_kbd && usb_config != 0u) {
         usb_resume_clear_kbd = 0;
-        uint8_t rep[8];
-        uint8_t have_pending;
-        uint32_t irq = __risc_v_disable_irq();
-        have_pending = usb_kbd_pending_valid;
-        if (have_pending) {
-            for (int i = 0; i < 8; i++)
-                rep[i] = usb_kbd_pending[i];
-            usb_kbd_pending_valid = 0;
-        }
-        (void)__risc_v_enable_irq(irq);
-        if (have_pending) {
-            /* Deliver the key state captured at wake time (the waking
-             * keystroke, or all-up if the key was already released). */
-            USB_SendKeyboard(rep);
-        } else {
-            /* No report was dropped during suspend — flush all-keys-up so a
-             * pre-suspend held key can't stay logically stuck. */
-            static const uint8_t keys_up[8] = { 0 };
-            USB_SendKeyboard(keys_up);
+        /* The keyboard: the stash captured at wake time or keys-up, gated on
+         * no fresh report since the resume edge and deferred if the bus has
+         * suspended again (usb_reconcile_keyboard). */
+        usb_reconcile_keyboard();
+        /* The same reconciliation for the change-driven mouse (EP2) and
+         * consumer (EP3) reports, which have no stash: a report armed when
+         * SOF stopped was NAKed by USB_SuspendResume and anything that
+         * arrived during suspend was dropped, so the host's last-seen state
+         * for either can be a press whose release it will never get (a
+         * stuck button or held media key); Linux also keeps the last
+         * consumer report and would suppress the next identical press. All
+         * buttons up with zero motion, and consumer usage 0 under report ID
+         * 1 (the composite interface's consumer report, usb_device.h), put
+         * the host back to the released state; the next real report
+         * re-asserts whatever is still held. Each flush is skipped if a
+         * fresh report on that endpoint has already gone out since the
+         * resume edge (usb_reconcile_ep2/ep3): that report IS the current
+         * state, and flushing after it would drop or release a real press
+         * that landed in the window between the resume ISR and this loop.
+         * Residual, stated: in either ordering within the resume window
+         * (a fresh report cancelling the flush before it arms, or replacing
+         * it before the host polls it) the host never receives the no-key
+         * report. Harmless for the mouse (absolute button state); for the
+         * consumer, a host that compares against its retained report (Linux)
+         * would then suppress a press of the SAME usage it last saw before
+         * suspend, until any other consumer report arrives. Same readiness
+         * gate as any report. */
+        {
+            static const uint8_t mouse_up[5] = { 0, 0, 0, 0, 0 };
+            static const uint8_t consumer_none[3] = { 1u, 0, 0 };
+            usb_arm_mouse(mouse_up, 1u);
+            usb_arm_composite(consumer_none, sizeof(consumer_none), 1u);
         }
     }
 
@@ -1076,6 +1409,15 @@ uint8_t USB_IsSuspended(void)
 {
     return usb_effective_suspended();
 }
+
+uint16_t USB_SuspendEpisodes(void)
+{
+    return usb_suspend_episodes;
+}
+
+uint32_t USB_Ep1Arms(void)        { return usb_ep1_arms; }
+uint32_t USB_Ep1Completions(void) { return usb_ep1_completions; }
+uint32_t USB_Ep1Overwrites(void)  { return usb_ep1_overwrites; }
 
 uint8_t USB_GetLEDState(void)
 {

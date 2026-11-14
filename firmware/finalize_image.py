@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Finalize an ELF's ODG2 section and emit a self-consistent ELF/BIN pair."""
 
 from __future__ import annotations

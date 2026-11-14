@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Canonical AES test vectors and differential parameters.
 
 Single source of truth for both the host suite (`tests/test_aes_*.py`) and the

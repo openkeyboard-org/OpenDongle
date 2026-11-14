@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * Shared RF-task public API + event vocabulary (CH59x-family shape; P5).
  *
  * This is the merged rf_task.c's contract, shared by all three chips (CH592,
@@ -11,6 +12,7 @@
 
 #include <stdint.h>
 #include "dongle_status.h"
+#include "dongle_target.h"   /* a port may override RF_DIAG_PAGE_COUNT */
 
 /* Deferred-event bits (hal_dispatch.h vocabulary; on CH59x these are TMOS
  * task events — SYS_EVENT_MSG remains 0x8000). */
@@ -32,8 +34,11 @@
 #define RF_EVT_BOOT_WINDOW       0x0400  /* boot reconnect/pair listen-window timer */
 #define RF_EVT_PERSIST_BOND      0x0800  /* deferred DataFlash bond write (task ctx, out of the radio ISR) */
 #define RF_EVT_QUIESCE           0x1000  /* pre-reboot: shut the radio in executor context, stop re-arming */
-#define RF_EVT_CRYPT_RX          0x2000  /* task: verify+decrypt queued encrypted RX frames (rf_crypt) */
-#define RF_EVT_CRYPT_SESSION     0x4000  /* task: mint a fresh session nonce + arm the announce on connect */
+#define RF_EVT_RX_WIN_CLOSE      0x2000  /* Tier 2: close a receiver window (shut) unless a beacon was accepted */
+#define RF_EVT_WAKE              0x8000  /* link encryption only: run the executor for latched crypto work
+                                          * (rf_task.c rf_crypt_work_*). The same bit as TMOS's SYS_EVENT_MSG,
+                                          * which this task otherwise only drains; no handler of its own */
+#define RF_EVT_RX_WIN_PHASE      0x4000  /* Tier 2: the once-per-second phase-locked window open */
 
 /* Connection states */
 #define RF_STATE_IDLE        0
@@ -48,6 +53,11 @@ typedef rf_hid_callback_t rf_hid_cb_t;
 
 /* Initialize the RF 2.4G receiver TMOS task */
 void RF_TaskInit(void);
+#if DONGLE_RF_CRYPT
+/* Re-post the executor wake while latched crypto work is outstanding; call
+ * once per main-loop pass ahead of any idle decision. See rf_task.c. */
+uint8_t RF_CryptWorkKick(void);
+#endif
 
 /* Register a callback for received HID reports */
 void RF_SetHIDCallback(rf_hid_cb_t cb);
@@ -108,5 +118,49 @@ uint8_t RF_GetConnectionStatus(void);
 
 /* Effective on-air identity, including any persistent bond override. */
 const uint8_t *RF_GetDongleMac(void);
+
+/* IAP 0x92 RF diagnostics: fill one read-only page (RF_DIAG_PAGE_LEN bytes) of
+ * runtime state and wrapping counters. Returns the bytes written, 0 for an
+ * unknown page or a too-small buffer. Page layouts are documented at
+ * RF_DiagFill in rf_task.c and mirrored by tools/src/rfdiag.rs. */
+#define RF_DIAG_PAGE_VERSION 1u
+#define RF_DIAG_PAGE_LEN     62u
+/* Pages 0-4 are common; a port may add pages (CH592 PM_IDLE=1: 5 and 6, see
+ * dongle_target.h). Compatibility runs one way: a tool that knows more pages
+ * than the firmware skips the ones RF_DiagFill answers with length 0
+ * (tools/src/rfdiag.rs REQUIRED_PAGES = 4); an older tool never requests
+ * them. */
+#ifndef RF_DIAG_PAGE_COUNT
+#define RF_DIAG_PAGE_COUNT   5u
+#endif
+uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max);
+#if DONGLE_RX_WINDOW
+uint8_t RF_WinRadioOff(void);   /* windowed and between windows: the radio is shut */
+#endif
+
+#if DONGLE_PM_IDLE
+/* Idle-admission class of the RF task for the CH592 main-loop idle
+ * (pm_ch592.c): one byte of state bits read under the IRQ mask without any
+ * XIP call. 0 means the terminal PAIRING camp (bonded reconnect search or the
+ * fresh-pair listen) with nothing else in flight. */
+#define RF_IDLE_CLASS_CONNECTED 0x01u   /* rf_state == CONNECTED            */
+#define RF_IDLE_CLASS_EV10      0x02u   /* supervision EV10 reacquire scan   */
+#define RF_IDLE_CLASS_BOOTWIN   0x04u   /* boot reconnect/pair window timer  */
+#define RF_IDLE_CLASS_BURST     0x08u   /* fresh-pair ACK burst in flight    */
+#define RF_IDLE_CLASS_CONFIRM   0x10u   /* confirm-before-persist pending    */
+#define RF_IDLE_CLASS_QUIESCED  0x20u   /* IAP reboot quiesce done           */
+#define RF_IDLE_CLASS_IDLE      0x40u   /* rf_state == IDLE                  */
+#define RF_IDLE_CLASS_PERSIST   0x80u   /* bond persist posted, not written  */
+uint8_t RF_IdleClass(void);
+#endif
+
+/* IAP 0x94 RF intervention ladder (armed, task context, CH570 only): 1 =
+ * re-arm RX from task context (heals a lost radio completion event), 2 = shut
+ * + vendor re-init + re-arm (heals a PHY that stayed deaf through shut/arm).
+ * The state predicate is checked and the action taken under one IRQ mask.
+ * 0 = done; 0xE0 unknown rung; 0xE1 not in the exact terminal camp (CONNECTED,
+ * EV10 scan, boot window/relisten or pair burst active); 0xE2 quiescing for a
+ * reboot; 0xE3 unsupported on this radio (CH59x). */
+uint8_t RF_DiagIntervene(uint8_t rung);
 
 #endif

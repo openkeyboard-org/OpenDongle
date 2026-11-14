@@ -152,7 +152,7 @@ class SilenceGuardWiring(unittest.TestCase):
     def test_promotes_arm_inline_not_via_the_mint_event(self):
         """Both promotes to CONNECTED must arm before posting the mint.
 
-        The mint is delivered as RF_EVT_CRYPT_SESSION, but rf_send_poll
+        The mint is delivered as deferred work (rf_crypt_post_session), but rf_send_poll
         evaluates the guard every conn_interval. If the stamp were only written
         by the mint handler, the guard would run against the PREVIOUS session's
         stamp -- seconds old after a reacquire -- and force-release on the first
@@ -162,7 +162,7 @@ class SilenceGuardWiring(unittest.TestCase):
         found = 0
         for m in re.finditer(
                 r"rf_state = RF_STATE_CONNECTED;(.{0,900}?)"
-                r"hal_event_post\(RF_EVT_CRYPT_SESSION\)", self.src, re.S):
+                r"rf_crypt_post_session\(\)", self.src, re.S):
             self.assertIn("rf_crypt_arm_silence()", m.group(1),
                           "a promote to CONNECTED posts the mint without "
                           "arming the deadline; the guard fires on poll 1")

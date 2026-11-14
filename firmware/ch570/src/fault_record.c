@@ -1,3 +1,9 @@
+/*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "fault_record.h"
 
 /* Defined separately so the linker-owned retained layout stays explicit. */

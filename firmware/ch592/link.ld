@@ -1,6 +1,7 @@
 /* OpenKeyboard.org OpenDongle Linker Script
  * Copyright 2026 Eric Molitor (EMulator)
- * Based on CH592 SDK Link.ld
+ * SPDX-License-Identifier: Apache-2.0
+ * Based on the WCH CH592 SDK Link.ld; see ../NOTICE for provenance.
  *
  * OpenBoot owns [0x0000, 0x2000) and hands off to the application at a SLOT
  * base. There is no in-app staging region any more; updates are performed
@@ -51,27 +52,34 @@ SECTIONS
         _dongle_id_end = .;
     } >FLASH
 
-    .highcodelalign :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_lma = .);
-    } >FLASH AT>FLASH
-
-    .highcode :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_start = .);
-        *(.vector);
-        KEEP(*(SORT_NONE(.vector_handler)))
-        *(.highcode);
-        *(.highcode.*);
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_end = .);
-    } >RAM AT>FLASH
-
     .text :
     {
         . = ALIGN(4);
+        /* Bench knob (make TEXT_PAD=N, N even): shift everything in flash
+         * .text by N bytes to measure code-placement sensitivity of the
+         * radio path. The first pinned section's alignment (2 or 4) rounds
+         * the effective shift up; read RF_Rx in the map, not N. */
+        . += DEFINED(DONGLE_TEXT_PAD) ? DONGLE_TEXT_PAD : 0;
+        /* The radio path is linked FIRST, so an edit anywhere else in the
+         * application never moves it: the BLE library (RF_Rx/RF_Tx/RF_Shut,
+         * the receive and transmit processing, TMOS), then the application's
+         * flash-resident poll-path functions. The bench measures the poll
+         * reply ratio moving by ~0.3 % with the placement of this code
+         * (2026-09-09, TODO), and with the wildcard order every RAM-code or
+         * application edit shifted all of it. The RAM-code image is loaded
+         * AFTER .text for the same reason (see .highcode below). */
+        *LIBCH59xBLE.a:(.text .text.*)
+        *(.text.RF_ProcessEvent)
+        *(.text.rf_connected_poll_cb)
+        *(.text.rf_arm_connected_supervision)
+        *(.text.hal_rf_shut)
+        *(.text.hal_rf_set_channel)
+        *(.text.hal_timing_ch592_dispatch)
+        /* The reset handler follows the pinned set (it is reached by a jump
+         * from the .init entry stub and has no placement requirement), so a
+         * startup edit cannot move the radio path either. Ahead of the
+         * radio path now sit only .init and the ODG2 header, whose sizes
+         * OpenBoot's hand-off fixes. */
         KEEP(*(SORT_NONE(.handle_reset)))
         *(.text)
         *(.text.*)
@@ -92,6 +100,27 @@ SECTIONS
 
     PROVIDE( _etext = . );
     PROVIDE( _eitcm = . );
+
+    /* RAM-resident code, loaded from flash AFTER .text so that its size does
+     * not move the radio path linked above (it used to be loaded before it). */
+    .highcodelalign :
+    {
+        . = ALIGN(4);
+        PROVIDE(_highcode_lma = .);
+    } >FLASH AT>FLASH
+
+    .highcode :
+    {
+        . = ALIGN(4);
+        PROVIDE(_highcode_vma_start = .);
+        *(.vector);
+        KEEP(*(SORT_NONE(.vector_handler)))
+        *(.highcode);
+        *(.highcode.*);
+        . = ALIGN(4);
+        PROVIDE(_highcode_vma_end = .);
+    } >RAM AT>FLASH
+
 
     .preinit_array :
     {
@@ -182,11 +211,21 @@ SECTIONS
     PROVIDE( _end = _ebss);
     PROVIDE( end = . );
 
+    /* WHERE THE BLOCK SITS. It was at 0x20005800 until link encryption was
+     * merged with the power-management code: together their statics and
+     * SRAM-resident code no longer fit below that address (short by 496 B),
+     * while 0x20005830..0x20005FF0 above the block was unused. The block moved
+     * up 1 KiB to 0x20005C00, which is all that changed: .data/.bss gain that
+     * 1 KiB, and 0x20005C30..0x200060A0 (1136 B) stays unallocated between the
+     * block and the RF arena / stack floor. The address is still hard-coded in
+     * fault_record.h and startup_CH592_phased.S, and the ASSERTs below still
+     * pin it. A fault record written by firmware built before the move is not
+     * found by firmware built after it (and vice versa) across an update. */
     /* N23 retained-fault block. The four-byte prefix stays owned by
      * startup_CH592_phased.S; platform_ch592.c contributes the 44-byte
      * versioned record. NOLOAD prevents startup copy/zeroing, and KEEP plus
      * the assertions below make layout drift a link failure. */
-    .fault_keep 0x20005800 (NOLOAD) :
+    .fault_keep 0x20005C00 (NOLOAD) :
     {
         _fault_keep_start = .;
         . = . + 4;
@@ -199,7 +238,7 @@ SECTIONS
     /* CODEREVIEW N12b: cap the newlib heap ceiling at the fault-retention
      * block instead of the stack region base, so a large-enough _sbrk growth
      * (vendor stdio retains puts -> __smakebuf_r -> _malloc_r) can no longer
-     * grow the break THROUGH the 0x20005800 fault block. Only the SDK _sbrk
+     * grow the break THROUGH the 0x20005C00 fault block. Only the SDK _sbrk
      * consumes _heap_end, so this changes just that bound's relocation — the
      * byte-changing half of N12 that was deferred out of the byte-identical
      * change 4. The N23 NOLOAD section above now defines the linker-owned
@@ -225,11 +264,11 @@ SECTIONS
      * nothing can silently grow into them.
      *
      * (1) Fault retention: fault_handler.S + the startup sentinel keep
-     *     0x20005800..0x2000582F (startup prefix + versioned N23 record),
+     *     0x20005C00..0x20005C2F (startup prefix + versioned N23 record),
      *     which sits between _ebss and the stack region. The real NOLOAD
      *     section above plus the ASSERT below fail the link if .data/.bss
      *     ever reach it. N12b (done in change 10, the next CH592-codegen
-     *     change): _heap_end is now capped at 0x20005800 (above), so the SDK
+     *     change): _heap_end is now capped at 0x20005C00 (above), so the SDK
      *     _sbrk can no longer grow the runtime heap THROUGH this block either
      *     -- closing the residual that was deferred out of the byte-identical
      *     change 4 (vendor stdio retains puts -> __smakebuf_r -> _malloc_r).
@@ -249,7 +288,7 @@ SECTIONS
     _susrstack        = _rf_arena_end;
 
     ASSERT(_ebss <= _fault_keep_start,
-        "ERROR: .data/.bss overruns the fault-retention block at 0x20005800")
+        "ERROR: .data/.bss overruns the fault-retention block at 0x20005C00")
     ASSERT(_fault_keep_start < _fault_keep_end && _rf_arena_start < _rf_arena_end,
         "ERROR: reserved-region bounds out of order")
     ASSERT(_susrstack == _rf_arena_end && _rf_arena_end <= _eusrstack,
@@ -259,15 +298,15 @@ SECTIONS
     ASSERT(_heap_end <= _rf_arena_start,
         "ERROR: heap ceiling must stay below the BLE RF arena")
     ASSERT(_heap_end == _fault_keep_start,
-        "ERROR: N12b heap cap must equal the fault-block start (0x20005800)")
+        "ERROR: N12b heap cap must equal the fault-block start (0x20005C00)")
     /* Pin the absolute address too: the fault/startup assembly hard-codes
-     * 0x20005800, so a coordinated move of both linker symbols must still trip
+     * 0x20005C00, so a coordinated move of both linker symbols must still trip
      * this if the assembly is not moved with them. */
-    ASSERT(_fault_keep_start == 0x20005800,
-        "ERROR: fault block must stay at 0x20005800 (matches fault_handler.S / startup)")
-    ASSERT(_fault_record_start == 0x20005804,
+    ASSERT(_fault_keep_start == 0x20005C00,
+        "ERROR: fault block must stay at 0x20005C00 (matches fault_handler.S / startup)")
+    ASSERT(_fault_record_start == 0x20005C04,
         "ERROR: N23 fault record must begin after the four-byte startup prefix")
-    ASSERT(_fault_record_end == 0x20005830 && _fault_keep_end == 0x20005830,
+    ASSERT(_fault_record_end == 0x20005C30 && _fault_keep_end == 0x20005C30,
         "ERROR: N23 fault record/layout size changed (matches fault_record.h)")
 
     /* CODEREVIEW F01 (+ Codex round-4): the EXACT loadable image size in bytes

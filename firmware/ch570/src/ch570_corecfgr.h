@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * The single definition of CH570's CORECFGR (CSR 0xBC0) startup value.
  *
  * DEFINES ONLY — included by reset_handler_ch570.S as well as by C, so nothing

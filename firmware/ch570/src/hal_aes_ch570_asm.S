@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH570 AES-128 forward cipher, hand-written assembly.
  *
  * TWO backends live in this file, selected by DONGLE_AES_CH570_IMPL (see

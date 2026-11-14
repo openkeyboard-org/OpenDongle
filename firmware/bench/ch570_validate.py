@@ -41,7 +41,7 @@ PROVISION = os.path.join(HERE, "provision_link_key.py")
 
 VID, PID = 0x0C45, 0xFEFE
 
-# Which dongle this run is allowed to drive, and therefore which 0x94 layout to
+# Which dongle this run is allowed to drive, and therefore which 0x98 layout to
 # expect. family: 0x70 = CH570, 0x92 = CH592 (DONGLE_CHIP_FAMILY_ID).
 # profile: 1 = product, 2 = bench (DONGLE_BUILD_PROFILE). Override per run:
 #   DONGLE_FAMILY=0x92 python3 ch570_validate.py     # CH592 receiver
@@ -189,7 +189,7 @@ class Iap:
         return (True, rec[OFF_FLAGS])
 
     def crypt_diag(self):
-        """Parse 0x94. Dispatch on the EXACT payload length, never a threshold.
+        """Parse 0x98. Dispatch on the EXACT payload length, never a threshold.
 
         iap.c serves two layouts: 38 bytes (product) and 62 (bench, which is the
         whole 64-byte EP6 report). A `n >= 38` test matched BOTH, so a bench
@@ -197,8 +197,8 @@ class Iap:
         aes_redo/announce_retry and two middle bytes of fifo_full as the boot-KAT
         result -- fabricating an AES self-test failure from a nonzero counter.
         """
-        r = self.txn(0x94)
-        if not r or r[0] != 0x94:
+        r = self.txn(0x98)
+        if not r or r[0] != 0x98:
             return None
         n = r[1]
         if n < 30:
@@ -228,7 +228,7 @@ class Iap:
 
         Two dongles on one bench are indistinguishable by VID:PID, and
         find_hidraw() binds the first match, so without this every gate could be
-        attributed to the wrong device -- and the 0x94 layout depends on the
+        attributed to the wrong device -- and the 0x98 layout depends on the
         profile.
         """
         ident = self.identity()

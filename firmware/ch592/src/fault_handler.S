@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * N23 controlled fatal-fault policy for CH592.
  *
  * Both handler bodies remain flash-resident, free of software sp/gp references,
@@ -8,8 +12,8 @@
  * software, watchdog, and manual resets, so a repeated fatal event records a
  * REPEAT_FAILSTOP disposition and halts instead of creating a reset storm.
  *
- * Bytes 0x20005800..03 remain the startup sentinel. The record layout from
- * 0x20005804 onward is shared with platform_ch592.c through fault_record.h and
+ * Bytes 0x20005C00..03 remain the startup sentinel. The record layout from
+ * 0x20005C04 onward is shared with platform_ch592.c through fault_record.h and
  * is linker-pinned by link.ld.
  */
 

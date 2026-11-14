@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Run the on-device validation harness on the host, end to end.
 
 `validation/aes_validate.c` is the program that decides whether a chip passes.

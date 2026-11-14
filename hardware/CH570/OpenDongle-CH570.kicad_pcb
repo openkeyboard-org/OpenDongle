@@ -1412,7 +1412,7 @@
 		(layer "F.Cu")
 		(uuid "c5de579b-2fc6-4fec-ac56-ac704f63bbbc")
 		(at 151.800076 101.240981 -90)
-		(descr "2.4GHz PCB antenna for 0.8mm FR4 boards. Design provided by WCH. Website: wch-ic.com")
+		(descr "Independently created 2.4GHz PCB antenna for 0.8mm FR4, informed by WCH's published reference design. Website: wch-ic.com")
 		(tags "Antenna, WCH")
 		(property "Reference" "AE2"
 			(at 0 0 90)

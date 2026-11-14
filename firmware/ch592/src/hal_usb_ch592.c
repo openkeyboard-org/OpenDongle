@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * CH592F (CH59x) USB pin/PHY HAL.
  *
  * On CH59x the USB analog IO and D+ pull-up live in R16_PIN_ANALOG_IE

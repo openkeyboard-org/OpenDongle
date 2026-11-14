@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """The build id must identify the BINARY, not just the sources.
 
 It is the value every "is the running build the expected one?" check compares -

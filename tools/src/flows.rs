@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! High-level flows. Since the OpenBoot cutover the vendor IAP interface no
 //! longer flashes: `probe` reads device identity, and updates happen in the
 //! OpenBoot bootloader over OBP (`opendongle --enter-bootloader`, then the

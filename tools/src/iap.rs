@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! USB-HID IAP transport and protocol for the OpenDongle dongle (WCH CH570/CH592).
 //!
 //! Direct port of the transport/protocol layer in `flash_dongle.py`. The on-wire
@@ -24,10 +27,15 @@ pub const REPORT_SIZE: usize = 65; // 1 Report-ID byte + 64-byte payload
 
 pub const CMD_HANDSHAKE: u8 = 0x5A; // with "WCH@HFD" payload
 pub const CMD_GETDEVINFO: u8 = 0x84;
+pub const CMD_BOND_WRITE: u8 = 0x87;
 pub const CMD_BOND_READ: u8 = 0x88;
+pub const CMD_BOND_CLEAR: u8 = 0x89;
 pub const CMD_VERSION: u8 = 0x90;
 pub const CMD_STATUS: u8 = 0x91;
+pub const CMD_RF_DIAG: u8 = 0x92;
+pub const CMD_RF_POKE: u8 = 0x94;
 pub const CMD_FAULT: u8 = 0x93;
+pub const CMD_CRYPT_DIAG: u8 = 0x98;
 /// Reboot into the OpenBoot bootloader (armed session only). Body is the
 /// 4-byte ENTER_BOOTLOADER_MAGIC, little-endian; the device replies status
 /// 0, quiesces RF, drains the reply, and resets into OpenBoot.
@@ -154,8 +162,58 @@ impl IapDevice {
     }
 }
 
+// ---------------- Explicit-path identity check ----------------
+
+/// The (vid, pid, interface) triple hidapi enumerates for `path`, or `None`
+/// when the path is not in the device list at all. Enumeration only: nothing
+/// is opened and nothing is sent.
+pub fn path_identity(api: &HidApi, path: &str) -> Option<(u16, u16, i32)> {
+    api.device_list()
+        .find(|d| d.path().to_string_lossy() == path)
+        .map(|d| (d.vendor_id(), d.product_id(), d.interface_number()))
+}
+
+/// The comparison behind [`require_path_identity`], split out so it can be
+/// tested without hardware.
+pub fn check_path_identity(
+    path: &str,
+    found: Option<(u16, u16, i32)>,
+    vid: u16,
+    pid: u16,
+    interface: i32,
+) -> Result<()> {
+    match found {
+        None => bail!(
+            "--hidraw {path} is not in the HID device list; refusing to send an IAP \
+             report to a node that cannot be identified"
+        ),
+        Some(found) if found == (vid, pid, interface) => Ok(()),
+        Some((v, p, i)) => bail!(
+            "--hidraw {path} is {v:04X}:{p:04X} if={i}, not the {vid:04X}:{pid:04X} \
+             if={interface} this command expects; refusing to send an IAP report to it \
+             (pass matching --vid/--pid/--interface if that node really is the dongle)"
+        ),
+    }
+}
+
+/// `--hidraw` bypasses discovery: [`IapDevice::open`] opens whatever path it is
+/// given with no check that the node carries the CLI's VID, PID or interface.
+/// Actions that send a vendor report without first probing use this to
+/// confirm, from hidapi enumeration alone (no IAP exchange), that the path is
+/// the interface the selectors describe. Discovered devices never come here.
+pub fn require_path_identity(
+    api: &HidApi,
+    path: &str,
+    vid: u16,
+    pid: u16,
+    interface: i32,
+) -> Result<()> {
+    check_path_identity(path, path_identity(api, path), vid, pid, interface)
+}
+
 // ---------------- High-level IAP operations ----------------
 
+/// `op_handshake`: see the call sites; part of the diagnostics readout.
 pub fn op_handshake(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_HANDSHAKE, HANDSHAKE_PAYLOAD),
@@ -163,6 +221,7 @@ pub fn op_handshake(dev: &IapDevice) -> Result<Response> {
     )
 }
 
+/// `op_arm`: see the call sites; part of the diagnostics readout.
 pub fn op_arm(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_GETDEVINFO, &[0x01, 0x00, 0x00, 0x00]),
@@ -170,6 +229,7 @@ pub fn op_arm(dev: &IapDevice) -> Result<Response> {
     )
 }
 
+/// `op_disarm`: see the call sites; part of the diagnostics readout.
 pub fn op_disarm(dev: &IapDevice) -> Result<Response> {
     dev.xfer(
         &packet_simple(CMD_GETDEVINFO, &[0x00, 0x00, 0x00, 0x00]),
@@ -184,20 +244,49 @@ pub fn op_enter_bootloader(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_enter_bootloader(), READ_TIMEOUT_MS)
 }
 
+/// `op_version`: see the call sites; part of the diagnostics readout.
 pub fn op_version(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_VERSION, &[]), READ_TIMEOUT_MS)
 }
 
+/// `op_bond_read`: see the call sites; part of the diagnostics readout.
 pub fn op_bond_read(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_BOND_READ, &[]), READ_TIMEOUT_MS)
 }
 
+/// Link-encryption counters (read-only, unarmed).
+pub fn op_crypt_diag(dev: &IapDevice) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_CRYPT_DIAG, &[]), READ_TIMEOUT_MS)
+}
+
+/// BondClear (armed session only): firmware-side erase with readback.
+pub fn op_bond_clear(dev: &IapDevice) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_BOND_CLEAR, &[]), READ_TIMEOUT_MS)
+}
+
+/// BondWrite (armed session only): the whole record, replacing the stored one.
+pub fn op_bond_write(dev: &IapDevice, record: &[u8]) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_BOND_WRITE, record), READ_TIMEOUT_MS)
+}
+
+/// `op_status`: see the call sites; part of the diagnostics readout.
 pub fn op_status(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_STATUS, &[]), READ_TIMEOUT_MS)
 }
 
+/// `op_fault`: see the call sites; part of the diagnostics readout.
 pub fn op_fault(dev: &IapDevice) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_FAULT, &[]), READ_TIMEOUT_MS)
+}
+
+/// Read one RF diagnostics page (unarmed).
+pub fn op_rf_diag(dev: &IapDevice, page: u8) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_RF_DIAG, &[page]), READ_TIMEOUT_MS)
+}
+
+/// RF intervention ladder rung (armed session): 1 re-arm, 2 re-init + re-arm.
+pub fn op_rf_poke(dev: &IapDevice, rung: u8) -> Result<Response> {
+    dev.xfer(&packet_simple(CMD_RF_POKE, &[rung]), READ_TIMEOUT_MS)
 }
 
 // ---------------- Response checking ----------------
@@ -305,5 +394,30 @@ mod tests {
         assert_eq!(crc32fast::hash(&r64), 0x100e_ce8c);
         assert_eq!(crc32fast::hash(b""), 0x0000_0000);
         assert_eq!(crc32fast::hash(HANDSHAKE_PAYLOAD), 0xa85e_8a42);
+    }
+
+    #[test]
+    fn explicit_path_must_match_the_selectors() {
+        let want = (DEFAULT_VID, DEFAULT_PID, IAP_INTERFACE);
+        assert!(check_path_identity("/dev/hidraw3", Some(want), want.0, want.1, want.2).is_ok());
+
+        // Not enumerated at all: nothing to compare against, so refuse.
+        let err = check_path_identity("/dev/hidraw3", None, want.0, want.1, want.2)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not in the HID device list"), "{err}");
+
+        // Each selector on its own must be enough to refuse.
+        for found in [
+            (0x1209, DEFAULT_PID, IAP_INTERFACE),
+            (DEFAULT_VID, 0x0001, IAP_INTERFACE),
+            (DEFAULT_VID, DEFAULT_PID, 0),
+        ] {
+            let err = check_path_identity("/dev/hidraw3", Some(found), want.0, want.1, want.2)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("refusing"), "{err}");
+            assert!(err.contains("0C45:FEFE if=4"), "{err}");
+        }
     }
 }

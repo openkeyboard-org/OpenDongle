@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Run OpenBoot's A/B bench harness against THIS bench, without editing it.
 
 OpenBoot ships firmware/tests/bench/ab_bench.py: a fresh part reports

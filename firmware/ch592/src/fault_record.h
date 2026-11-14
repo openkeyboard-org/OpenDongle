@@ -1,12 +1,18 @@
+/*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef CH592_FAULT_RECORD_H
 #define CH592_FAULT_RECORD_H
 
 /* N23 retained-fault contract. The first four bytes remain owned by the
  * phased startup sentinel; the versioned record begins immediately after it.
  * Keep these offsets synchronized with fault_handler.S and link.ld. */
-#define CH592_FAULT_KEEP_BASE              0x20005800
-#define CH592_FAULT_RECORD_BASE            0x20005804
-#define CH592_FAULT_KEEP_END               0x20005830
+#define CH592_FAULT_KEEP_BASE              0x20005C00
+#define CH592_FAULT_RECORD_BASE            0x20005C04
+#define CH592_FAULT_KEEP_END               0x20005C30
 
 #define CH592_FAULT_MAGIC                  0x3332464E
 #define CH592_FAULT_MAGIC_INVERSE          0xCCCDB9B1

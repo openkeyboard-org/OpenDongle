@@ -1,6 +1,14 @@
 /*
- * Phased CH592F startup — fork of vendor startup_CH592.S with SRAM
- * markers at each reset phase. Sentinel byte at 0x20005800 advances
+ * Phased CH592F startup — fork of WCH's vendor startup_CH592.S with SRAM
+ * markers at each reset phase.
+ *
+ * Copyright 2021 Nanjing Qinheng Microelectronics Co., Ltd.
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ * Attention: This software (modified or not) and binary are used for
+ * microcontroller manufactured by Nanjing Qinheng Microelectronics.
+ *
+ * Sentinel byte at 0x20005C00 advances
  * through 0xC0 .. 0xC5 as reset progresses and STOPS there. A value below 0xC5
  * pinpoints a wedge earlier in startup; 0xC5 means startup reached the main
  * handoff (not proof main ran). Read without depending on GDB
@@ -21,7 +29,7 @@
  *          reached the main handoff, NOT proof main() ran)
  *
  * This remains a narrow fork of
- * ~/Development/Personal/ch592/EVT/EXAM/SRC/Startup/startup_CH592.S: the
+ * third_party/openwch/ch592/EVT/EXAM/SRC/Startup/startup_CH592.S: the
  * marker stores and the early N23 NMI/HardFault vector install are the only
  * deliberate sequencing additions.
  */
@@ -139,21 +147,21 @@ WDOG_BAT_IRQHandler:
 	.align	1
 handle_reset:
 	/* PHASE 0xC0 — after reset-status capture. No gp/sp yet, so use direct
-	 * SRAM address (0x20005800). Manual LUI+SB sequence; no temporary
+	 * SRAM address (0x20005C00). Manual LUI+SB sequence; no temporary
 	 * gp-relative addressing.
 	 *
 	 * Capture R8_RESET_STATUS @ 0x40001044 BEFORE any other init so the
 	 * reset cause (SW / RPOR / WTR / MR / LRM[0-2] / GPWSM per CH59x
 	 * SYS_ResetStaTypeDef) is preserved across BSS clear. Stashed to
-	 * 0x20005801; the fault handler writes 0x20005804.. on faults.
+	 * 0x20005C01; the fault handler writes 0x20005C04.. on faults.
 	 */
 	li t1, 0x40001044
 	lb t0, 0(t1)
-	li t1, 0x20005801
+	li t1, 0x20005C01
 	sb t0, 0(t1)
 
 	li t0, 0xC0
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 .option push
@@ -190,7 +198,7 @@ handle_reset:
 
 	/* PHASE 0xC1 — gp/sp and the early fatal vectors are ready. */
 	li t0, 0xC1
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 /* Load highcode code  section from flash to RAM */
@@ -208,7 +216,7 @@ handle_reset:
 
 	/* PHASE 0xC2 — after .highcode copy. */
 	li t0, 0xC2
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 /* Load data section from flash to RAM */
@@ -226,7 +234,7 @@ handle_reset:
 2:
 	/* PHASE 0xC3 — after .data copy. */
 	li t0, 0xC3
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 	/* clear bss section */
@@ -239,10 +247,10 @@ handle_reset:
 	bltu a0, a1, 1b
 2:
 	/* PHASE 0xC4 — after .bss zero-clear. NOTE: bss-clear would zero
-	 * any in-bss sentinel; ours at 0x20005800 is in the gap (above
+	 * any in-bss sentinel; ours at 0x20005C00 is in the gap (above
 	 * _ebss=0x20003718, below stack start 0x20006000) so it survives. */
 	li t0, 0xC4
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 	/* pipeline + dynamic prediction reset */
@@ -270,7 +278,7 @@ handle_reset:
 	 * handoff"; a wedge in the mret itself would also leave 0xC5, so it is not
 	 * proof main ran. Anything below 0xC5 is a wedge earlier in startup. */
 	li t0, 0xC5
-	li t1, 0x20005800
+	li t1, 0x20005C00
 	sb t0, 0(t1)
 
 	mret

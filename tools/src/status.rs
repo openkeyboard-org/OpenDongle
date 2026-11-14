@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Decoder and display for the production status command (0x91).
 
 use anyhow::{bail, Result};
@@ -87,7 +90,7 @@ impl DeviceStatus {
     /// bisected with diagnostic builds - and so a unit reporting an
     /// implausible value (the CH570 SKU is reported to return a constant) is
     /// visible rather than silently trusted.
-    fn last_rssi(&self) -> String {
+    pub fn last_rssi(&self) -> String {
         if self.capabilities & CAP_RF == 0 {
             return "n/a (no RF)".to_string();
         }
@@ -121,7 +124,7 @@ impl DeviceStatus {
         }
     }
 
-    fn connection(&self) -> &'static str {
+    pub fn connection(&self) -> &'static str {
         match self.connection {
             0 => "unavailable",
             1 => "pairing",

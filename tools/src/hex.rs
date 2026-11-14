@@ -1,3 +1,6 @@
+// Copyright 2026 Eric Molitor (EMulator)
+// SPDX-License-Identifier: Apache-2.0
+
 //! Intel HEX loader and firmware loading. Ports `parse_intel_hex` and
 //! `load_firmware` from `flash_dongle.py`.
 

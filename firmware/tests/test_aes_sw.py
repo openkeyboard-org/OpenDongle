@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """The software AES-128 forward cipher must be AES, not merely deterministic.
 
 CH570 has no hardware AES engine, so on that chip every encrypted RF byte comes

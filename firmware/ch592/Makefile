@@ -1,3 +1,6 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
+#
 # OpenDongle CH592F production firmware.
 
 # Grouped targets (`a b &: prereqs`) need GNU Make 4.3. Older Make parses `&`
@@ -41,6 +44,22 @@ MINICHLINK ?= minichlink
 WCHLINK_SERIAL ?=
 
 PYTHON := /usr/bin/python3 -I
+# The compiler's identity, folded into CONFIG_TEXT below and so into the build
+# id: a readable prefix (the first --version line sanitised to one token) plus
+# the first 16 hex digits of the SHA-256 of that whole line, so two vendor tags
+# that sanitise alike still yield different ids. A different compiler BUILD
+# therefore moves the build id instead of being refused: check-deps gates on
+# properties (GCC major + the WCH fast-interrupt ABI probe), not on the
+# driver's bytes. Empty when no compiler answers; refused below for any goal
+# that compiles, so an unidentified compiler can never produce a valid-looking
+# build id.
+COMPILER_ID := $(shell LC_ALL=C "$(CC)" --version 2>/dev/null | head -n 1 | $(PYTHON) -c 'import sys,re,hashlib; l=sys.stdin.readline().strip(); print(re.sub(r"[^A-Za-z0-9._-]", "_", l) + "-" + hashlib.sha256(l.encode()).hexdigest()[:16] if l else "")')
+# The driver's own digest, also folded into CONFIG_TEXT: a driver whose bytes
+# changed under an unchanged banner still moves the build id and recompiles
+# every object, so the factory manifest's app_compiler_sha256 always names the
+# driver that built the packaged application. Recorded, not gated: see
+# check_dependencies.py for the gate.
+COMPILER_SHA256 := $(shell $(PYTHON) -c 'import hashlib,sys; p=sys.argv[1]; print(hashlib.sha256(open(p,"rb").read()).hexdigest()) if __import__("os").path.isfile(p) else print("")' "$(CC)" 2>/dev/null)
 
 SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 # The OpenBoot revision this build is pinned to. Declared rather than read from
@@ -134,6 +153,11 @@ CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
 ifeq ($(PROFILE),bench)
 CFLAGS += -DDONGLE_BENCH_PROFILE=1
 endif
+# The extra delivery counters are bench-only and CH592's .bss has no room for them
+# alongside the EP1 queue: add -DDONGLE_DELIVERY_COUNTERS=1 to CFLAGS here, on a
+# build that drops another optional feature to make room. There is deliberately no
+# make-variable plumbing, so this line is the single activation point.
+CFLAGS += -DDONGLE_EP1_QUEUE_SLOTS=4
 # BLE SNV must stay OFF: its default address is BLE_SNV_ADDR =
 # 0x77000-FLASH_ROM_MAX_SIZE, i.e. DataFlash offset 0x7000 - the SAME block as
 # the stage-1 transaction state (CH592_IAP_STATE_EEPROM_OFF).
@@ -195,7 +219,147 @@ endif
 # pass for the standard bytes. Same pattern as validation/Makefile.
 CFLAGS += $(EXTRA_CFLAGS)
 
+# Tier-1 power management knobs (src/pm_ch592.c). Every one is a -D CFLAG
+# (hashed into the build id) AND a CONFIG_TEXT token (schema=12). "All off" is
+# the six switches at 0 (PM_IDLE PM_IDLE_LEVEL PM_IDLE_IN_SUSPEND PM_GPIO_PARK
+# PM_USB_DIGIN_OFF PM_CLK_GATE) with the period and mask knobs at their defaults; that
+# image carries no PM code and is byte-identical to a tree without it (the
+# ladder's equivalence gate), so a zero period is a validation error by design.
+#   PM_IDLE            0/1  compile the subsystem: TMR3 heartbeat, the work
+#                           latches, the idle path, IAP 0x92 pages 5-6
+#   PM_IDLE_LEVEL      0..3 which RF classes may sleep: 0 never (plumbing only),
+#                           1 terminal PAIRING camp, 2 all PAIRING + IDLE,
+#                           3 + CONNECTED between polls
+#   PM_IDLE_IN_SUSPEND 0/1  idle while the USB host is suspended (default on;
+#                           0 restores today's spin-while-suspended)
+#   PM_GPIO_PARK       0/1  park the CH592D no-connects (PB15 pull-DOWN)
+#   PM_USB_DIGIN_OFF   0/1  PB10/PB11 digital input buffers off
+#   PM_CLK_GATE        0/1  PWR_PeriphClkCfg(DISABLE, 0x4DF6): -0.25 mA in every
+#                           state (ladder 2026-09-06) for ~0.2 % of poll replies
+#                           (reply-ratio re-measurement 2026-09-09: mask-dependent,
+#                           no single block, mechanism not established;
+#                           RELEASE-NOTES). Default on.
+#   PM_HEARTBEAT_US    100..10000 TMR3 heartbeat period (the TMOS deadline bound)
+#                           in the fixed mode; the initial TMR3 period in the
+#                           exact-deadline mode
+#   PM_EXACT_DEADLINE  0/1  arm TMR3 to the next app TMOS deadline instead of a
+#                           fixed period (pm_ch592.c; bench 2026-09-06: the
+#                           heartbeat's cost is its interrupt, ~0.13 mA per
+#                           1000/s, the counter is free). Ignored when PM_IDLE=0.
+#   PM_DEADLINE_CAP_US 1000..50000 exact-deadline mode: the longest sleep when no
+#                           app deadline is nearer; bounds the library's own
+#                           timers (temperature sample, calibration)
+#   PM_EP0_QUIET_MS    0..5000 no idle this long after a USB SETUP
+PM_IDLE ?= 1
+PM_IDLE_LEVEL ?= 3
+PM_IDLE_IN_SUSPEND ?= 1
+PM_GPIO_PARK ?= 1
+PM_USB_DIGIN_OFF ?= 0
+PM_CLK_GATE ?= 1
+# Tier 2 R1: windowed receiver (0 = today's continuous scan/camp, byte-identical)
+PM_RX_WINDOW ?= 1
+PM_RX_WINDOW_MS ?= 30
+PM_RX_PERIOD_MS ?= 200
+PM_RX_GRACE_S ?= 60
+PM_RX_PHASE_MS ?= 120
+# Tier 2 R3b: Halt between receiver windows while USB is suspended. Default on since 2026-09-11,
+# when the last of its five gates (a remote wake driven out of a halt) ran. 0 compiles the path
+# out; the image is then byte-identical to the pre-R3b firmware with the build id forced (PM_HALT
+# and PM_SUSPEND_CAP_US are CONFIG_TEXT tokens, so an ordinary build's identity bytes differ).
+PM_HALT ?= 1
+# The deadline cap while the host sleeps: the window schedule is in the table, so this only
+# bounds the library timers the planner does not track (1 s temperature sample, 120 s LSI cal).
+PM_SUSPEND_CAP_US ?= 250000
+# Gate mask for PM_CLK_GATE=1 as a DECIMAL (19958 = 0x4DF6: TMR1 TMR2 UART0-3 SPI0 PWMX
+# I2C LCD). Subsets exist for bench bisection; pm_ch592.c refuses any bit outside
+# 0x4DF6 and any of TMR0/TMR3/USB/BLE.
+PM_CLK_GATE_MASK ?= 19958
+PM_HEARTBEAT_US ?= 1000
+PM_EXACT_DEADLINE ?= 1
+PM_DEADLINE_CAP_US ?= 20000
+PM_EP0_QUIET_MS ?= 200
+# Every value is handed verbatim to the C preprocessor (-DDONGLE_PM_x=...), so
+# each must be exactly ONE plain decimal token: digits only, no sign, no
+# leading zero except a lone "0". A bare `filter` would accept 'PM_IDLE=1 junk'
+# (the stray word becomes a compiler argument), and a shell `test -ge` accepts
+# 'PM_HEARTBEAT_US=01000', which C then reads as octal 512.
+pm-nondigits = $(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(1)))))))))))
+# $(call pm-decimal,KNOB): the knob's value if it is one canonical decimal
+# token, else empty.
+pm-decimal = $(if $(filter 1,$(words $(strip $($(1))))),$(if $(call pm-nondigits,$(strip $($(1)))),,$(if $(filter-out 0,$(filter 0%,$(strip $($(1))))),,$(strip $($(1))))))
+# $(call pm-require-in,KNOB,ALLOWED-TOKENS,DESCRIPTION)
+pm-require-in = $(if $(filter $(2),$(call pm-decimal,$(1))),,$(error $(1) must be $(3), got '$($(1))'))
+# $(call pm-require-range,KNOB,MIN,MAX): a canonical decimal in MIN..MAX (the
+# shell comparison only ever sees a token pm-decimal accepted).
+pm-require-range = $(if $(call pm-decimal,$(1)),$(if $(filter ok,$(shell test "$(call pm-decimal,$(1))" -ge $(2) -a "$(call pm-decimal,$(1))" -le $(3) 2>/dev/null && echo ok)),,$(error $(1) must be $(2)..$(3), got '$($(1))')),$(error $(1) must be a plain decimal integer $(2)..$(3), got '$($(1))'))
+$(call pm-require-in,PM_IDLE,0 1,0 or 1)
+$(call pm-require-in,PM_IDLE_LEVEL,0 1 2 3,0..3)
+$(call pm-require-in,PM_IDLE_IN_SUSPEND,0 1,0 or 1)
+$(call pm-require-in,PM_GPIO_PARK,0 1,0 or 1)
+$(call pm-require-in,PM_USB_DIGIN_OFF,0 1,0 or 1)
+$(call pm-require-in,PM_CLK_GATE,0 1,0 or 1)
+$(call pm-require-range,PM_CLK_GATE_MASK,0,65535)
+$(call pm-require-range,PM_HEARTBEAT_US,100,10000)
+$(call pm-require-in,PM_EXACT_DEADLINE,0 1,0 or 1)
+$(call pm-require-range,PM_DEADLINE_CAP_US,1000,50000)
+$(call pm-require-range,PM_EP0_QUIET_MS,0,5000)
+$(call pm-require-in,PM_RX_WINDOW,0 1,0 or 1)
+$(call pm-require-range,PM_RX_WINDOW_MS,10,1000)
+$(call pm-require-range,PM_RX_PERIOD_MS,20,5000)
+$(call pm-require-range,PM_RX_GRACE_S,0,3600)
+$(call pm-require-range,PM_RX_PHASE_MS,10,2000)
+$(call pm-require-in,PM_HALT,0 1,0 or 1)
+$(call pm-require-range,PM_SUSPEND_CAP_US,20000,1000000)
+# Coherence: PM_HALT=1 against a configuration that cannot reach the halt branch builds an
+# image whose identity says halt=1 and whose behaviour is the ordinary idle (CodeRabbit).
+ifeq ($(strip $(PM_HALT)),1)
+ifneq ($(strip $(PM_IDLE)),1)
+$(error PM_HALT=1 needs PM_IDLE=1 - pm_idle_try and the halt path compile out otherwise)
+endif
+ifneq ($(strip $(PM_IDLE_IN_SUSPEND)),1)
+$(error PM_HALT=1 needs PM_IDLE_IN_SUSPEND=1 - pm_usb_veto refuses every idle while suspended, so the halt branch is unreachable)
+endif
+ifneq ($(strip $(PM_EXACT_DEADLINE)),1)
+$(error PM_HALT=1 needs PM_EXACT_DEADLINE=1 - the halt sleeps to the planner's deadline)
+endif
+ifneq ($(strip $(PM_RX_WINDOW)),1)
+$(error PM_HALT=1 needs PM_RX_WINDOW=1 - the halt is admitted only between receiver windows)
+endif
+endif
+# Level/enable coherence here as well as in pm_ch592.c, so the mismatch is
+# named before the compiler runs.
+ifneq ($(strip $(PM_IDLE_LEVEL)),0)
+ifeq ($(strip $(PM_IDLE)),0)
+$(error PM_IDLE_LEVEL=$(strip $(PM_IDLE_LEVEL)) needs PM_IDLE=1)
+endif
+endif
+CFLAGS += -DDONGLE_PM_IDLE=$(strip $(PM_IDLE)) -DDONGLE_PM_IDLE_LEVEL=$(strip $(PM_IDLE_LEVEL))
+CFLAGS += -DDONGLE_PM_IDLE_IN_SUSPEND=$(strip $(PM_IDLE_IN_SUSPEND))
+CFLAGS += -DDONGLE_PM_GPIO_PARK=$(strip $(PM_GPIO_PARK))
+CFLAGS += -DDONGLE_PM_USB_DIGIN_OFF=$(strip $(PM_USB_DIGIN_OFF))
+CFLAGS += -DDONGLE_PM_CLK_GATE=$(strip $(PM_CLK_GATE))
+CFLAGS += -DDONGLE_PM_CLK_GATE_MASK=$(strip $(PM_CLK_GATE_MASK))u
+CFLAGS += -DDONGLE_PM_HEARTBEAT_US=$(strip $(PM_HEARTBEAT_US))
+CFLAGS += -DDONGLE_PM_EXACT_DEADLINE=$(strip $(PM_EXACT_DEADLINE))
+CFLAGS += -DDONGLE_PM_DEADLINE_CAP_US=$(strip $(PM_DEADLINE_CAP_US))
+CFLAGS += -DDONGLE_PM_EP0_QUIET_MS=$(strip $(PM_EP0_QUIET_MS))
+CFLAGS += -DDONGLE_RX_WINDOW=$(strip $(PM_RX_WINDOW)) -DDONGLE_RX_WINDOW_MS=$(strip $(PM_RX_WINDOW_MS))u
+CFLAGS += -DDONGLE_RX_PERIOD_MS=$(strip $(PM_RX_PERIOD_MS))u -DDONGLE_RX_GRACE_S=$(strip $(PM_RX_GRACE_S))u
+CFLAGS += -DDONGLE_RX_PHASE_MS=$(strip $(PM_RX_PHASE_MS))u
+CFLAGS += -DDONGLE_PM_HALT=$(strip $(PM_HALT)) -DDONGLE_PM_SUSPEND_CAP_US=$(strip $(PM_SUSPEND_CAP_US))
+
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
+# Bench knob: shift flash .text by TEXT_PAD bytes (link.ld) to probe placement
+# sensitivity of the radio path. 0 = no shift; hashed into the build id. Must be
+# an even decimal (functions are 2-byte aligned with the C extension); the
+# effective shift is TEXT_PAD rounded up to the alignment of the first pinned
+# section, so read the map (RF_Rx) rather than assuming N.
+TEXT_PAD ?= 0
+$(call pm-require-range,TEXT_PAD,0,65535)
+ifneq ($(shell test $$(( $(strip $(TEXT_PAD)) % 2 )) -eq 0 && echo ok),ok)
+$(error TEXT_PAD must be even, got '$(TEXT_PAD)')
+endif
+LDFLAGS += -Wl,--defsym=DONGLE_TEXT_PAD=$(strip $(TEXT_PAD))
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
@@ -220,6 +384,9 @@ APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # $(APP_SRC) below), so editing the driver moves the build id. It was in
 # neither before, meaning the file was dead code that no build compiled.
 APP_SRC += src/hal_aes_ch592.c
+# Tier-1 power management. Always compiled (so it is always hashed); every
+# function in it sits under its PM_* knob, so the all-off object is empty.
+APP_SRC += src/pm_ch592.c
 
 # BENCH ONLY: UART1-PA9 telemetry mirror of CMD_CRYPT_DIAG, for the USB-less
 # bench (see dongle_target.h DONGLE_UART_DIAG). Compiled -- and hashed into
@@ -233,6 +400,13 @@ DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_sys.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_flash.c
 DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_adc.c
+# The GPIO and power drivers only when a PM consumer is enabled, so the all-off
+# object list is exactly the pre-PM one; --gc-sections drops the unused
+# LowPower_* from the enabled builds (neither file has file-scope data).
+ifneq ($(filter-out 0,$(PM_IDLE) $(PM_GPIO_PARK) $(PM_CLK_GATE)),)
+DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_gpio.c
+DRV_SRC += $(SDK)/SRC/StdPeriphDriver/CH59x_pwr.c
+endif
 STARTUP_SRC := src/startup_CH592_phased.S
 STARTUP_SRC += $(BLE_LIB_DIR)/ble_task_scheduler.S
 STARTUP_SRC += src/bb_irq_trampoline.S src/fault_handler.S
@@ -247,6 +421,12 @@ DEPS := $(OBJS:.o=.d)
 SOURCE_BASENAMES := $(notdir $(C_SRCS) $(S_SRCS))
 ifneq ($(words $(SOURCE_BASENAMES)),$(words $(sort $(SOURCE_BASENAMES))))
 $(error duplicate source basename in the flattened object directory)
+endif
+# The += above must stay AFTER the APP_SRC := assignment: an immediate
+# assignment placed later would discard it, and pm_ch592.c would silently drop
+# out of both the link and BUILD_ID_INPUTS (which expands APP_SRC).
+ifeq ($(filter src/pm_ch592.c,$(APP_SRC)),)
+$(error pm_ch592.c fell out of APP_SRC - keep the += after the APP_SRC := line)
 endif
 
 VPATH := $(COMMON)/src:src:$(SDK)/BLE/HAL:$(SDK)/SRC/StdPeriphDriver:$(BLE_LIB_DIR)
@@ -284,7 +464,26 @@ FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
 OPENBOOT_BIN := $(BUILD)/$(TARGET)-openboot.bin
 RAW_ELF := $(BUILD)/$(TARGET)-unfinalized.elf
 
-CONFIG_TEXT := schema=9||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=0||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler_sha256=9527827d2004aaddfeb3ecac030d0a0ec19678e9601e3ffdb18f9a3100b9bd99
+# Goals that never compile the application must work on a checkout with no
+# application compiler at all: clean, the OpenBoot-only targets (OpenBoot builds
+# with its own GCC12) including the explicit bootloader binary, and check-deps
+# (which names the missing compiler itself, more precisely than this guard).
+# Placed after the output variables so the binary's path can be named. Both
+# fields are required INDEPENDENTLY: a readable driver with a blank banner, or a
+# banner over an unreadable driver, must not produce a valid-looking build id.
+NO_APP_CC_GOALS := clean openboot-image check-openboot-toolchain check-deps $(OPENBOOT_BIN)
+APP_CC_NEEDED := $(filter-out $(NO_APP_CC_GOALS),$(if $(MAKECMDGOALS),$(MAKECMDGOALS),all))
+ifneq ($(APP_CC_NEEDED),)
+ifeq ($(strip $(COMPILER_ID)),)
+$(error cannot identify the compiler "$(CC)" (--version printed nothing): set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
+endif
+ifeq ($(strip $(COMPILER_SHA256)),)
+$(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN to a MounRiver GCC bin directory)
+endif
+endif
+# schema=14: halt/halt_cap_us joined the tokens (Tier 2 R3b); schema=13: rxwin* (Tier 2 windowed receiver) joined the tokens; schema=12: pm_exact/pm_cap_us joined the PM knob tokens (schema 11 = the PM
+# knobs + the compiler identity tokens of schema 10; pm_idle was a fixed 0 before).
+CONFIG_TEXT := schema=14||chip=ch592||profile=$(PROFILE_ID)||clock=60mhz||osc32k=lsi||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||pm_idle=$(strip $(PM_IDLE))||pm_level=$(strip $(PM_IDLE_LEVEL))||pm_susp=$(strip $(PM_IDLE_IN_SUSPEND))||pm_park=$(strip $(PM_GPIO_PARK))||pm_usbdis=$(strip $(PM_USB_DIGIN_OFF))||pm_gate=$(strip $(PM_CLK_GATE))||pm_gate_mask=$(strip $(PM_CLK_GATE_MASK))||pm_hb_us=$(strip $(PM_HEARTBEAT_US))||pm_exact=$(strip $(PM_EXACT_DEADLINE))||pm_cap_us=$(strip $(PM_DEADLINE_CAP_US))||pm_ep0_ms=$(strip $(PM_EP0_QUIET_MS))||ble_snv=0||access_addr=0xAC1649CE||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)||rxwin=$(strip $(PM_RX_WINDOW))||rxwin_w=$(strip $(PM_RX_WINDOW_MS))||rxwin_p=$(strip $(PM_RX_PERIOD_MS))||rxwin_t=$(strip $(PM_RX_GRACE_S))||rxwin_ph=$(strip $(PM_RX_PHASE_MS))||halt=$(strip $(PM_HALT))||halt_cap_us=$(strip $(PM_SUSPEND_CAP_US))
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h
@@ -298,11 +497,20 @@ BUILD_ID_INPUTS += $(OPENBOOT)/protocol/openboot_protocol.h $(FINALIZE_TOOL)
 #	This must stay ABOVE the -DDONGLE_BUILD_ID line below, or the id would feed
 #	its own input. Every codegen-affecting flag is already set by this point;
 #	only the build-id define comes after.
+#
+#	Only computed when a goal compiles the application: the inputs include SDK
+#	sources, so on a checkout whose submodules are not initialised the hash
+#	would fail before check-deps could name the missing SDK. The exempt goals
+#	(clean, the OpenBoot-only targets, check-deps) never use the id.
+ifneq ($(APP_CC_NEEDED),)
 BUILD_ID := $(shell $(PYTHON) $(BUILD_ID_TOOL) --config-text '$(CONFIG_TEXT)' \
     --flags 'CFLAGS=$(CFLAGS)' --flags 'LDFLAGS=$(LDFLAGS)' \
     $(BUILD_ID_INPUTS))
 ifeq ($(BUILD_ID),)
 $(error failed to calculate firmware build identity)
+endif
+else
+BUILD_ID := 00000000
 endif
 CFLAGS += -DDONGLE_BUILD_PROFILE=$(BUILD_PROFILE_NUM) -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
@@ -437,7 +645,8 @@ check-factory-slot:
 check-deps:
 	$(PYTHON) ../check_dependencies.py --sdk "$(SDK)" \
 	    --sdk-revision $(SDK_REVISION) --toolchain "$(MRS_TOOLCHAIN)" \
-	    --tool-prefix "$(CROSS)"
+	    --tool-prefix "$(CROSS)" \
+	    --probe-flags "$(ARCH)"
 #	Assert the submodule IS the pinned revision and its worktree is clean.
 #	--skip-toolchain because OpenBoot's own recursive build checks its
 #	compiler; requiring GCC12 to be installed merely to verify a SHA would
@@ -506,21 +715,19 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(CONFIG_STAMP): FORCE | $(BUILD)
+$(CONFIG_STAMP): Makefile FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(CONFIG_TEXT)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
 	 trap - 0 1 2 15
 
-# FORCE, not Makefile-mtime: CFLAGS and LDFLAGS are hashed into the build id
-# but a command-line override (EXTRA_CFLAGS / EXTRA_LDFLAGS, e.g. the
-# stack-watermark build) changes them without touching any file, so an
-# mtime-based stamp stayed up to date while the id moved -- nothing
-# recompiled, and the image kept the old flags and old id baked in while the
-# build system advertised the new one. The recipe now RUNS every invocation
-# and the content guard blocks propagation when the id has not actually
-# moved. (Same mechanism, same reason, as validation/Makefile.)
-$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) FORCE | $(BUILD)
+# Makefile is a prerequisite because CFLAGS and LDFLAGS are hashed into the
+# build id but are DEFINED here. Without it, a flags-only edit moved the id
+# while this stamp stayed up to date, so nothing recompiled: the objects, the
+# ELF, the ODG2 record and the factory image all kept the old flags and the
+# old id baked in, while the build system advertised the new one. The content
+# guard below still blocks propagation when the id has not actually moved.
+$(BUILD_ID_STAMP): $(BUILD_ID_INPUTS) $(BUILD_ID_TOOL) Makefile FORCE | $(BUILD)
 	@tmp="$@.$$$$"; trap 'rm -f "$$tmp"' 0 1 2 15; \
 	 printf '%s\n' '$(BUILD_ID)' > "$$tmp"; \
 	 if cmp -s "$$tmp" "$@" 2>/dev/null; then rm -f "$$tmp"; else mv -f "$$tmp" "$@"; fi; \
@@ -587,10 +794,26 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 	   exit 1; }
 	@cp "$(OPENBOOT_FACTORY_BIN)" "$(FACTORY_BIN)"
 	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
+#	The application side of the manifest: what compiled the app (identity line,
+#	driver SHA-256) and the build id it produced. Both compiler values are the
+#	parse-time ones that CONFIG_TEXT hashed into that id, so they name the driver
+#	that built these objects. This is the record the strict check-deps mode
+#	(--expect-compiler-sha256) is meant to be fed from.
+	@{ printf 'app_build_id=%s\n' "$(BUILD_ID)"; \
+	   printf 'app_compiler=%s\n' "$$(LC_ALL=C "$(CC)" --version | head -n 1)"; \
+	   printf 'app_compiler_id=%s\n' "$(COMPILER_ID)"; \
+	   printf 'app_compiler_sha256=%s\n' "$(COMPILER_SHA256)"; \
+	} >> "$(FACTORY_MANIFEST)"
 	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
 
 size: $(BUILD)/$(TARGET).elf
 	"$(SIZE)" "$<"
+
+# The id this configuration advertises, so a flashed unit's `--info` and the
+# object tree's .build-id-stamp can be compared against it.
+.PHONY: print-build-id
+print-build-id:
+	@echo $(BUILD_ID)
 
 size-check: $(BUILD)/$(TARGET).bin
 	@size=$$(stat -c%s "$<"); \

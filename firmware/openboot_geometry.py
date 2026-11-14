@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Read OpenBoot's A/B slot geometry out of the pinned submodule.
 
 OpenBoot splits the application region into two slots and puts each slot's

@@ -1,3 +1,9 @@
+/*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef DONGLE_PLATFORM_H
 #define DONGLE_PLATFORM_H
 
@@ -33,6 +39,42 @@
 #define DONGLE_HAS_RF 1
 #endif
 
+/* When 1, the CH592 Tier-1 power-management subsystem is compiled in
+ * (ch592/src/pm_ch592.c: main-loop SEVONPEND-WFE idle, TMR3 heartbeat, IAP
+ * 0x92 pages 5-6). Only the CH592 Makefile ever sets it; every other port, and
+ * the CH592 all-off build, is a true no-op. */
+#ifndef DONGLE_PM_IDLE
+#define DONGLE_PM_IDLE 0
+#endif
+/* Extra bench instrumentation for the report-delivery path: key-down counters at
+ * RF ingress and at EP1 arm/completion. These are ADDITIONAL to the always-on
+ * usb_ep1_arms/completions/overwrites counters, which the EP1 queue needs anyway.
+ * They cost SRAM neither chip has spare -- CH570 links with ~2 KB above its stack
+ * floor and CH592's .bss nearly meets its fault-retention block -- so they are
+ * opt-in: add -DDONGLE_DELIVERY_COUNTERS=1 to a port's CFLAGS on a build that
+ * drops another optional feature to make room. */
+#ifndef DONGLE_DELIVERY_COUNTERS
+#define DONGLE_DELIVERY_COUNTERS 0
+#endif
+
+/* Bench fault injection (default off, compiles to nothing): drop the first
+ * non-zero boot-keyboard report after each promote before it is counted or
+ * forwarded. Positive control for the control-byte feedback placement in
+ * rf_task.c: with feedback applied to unadmitted frames the keyboard's
+ * ack-retired FIFO releases the swallowed report (silent loss); with feedback
+ * gated on admission it retransmits it on the next poll. */
+#ifndef DONGLE_BENCH_DROP_FIRST_HID
+#define DONGLE_BENCH_DROP_FIRST_HID 0
+#endif
+/* Tier 2: windowed receiver in the reacquire scan and terminal camp (CH592 only). */
+#ifndef DONGLE_RX_WINDOW
+#define DONGLE_RX_WINDOW 0
+#endif
+/* Tier 2 R3b: Halt between receiver windows while USB is suspended (CH592). */
+#ifndef DONGLE_PM_HALT
+#define DONGLE_PM_HALT 0
+#endif
+
 #ifndef DONGLE_BUILD_PROFILE
 #define DONGLE_BUILD_PROFILE DONGLE_PROFILE_UNKNOWN
 #endif
@@ -66,5 +108,12 @@ uint8_t dongle_fault_fill(uint8_t *out, uint8_t max);
 void ch570_capture_boot_entropy(void);
 void ch570_mix_jitter_entropy(void);
 void dongle_fault_boot(uint8_t reset_status);
+
+#if DONGLE_PM_IDLE
+/* IAP 0x92 power pages (command 0x92, pages 5 and 6): fill the page into a
+ * zeroed RF_DIAG_PAGE_LEN buffer whose header ([0] version, [1] page) the
+ * caller (RF_DiagFill) already wrote. CH592 pm_ch592.c. */
+void dongle_pm_diag_fill(uint8_t page, uint8_t *out);
+#endif
 
 #endif /* DONGLE_PLATFORM_H */

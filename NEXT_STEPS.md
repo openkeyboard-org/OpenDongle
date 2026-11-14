@@ -435,7 +435,7 @@ connect to ANY CH5xx part (it pre-selects `CHIP_CH32V10x`; see
 - [ ] Rebase OpenController `firmware-link-encryption` onto its `main` (~4
       behind) and re-test; PR #9 notes this.
 - [ ] Land OpenDongle + OpenController **together** — the CCM wire format,
-      the capability advert, and the `0x94` diag layout are shared contracts.
+      the capability advert, and the `0x98` diag layout (renumbered from `0x94`, which `main` gave to RfPoke) are shared contracts.
 - [ ] Merge order for the stacked OpenDongle PRs: #26 to `main` first (GitHub
       then retargets #27 to `main`), or squash-decide the `91e732e`/`e89cd44`
       MIE-mask revert pair if it should not ride along (it is documented as a

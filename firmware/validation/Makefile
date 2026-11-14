@@ -1,3 +1,6 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
+#
 # OpenDongle AES hardware validation images.
 #
 # NOT part of `make all` or `make test`. These images are standalone diagnostics

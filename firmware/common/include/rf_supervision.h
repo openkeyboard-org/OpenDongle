@@ -1,4 +1,8 @@
 /*
+ * OpenKeyboard.org OpenDongle
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * Bridge75 stock-style 2.4 GHz supervision timing helpers.
  *
  * These are pure timing conversions recovered from the CH592 production

@@ -9,6 +9,7 @@
  *
  * OpenKeyboard.org OpenDongle
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  * 2.4G RF Receiver Task
  *
  * Reverse-engineered protocol parameters from stock firmware.
@@ -309,12 +310,43 @@ volatile uint32_t rf_ev10_rekey_tx_hop;
  * CONNECTED-state RX only listens in those slots, so out-of-band
  * direct LED TX lands in dead air.
  *
- * rf_app_tx_pending nonzero ⇒ rf_send_poll consumes the queue
- * (sends 3-byte [ctrl,buf[0],buf[1]] instead of 1-byte [ctrl]) while
- * decrementing the count. Stock parity: a single LEN=3 relay per host LED
- * change + one at connect/reconnect -- no burst, no periodic heartbeat. */
+ * rf_app_tx_pending nonzero ⇒ rf_send_poll sends the 3-byte
+ * [ctrl,buf[0],buf[1]] instead of the 1-byte [ctrl]. Unlike stock, a send does
+ * not retire it: only the keyboard's answer to a poll that carried it does
+ * (rf_led_relay_phase below). Stock sent the relay once, so a keyboard that
+ * missed that one poll -- still acquiring after a (re)connect, or already gone
+ * quiet to rest -- kept the wrong LED until the next host change. */
 volatile uint8_t  rf_app_tx_pending;
 volatile uint8_t  rf_app_tx_buf[2];
+
+/* Where the relay's delivery stands. rf_send_poll makes a poll SENT; its
+ * TX_FINISH in the sink makes it ON_AIR (the odd phase plus one), and only an
+ * answer the sink takes while ON_AIR counts, so an earlier poll's answer the
+ * sink handles late is never taken for it.
+ * - An answer to the relay poll retires the relay (when buf[1] still holds the
+ *   carried value; a newer one goes out next).
+ * - Unanswered, the next poll is a plain GAP poll, never a second LEN-3 in a
+ *   row: a keyboard that ignores LEN-3 polls still gets one it answers.
+ * - An answer to the gap shows the keyboard is listening and missed or ignored
+ *   the relay, and only that spends a try. A keyboard that answers nothing --
+ *   still acquiring after a promote, or gone quiet -- spends none, so the tries
+ *   wait until it can hear them. After RF_LED_RELAY_MAX_MISSES the relay waits
+ *   for the next host change or promote.
+ * Residual: nothing on the air ties an answer to the poll it answers. A
+ * keyboard that answers an earlier poll late, inside the relay poll's window,
+ * retires a relay it never heard; the next promote or host change re-sends
+ * it. */
+#define RF_LED_RELAY_IDLE       0u
+#define RF_LED_RELAY_SENT       1u
+#define RF_LED_RELAY_ON_AIR     2u
+#define RF_LED_RELAY_GAP_SENT   3u
+#define RF_LED_RELAY_GAP_ON_AIR 4u
+static volatile uint8_t rf_led_relay_phase;
+static volatile uint8_t rf_led_relay_carried;   /* the LED byte the relay poll carried */
+static volatile uint8_t rf_led_relay_misses;
+#ifndef RF_LED_RELAY_MAX_MISSES
+#define RF_LED_RELAY_MAX_MISSES 8u
+#endif
 
 /* Queue the host->keyboard LED relay payload [0xA1][led] so the next connected
  * poll sends it as [ctrl][0xA1][led] (rf_send_poll consumes rf_app_tx_pending).
@@ -324,17 +356,23 @@ volatile uint8_t  rf_app_tx_buf[2];
  * it survives to the next valid poll. Caller contexts are NOT both cooperative:
  * RF_SetLEDState runs in TMOS task context, but the burst-promote re-sync runs
  * inside rf_phy_event_sink -- an IRQ-tail deferred callback that CAN preempt
- * task context (see the P2.4 note at the sink). No IRQ critical section is
- * needed anyway because every shared item (rf_led_state, rf_app_tx_buf bytes,
- * rf_app_tx_pending) is a single volatile byte (atomic on RV32), preemption is
- * strictly one-way (sink over task, never the reverse), and the foreground
- * latches rf_led_state BEFORE any queue access -- so every interleaving
- * converges to the queue holding the current LED byte with pending=1. */
+ * task context (see the P2.4 note at the sink), and on CH570 rf_send_poll runs
+ * from the poll timer's ISR. No IRQ critical section is needed anyway because
+ * every shared item (rf_led_state, rf_app_tx_buf bytes, rf_app_tx_pending, the
+ * relay's phase, carried byte and misses) is a single volatile byte (atomic on
+ * RV32), preemption is strictly one-way (an IRQ over the foreground, never the
+ * reverse), and the foreground latches rf_led_state BEFORE any queue access --
+ * so every interleaving converges to the queue holding the current LED byte
+ * with pending=1. The phase is left alone here, so a requeue never skips the
+ * plain gap an unanswered relay poll is owed; the sink's retire compares the
+ * carried byte with buf[1], so an answer to a poll that carried an older value
+ * never retires a newer one. */
 static __attribute__((noinline)) void rf_queue_led_relay(uint8_t led)
 {
-    rf_app_tx_buf[0]  = RF_PROTO_HID_TAG;
-    rf_app_tx_buf[1]  = (uint8_t)(led & 0x07u);
-    rf_app_tx_pending = 1u;          /* stock parity: single LEN=3 relay, fire-and-forget */
+    rf_app_tx_buf[0]     = RF_PROTO_HID_TAG;
+    rf_app_tx_buf[1]     = (uint8_t)(led & 0x07u);
+    rf_led_relay_misses  = 0u;
+    rf_app_tx_pending    = 1u;
 }
 
 /* Stock dispatcher event 0x04 calls RF_Rx(gp-0x604, 10, 0xff, 0xff):
@@ -507,8 +545,19 @@ static volatile uint8_t rf_state;
  * (sent as [ctrl][0xA1][led] by the next poll). Persists across reconnect so
  * the post-promote re-sync restores the keyboard LED. */
 static volatile uint8_t rf_led_state;
+
+/* The post-promote re-sync (burst and EV10 promotes, in the sink). The link
+ * is new, so any relay poll still in flight belonged to the old one. */
+static __attribute__((noinline)) void rf_led_relay_resync(void)
+{
+    rf_led_relay_phase = RF_LED_RELAY_IDLE;
+    rf_queue_led_relay(rf_led_state);
+}
 static int8_t  rf_rssi;
-static uint8_t rf_ctrl_byte;
+#if DONGLE_BENCH_DROP_FIRST_HID
+static volatile uint8_t  rf_bench_drop_armed;   /* set at promote; the next non-zero HID is swallowed */
+static volatile uint16_t rf_bench_drops;        /* SWD-readable: injected drops so far */
+#endif
 
 /* Pairing data */
 static uint32_t rf_access_addr;
@@ -521,6 +570,65 @@ static uint16_t rf_conn_timeout;
  * in executor context, polled by the main loop, read by the IRQ-context
  * gates in the timing callbacks and the PHY sink. One-way until reset. */
 static volatile uint8_t rf_quiesced;
+
+/* ---------- IAP 0x92 RF diagnostics ----------
+ * Wrapping u32 counters and a few "last" bytes, incremented in place (task or
+ * IRQ-tail context, no locking: a lost increment is acceptable for a
+ * diagnostic). Read-only over USB via RF_DiagFill(); nothing here feeds back
+ * into the protocol. Increments sit AFTER the radio arm on hot paths. */
+static volatile uint32_t rfd_len10_seen;             /* LEN-10 reaching the not-connected accept gate */
+static volatile uint32_t rfd_len10_accept_known;     /* accepted as a known-durable reconnect */
+static volatile uint32_t rfd_len10_accept_fresh;     /* accepted as a fresh/tentative pair */
+static volatile uint32_t rfd_len10_rejected;         /* fell through the accept gate */
+static volatile uint32_t rfd_len10_ev10_seen;        /* LEN-10 seen by the EV10 reacquire branch */
+static volatile uint32_t rfd_pair_ack_posted;        /* RF_EVT_TX_PAIR_15 scheduled */
+static volatile uint32_t rfd_pair_ack_tx_ok;         /* pair-ACK StartTx rc == 0 (first + burst) */
+static volatile uint32_t rfd_pair_ack_tx_fail;       /* pair-ACK StartTx rc != 0 */
+static volatile uint32_t rfd_pair_ack_tx_done;       /* TX_FINISH while the burst was active */
+#if DONGLE_DELIVERY_COUNTERS
+static volatile uint16_t rfd_hid_rx;                 /* HID reports (peer-matched 0xA1) received over RF in CONNECTED, pre-forward/pre-dedup */
+static volatile uint16_t rfd_hid_rx_down;            /* of those, non-zero (key-down) payloads: compare to controller ll_hid_tx_done_down => RF loss */
+#endif
+static volatile uint32_t rfd_rx_restart_handled;     /* RF_EVT_RX_RESTART re-arm attempts (a failed
+                                                      * arm counts too; it schedules the P4 retry) */
+static volatile uint32_t rfd_rx_restart_dropped_ev10;/* RF_EVT_RX_RESTART dropped (EV10 scan owns RX) */
+static volatile uint32_t rfd_arm_retry_scheduled;    /* P4 guard: retry posted after a failed arm */
+static volatile uint32_t rfd_supervision_lapses;     /* connected supervision lapsed */
+static volatile uint32_t rfd_ev10_entries;           /* EV10 reacquire scans started */
+static volatile uint32_t rfd_ev10_giveups;           /* EV10 watchdog expired -> reconnect camp */
+static volatile uint32_t rfd_pair_prep_runs;         /* EV10/pairing pair-prep RX arms */
+static volatile uint32_t rfd_ev10_ack_tx;            /* EV10 re-key ACK StartTx attempts */
+static volatile uint32_t rfd_ev10_ack_tx_fail;       /* ... that returned non-zero */
+static volatile uint32_t rfd_connected_promotes;     /* rf_state -> CONNECTED */
+static volatile uint32_t rfd_fresh_relistens;        /* rf_return_to_fresh_pair */
+static volatile uint32_t rfd_bootwin_closes;         /* boot window closed -> reconnect camp */
+static volatile uint32_t rfd_confirm_armed;          /* fresh promote entered WAIT_RX */
+static volatile uint32_t rfd_confirm_to_waitrx;      /* confirm deadline fired unconfirmed */
+static volatile uint32_t rfd_confirm_to_waitrearm;   /* confirm deadline fired confirmed */
+static volatile uint32_t rfd_persist_attempts;       /* bond_save calls */
+static volatile uint32_t rfd_persist_ok;             /* readback matched */
+static volatile uint32_t rfd_pump_passes;            /* RF_TaskPump calls (CH570) */
+static volatile uint32_t rfd_ack_accept_systick;     /* SysTick at the LEN-10 accept (sink) */
+static volatile uint32_t rfd_ack_tx_systick;         /* SysTick at the first pair-ACK StartTx */
+static volatile uint32_t rfd_ack_latency;            /* accept -> StartTx, SysTick ticks */
+static volatile uint32_t rfd_ack_tx_duration;        /* StartTx -> TX_FINISH of the first ACK */
+static volatile uint32_t rfd_last_ack_aa;            /* access address the last pair-ACK went out on */
+static volatile uint32_t rfd_reacq_entry_systick;    /* hal_timing_systick_now() at reacquire entry */
+static volatile uint32_t rfd_giveup_systick;         /* ... at the give-up camp */
+static volatile uint8_t  rfd_len10_last_disp;        /* RFD_L10_* of the last LEN-10 */
+static volatile uint8_t  rfd_persist_last_reason;    /* RFD_PERSIST_* of the last persist task run */
+static volatile uint8_t  rfd_last_save_rc = 0xFFu;   /* last bond_save rc (0xFF: none) */
+static volatile uint8_t  rfd_last_pair_ack_tx_rc = 0xFFu; /* last pair-ACK StartTx rc (0xFF: none) */
+enum {
+    RFD_L10_NONE = 0, RFD_L10_ACCEPT_KNOWN = 1, RFD_L10_ACCEPT_FRESH = 2,
+    RFD_L10_REJ_TOMBSTONE = 3, RFD_L10_REJ_LOCKED = 4, RFD_L10_REJ_BAD_MAC = 5,   /* zero, all-FF or own MAC */
+    RFD_L10_REJ_RSSI = 6, RFD_L10_REJ_OTHER = 7, RFD_L10_EV10 = 8
+};
+enum {
+    RFD_PERSIST_NONE = 0, RFD_PERSIST_SEMANTIC = 1, RFD_PERSIST_SAVE_FAIL = 2,
+    RFD_PERSIST_READBACK = 3, RFD_PERSIST_TOMBSTONE = 4, RFD_PERSIST_ALREADY = 5,
+    RFD_PERSIST_OK = 6
+};
 
 
 /* Runtime bond identity. These default to the compiled-in identity, so an
@@ -557,6 +665,39 @@ static uint32_t rf_bond_default_aa = RF_DEFAULT_ACCESS_ADDR;
  * is the TMOS-unit deadline expressed in Tsys -- an exact multiple, so the
  * armed TMOS value is bit-identical to the pre-P3a literal. */
 #define RF_BOOT_WINDOW_TICKS_TSYS      (RF_BOOT_WINDOW_TICKS * HAL_TMOS_UNIT_TICKS)
+
+/* Terminal-camp liveness watchdog. Every terminal camp (EV10 give-up, closed
+ * boot window, unbonded start) arms RX once and then leans on the radio's
+ * own events to re-drive it: a lost completion, or a PHY that went deaf,
+ * left the dongle in "waiting for reconnect" until a chip reset, because
+ * the arm-status guard (rf_arm_retry_if_failed) never fires on either radio
+ * library (TODO: "no time-based liveness backstop"; one such strand seen on
+ * the bench 2026-09-04). The camp now keeps the boot-window slot, free in
+ * every terminal camp, as a 200 ms tick. A tick that saw an RX-side event
+ * since the last one (data, CRC error or timeout, from the PHY counters)
+ * leaves the radio alone. A silent tick re-arms RX from task context under
+ * the same IRQ mask as the 0x94 ladder: on CH59x basic-mode RX has no
+ * timeout, so a silent camp is the normal state and every silent tick
+ * re-arms preventively (shut + config + RX, ~100 us of a 200 ms period);
+ * on CH570 the 30 ms camp timeout keeps the counter moving, so a silent
+ * tick means the loop died, and the second in a row escalates to shut +
+ * vendor re-init + re-arm (rung 2 of the 0x94 ladder, the same code path,
+ * instrumented on CH570 but not bench-verified here; a second RF_RoleInit is
+ * not validated on the TMOS radio and is not attempted).
+ * The tick self-disables outside the exact terminal camp, and the burst
+ * accept in the radio sink cancels the slot along with the boot window.
+ * Bounds: a lost completion is re-armed within two ticks (the tick after
+ * the loss may still read the event that preceded it); rung 3 resets the
+ * baseline, so it is re-armed at the next tick. Not covered: a CH570 PHY
+ * that keeps raising its 30 ms timeouts while receiving nothing looks alive
+ * to this test, which measures event-loop progress, not reception (TODO). */
+#define RF_CAMP_WD_TICKS_TSYS          (320u * HAL_TMOS_UNIT_TICKS)   /* 200 ms */
+_Static_assert(RF_CAMP_WD_TICKS_TSYS < (1u << 26), "CH570 one-shot arms are 26-bit");
+static volatile uint8_t rf_camp_wd_active; /* the boot-window slot is the camp tick; the radio sink clears it */
+static uint8_t  rf_camp_wd_silent;        /* consecutive silent ticks (saturating) */
+static uint32_t rf_camp_wd_seen;          /* PHY RX-side event count at the last tick */
+static volatile uint16_t rfd_camp_wd_rearms;    /* page 1 [60..61], u16 (the page is otherwise full) */
+static volatile uint16_t rfd_camp_wd_reinits;   /* CH570 rung-2 escalations; no page byte left: debugger only */
 static uint8_t rf_bond_valid;          /* a valid, non-zero-AA bond loaded     */
 /* Deferred bond-persist state (see rf_request_bond_persist / rf_persist_bond_task).
  * Declared here (ahead of RF_ProcessEvent) since the RF_EVT_PERSIST_BOND handler
@@ -823,11 +964,15 @@ static volatile uint8_t  stock_seed_burst_applied;
 
 static void rf_start_rx(void);
 static void rf_rearm_rx(void);
+#if DONGLE_RX_WINDOW
+static void rf_win_reset(void);
+#endif
 static void rf_configure(uint32_t access_addr);
 static void rf_send_poll(void);
 #if DONGLE_RF_CRYPT
 /* Task-context: recompute the silence deadline from rf_conn_interval. */
 static void rf_crypt_silence_set_deadline(void);
+static void rf_crypt_rx_flush(void);
 #endif
 static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
@@ -977,24 +1122,32 @@ static void rf_boot_window_cb(uint8_t slot)
  * transitional unit divergence from hal_timing.h's Tsys contract: these two
  * slots take 625 us TMOS units on CH592 until P3a. */
 #if RF_TASK_EXECUTOR_TMOS
+/* A port that tracks app deadlines (CH592 exact-deadline heartbeat,
+ * hal_timing_ch592.h) redirects these two pairs; the default is the bare
+ * TMOS call. These, plus hal_event_post_delayed / hal_event_cancel, are
+ * every timer start and stop for rf_taskID. */
+#ifndef RF_TMOS_START
+#define RF_TMOS_START(bit, units) tmos_start_task(rf_taskID, (bit), (units))
+#define RF_TMOS_STOP(bit)         tmos_stop_task(rf_taskID, (bit))
+#endif
 void rf_ev10_deadline_start(uint32_t tmos_ticks)
 {
-    tmos_start_task(rf_taskID, RF_EVT_TIMEOUT, tmos_ticks);
+    RF_TMOS_START(RF_EVT_TIMEOUT, tmos_ticks);
 }
 
 void rf_ev10_deadline_stop(void)
 {
-    tmos_stop_task(rf_taskID, RF_EVT_TIMEOUT);
+    RF_TMOS_STOP(RF_EVT_TIMEOUT);
 }
 
 void rf_boot_window_deadline_start(uint32_t tmos_ticks)
 {
-    tmos_start_task(rf_taskID, RF_EVT_BOOT_WINDOW, tmos_ticks);
+    RF_TMOS_START(RF_EVT_BOOT_WINDOW, tmos_ticks);
 }
 
 void rf_boot_window_deadline_stop(void)
 {
-    tmos_stop_task(rf_taskID, RF_EVT_BOOT_WINDOW);
+    RF_TMOS_STOP(RF_EVT_BOOT_WINDOW);
 }
 #endif /* RF_TASK_EXECUTOR_TMOS — the CH570 hal_timing serves these slots
         * natively (st_set/st_cancel); no rf_task-provided backing needed. */
@@ -1050,9 +1203,26 @@ static void rf_refresh_connected_supervision(void)
                   rf_connected_supervision_ticks(0), rf_ev10_rekey_cb);
 }
 
+static void rf_release_keys(void);
 static void rf_send_keys_up_on_link_loss(void)
 {
-    if (rf_state != RF_STATE_CONNECTED || !rf_hid_callback) {
+#if DONGLE_RF_CRYPT
+    /* Frames admitted but not yet verified belong to the link that is ending.
+     * Drop them here, ahead of the release below, so the deferred drain cannot
+     * forward a key-down after the all-keys-up. */
+    rf_crypt_rx_flush();
+#endif
+    if (rf_state != RF_STATE_CONNECTED) {
+        return;
+    }
+    rf_release_keys();
+}
+
+/* The release itself, without the CONNECTED test: for a caller that has
+ * already left CONNECTED under its own IRQ mask (the confirm timeout). */
+static void rf_release_keys(void)
+{
+    if (!rf_hid_callback) {
         return;
     }
     /* Always drop any wake-time key-DOWN stash first: the keyboard is gone, so
@@ -1118,6 +1288,7 @@ static uint8_t rf_crypt_pending_plain;
 #endif
 static void rf_return_to_fresh_pair(void)
 {
+    rfd_fresh_relistens++;
     hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL);
     hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
     hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
@@ -1156,6 +1327,10 @@ static void rf_return_to_fresh_pair(void)
     rf_boot_window_active = 1u;
     rf_pair_window_open   = 0u;
     rf_boot_window_step   = 0u;
+#if DONGLE_RX_WINDOW
+    rf_win_reset();
+#endif
+    rf_camp_wd_active     = 0u;   /* the window takes the slot back; its close re-arms the watchdog */
     rf_state = RF_STATE_PAIRING;
     rf_access_addr = rf_bond_aa;
     rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
@@ -1165,8 +1340,332 @@ static void rf_return_to_fresh_pair(void)
     
 }
 
+#if DONGLE_RX_WINDOW
+/* ---------- Tier 2 R1: windowed receiver (CH592) ----------
+ * Against a resting production keyboard the dongle spent ~990 ms of every
+ * second in the reacquire scan to catch a ~10 ms probe that arrives once per
+ * second (1.010 s, sd 15 ms); against an absent keyboard the camp kept RX on
+ * for nothing. The receiver is ~7 mA of the dongle's draw. Windowing keeps
+ * the radio shut between short receiver windows:
+ *   - the scan's PAIR_PREP arm is the window open (channel 8 only: the
+ *     production probe sweeps all three pairing channels inside its ~10 ms,
+ *     measured 2026-09-10 with the scan pinned to each), RF_EVT_RX_WIN_CLOSE
+ *     shuts the radio W ms later unless a beacon was accepted meanwhile, and
+ *     the next open follows at P - W;
+ *   - once the scheduled-drop detector is locked (confirmed traffic on a
+ *     link no longer than 2 s of grid periods, a drop within 300 ms of the
+ *     promote, twice at ~1 s cadence) one window per
+ *     second is phase-locked to the predicted probe (RF_EVT_RX_WIN_PHASE);
+ *     a miss widens the next one, two misses fall back to the continuous
+ *     scan until the next promote, because the keyboard's THIRD unanswered
+ *     probe sends it to a sleep stage its host must end;
+ *   - the terminal camp's 200 ms tick becomes the window open, period P;
+ *   - a grace period keeps today's continuous receiver for the first T
+ *     seconds after a scheduled drop (the first key after a short pause
+ *     keeps its 40 ms), counted in probe cycles in the scan and in ticks in
+ *     the camp.
+ * Acceptance inside a window hands the radio to the existing accept path
+ * (300 us PAIR_ACK slot, 15-byte ACK, promote) untouched: the close handler
+ * checks ownership under the IRQ mask and does nothing once the state moved
+ * on. Everything here is task context except rf_win_on_promote (radio sink)
+ * and the answered-poll count (connected RX sink). */
+#ifndef DONGLE_RX_WINDOW_MS
+#define DONGLE_RX_WINDOW_MS 30u
+#endif
+#ifndef DONGLE_RX_PERIOD_MS
+#define DONGLE_RX_PERIOD_MS 200u
+#endif
+#ifndef DONGLE_RX_GRACE_S
+#define DONGLE_RX_GRACE_S 60u
+#endif
+#ifndef DONGLE_RX_PHASE_MS
+#define DONGLE_RX_PHASE_MS 120u
+#endif
+#if DONGLE_RX_WINDOW_MS < 10 || DONGLE_RX_WINDOW_MS >= DONGLE_RX_PERIOD_MS \
+    || DONGLE_RX_PHASE_MS < DONGLE_RX_WINDOW_MS || DONGLE_RX_PHASE_MS > DONGLE_RX_PERIOD_MS * 5u
+#error "DONGLE_RX_WINDOW_MS/PERIOD_MS/PHASE_MS: need 10 <= W < P and W <= PHASE <= 5*P"
+#endif
+#define RF_WIN_MS_TO_TICKS(ms)   ((uint32_t)(ms) * 1000u * HAL_TICKS_PER_US)
+#define RF_WIN_PROBE_PERIOD_MS   1010u   /* measured resting-probe period */
+#define RF_WIN_PHASE_LEAD_MS     45u     /* 3 sigma of the measured jitter (15 ms) */
+#define RF_WIN_PHASE_WIDEN_MS    15u     /* per miss */
+#define RF_WIN_MAX_MISSES        2u      /* the third probe must be caught continuously */
+#define RF_WIN_MIN_LINK_RX       1u      /* answered polls that make a drop "confirmed traffic": the keyboard was on the
+                                          * data channel (a failed acquisition answers none; a ~10 ms resting link 4-11,
+                                          * occasionally fewer); the lock still needs two such drops at the 1 s cadence */
+#define RF_WIN_MAX_LINK_TICKS    64000u  /* TMR0 periods elapsed on the link times the negotiated interval, in hop
+                                          * ticks of 31.25 us: 2 s. An elapsed-time bound from the dongle's own poll
+                                          * grid, so a qualifying link cannot have wrapped hal_now() (71.6 s) at
+                                          * ANY advertised interval; a resting burst is well under it */
+#define RF_WIN_DROP_MAX_MS       300u    /* promote -> lapse within this = a scheduled drop (the lapse dispatch can
+                                          * trail the keyboard's ~10 ms stop by the supervision timeout plus a busy
+                                          * foreground, e.g. the library's 1 s ADC sample) */
+#define RF_WIN_CADENCE_MIN_MS    900u
+#define RF_WIN_CADENCE_MAX_MS    1100u
+#define RF_WIN_CAMP_TICK_MS      200u    /* RF_CAMP_WD_TICKS_TSYS */
+
+static uint8_t  rf_win_mode;             /* 1 = windowed: radio shut between windows */
+static uint8_t  rf_win_open;             /* a window is armed */
+static uint8_t  rf_win_phase_open;       /* the open window is the phase window */
+static uint8_t  rf_win_locked;           /* scheduled-drop detector locked on a resting keyboard */
+static uint8_t  rf_win_misses;           /* consecutive phase-window misses */
+static uint8_t  rf_win_sched_runs;       /* consecutive scheduled drops (saturating at 2): the lock needs two */
+static volatile uint8_t rf_win_accepted; /* the radio sink accepted a beacon inside the current window (ownership passed) */
+static uint8_t  rf_win_fault_next;       /* rung 3 while windowed: the next open arms, then shuts (deaf) */
+static uint32_t rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u;   /* grace remaining before windowing engages */
+static uint16_t rf_win_phase_ms;         /* current phase window width */
+static volatile uint16_t rf_win_link_rx; /* answered polls on the current link (connected RX sink) */
+static volatile uint32_t rf_win_link_periods; /* TMR0 grid periods elapsed on the current link (the CYC_END ISR, once per
+                                               * period whether or not the task loop coalesces the poll events), saturating */
+static uint32_t rf_win_promote_tsys, rf_win_prev_promote_tsys;
+static volatile uint32_t rfd_win_opens, rfd_win_closes, rfd_win_phase_opens, rfd_win_phase_misses;
+static volatile uint32_t rfd_win_catches, rfd_win_locks, rfd_win_unlocks, rfd_win_engages, rfd_win_faults;
+static uint8_t rfd_win_unsched_rx, rfd_win_unsched_long, rfd_win_unsched_late, rfd_win_uncadenced;   /* why a drop did not qualify */
+
+static uint8_t rf_camp_is_terminal(void);
+static void rf_arm_retry_if_failed(void);
+static void rf_ev10_rekey_cb(uint8_t slot);
+static void rfd_put32(uint8_t *p, uint32_t v);
+static void rfd_put16(uint8_t *p, uint16_t v);
+
+static void rf_win_reset(void)
+{
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    rf_win_mode = 0u; rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_locked = 0u;
+    rf_win_misses = 0u; rf_win_sched_runs = 0u; rf_win_accepted = 0u; rf_win_fault_next = 0u;
+    rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u;
+    rf_win_phase_ms = (uint16_t)DONGLE_RX_PHASE_MS;
+}
+
+/* Promote (radio sink, IRQ tail): the link is up; no window may fire. */
+__HIGH_CODE
+static void rf_win_on_promote(void)
+{
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    if (rf_win_open) {
+        rf_win_open = 0u; rf_win_phase_open = 0u; rfd_win_catches++;
+    }
+    rf_win_prev_promote_tsys = rf_win_promote_tsys;
+    rf_win_promote_tsys = hal_now();
+    rf_win_accepted = 0u;
+    rf_win_link_rx = 0u;
+    rf_win_link_periods = 0u;
+    rf_win_misses = 0u;
+    rf_win_phase_ms = (uint16_t)DONGLE_RX_PHASE_MS;
+}
+
+/* Supervision lapse (task, before the scan starts): the scheduled-drop detector. */
+static void rf_win_on_lapse(void)
+{
+    uint32_t now = hal_now();
+    uint32_t since_promote = now - rf_win_promote_tsys;                      /* modular Tsys */
+    uint32_t cadence = rf_win_promote_tsys - rf_win_prev_promote_tsys;        /* modular Tsys */
+    uint32_t interval = (rf_conn_interval != 0u) ? rf_conn_interval : 1u;
+    uint8_t short_link = (uint8_t)(rf_win_link_periods <= RF_WIN_MAX_LINK_TICKS / interval);
+    uint8_t scheduled = (uint8_t)(rf_win_link_rx >= RF_WIN_MIN_LINK_RX && short_link
+                                  && since_promote < RF_WIN_MS_TO_TICKS(RF_WIN_DROP_MAX_MS));
+    if (rf_win_link_rx < RF_WIN_MIN_LINK_RX) { rfd_win_unsched_rx++; }
+    else if (!short_link) { rfd_win_unsched_long++; }
+    else if (since_promote >= RF_WIN_MS_TO_TICKS(RF_WIN_DROP_MAX_MS)) { rfd_win_unsched_late++; }
+    uint8_t cadenced = (uint8_t)(rf_win_sched_runs >= 1u
+                                 && cadence >= RF_WIN_MS_TO_TICKS(RF_WIN_CADENCE_MIN_MS)
+                                 && cadence <= RF_WIN_MS_TO_TICKS(RF_WIN_CADENCE_MAX_MS));
+
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    hal_event_cancel(RF_EVT_RX_RESTART);
+    rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    if (scheduled) {
+        if (rf_win_sched_runs < 2u) { rf_win_sched_runs++; }
+    } else {
+        rf_win_sched_runs = 0u;
+    }
+    if (scheduled && !cadenced && rf_win_sched_runs >= 2u) { rfd_win_uncadenced++; }
+    if (scheduled && cadenced) {
+        /* two consecutive scheduled drops ~1 s apart: a resting production keyboard */
+        if (!rf_win_locked) { rf_win_locked = 1u; rf_win_misses = 0u; rfd_win_locks++; }
+        if (!rf_win_mode) {
+            if (rf_win_grace_ms > RF_WIN_PROBE_PERIOD_MS) {
+                rf_win_grace_ms -= RF_WIN_PROBE_PERIOD_MS;
+            } else {
+                rf_win_grace_ms = 0u; rf_win_mode = 1u; rfd_win_engages++;
+            }
+        }
+    } else {
+        /* an unscheduled loss, or the cadence broke: today's continuous scan. The grace
+         * is replenished only by a genuine session (a link past the grid bound: the user
+         * was typing); a short drop that merely missed the traffic or timing test is
+         * still the resting signature and must not keep restarting the grace. */
+        if (rf_win_locked) { rf_win_locked = 0u; rfd_win_unlocks++; }
+        if (!short_link) { rf_win_grace_ms = (uint32_t)DONGLE_RX_GRACE_S * 1000u; }
+        rf_win_mode = 0u;
+    }
+    if (rf_win_mode && rf_win_locked) {
+        uint32_t since_ms = since_promote / RF_WIN_MS_TO_TICKS(1u);
+        uint32_t open_at_ms = RF_WIN_PROBE_PERIOD_MS - RF_WIN_PHASE_LEAD_MS;
+        uint32_t delay_ms = (since_ms + DONGLE_RX_WINDOW_MS < open_at_ms) ? (open_at_ms - since_ms) : DONGLE_RX_WINDOW_MS;
+        hal_event_post_delayed(RF_EVT_RX_WIN_PHASE, RF_WIN_MS_TO_TICKS(delay_ms));
+    }
+}
+
+/* RF_EVT_RX_WIN_PHASE (task): open the phase-locked window in the scan. */
+static void rf_win_phase_open_now(void)
+{
+    if (!rf_win_mode || !rf_win_locked || !rf_supervision_ev10_active || rf_state != RF_STATE_PAIRING) {
+        return;
+    }
+    hal_event_cancel(RF_EVT_PAIR_PREP);      /* the 5 Hz open yields to the phase window */
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    rf_win_phase_open = 1u;
+    rfd_win_phase_opens++;
+    rf_send_pair_prep();                     /* arms channel 8 and posts the close at the phase width */
+}
+
+/* RF_EVT_RX_WIN_CLOSE (task): shut the radio unless the window's state moved on. */
+static void rf_win_close(void)
+{
+    uint32_t irq = __risc_v_disable_irq();
+    uint8_t in_scan = (uint8_t)(rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING);
+    uint8_t in_camp = (uint8_t)(rf_camp_wd_active && rf_camp_is_terminal());
+    uint8_t owned = (uint8_t)(rf_win_open && rf_win_mode && !rf_win_accepted && (in_scan || in_camp));
+    uint8_t was_phase = rf_win_phase_open;
+
+    if (owned) {
+        hal_event_cancel(RF_EVT_RX_RESTART);   /* a failed-arm retry must not reopen a closed window */
+        hal_rf_shut();
+    }
+    rf_win_open = 0u; rf_win_phase_open = 0u;
+    (void)__risc_v_enable_irq(irq);
+    if (!owned) {
+        return;                              /* accepted meanwhile, or the state moved on */
+    }
+    rfd_win_closes++;
+    if (in_scan) {
+        if (was_phase) {
+            rfd_win_phase_misses++;
+            rf_win_misses++;
+            /* keep the scan alive across the miss instead of giving up to the camp
+             * (drain a coalesced timeout first: rf_ev10_rekey_cb posts RF_EVT_TIMEOUT) */
+            hal_event_cancel(RF_EVT_TIMEOUT);
+            hal_timer_arm(HAL_TMR_SLOT_EV10_REKEY,
+                          RF_SUPERVISION_STOCK_WATCHDOG_TMOS * HAL_TMOS_UNIT_TICKS, rf_ev10_rekey_cb);
+            if (rf_win_misses >= RF_WIN_MAX_MISSES) {
+                rf_win_mode = 0u;            /* continuous scan until the next promote re-locks */
+                hal_event_post(RF_EVT_PAIR_PREP);
+                return;
+            }
+            rf_win_phase_ms = (uint16_t)(rf_win_phase_ms + RF_WIN_PHASE_WIDEN_MS);
+            hal_event_post_delayed(RF_EVT_RX_WIN_PHASE,
+                                   RF_WIN_MS_TO_TICKS(RF_WIN_PROBE_PERIOD_MS - rf_win_phase_ms));
+        }
+        hal_event_post_delayed(RF_EVT_PAIR_PREP,
+                               RF_WIN_MS_TO_TICKS(DONGLE_RX_PERIOD_MS - DONGLE_RX_WINDOW_MS));
+    }
+    /* camp: the camp tick opens the next window */
+}
+
+/* Camp tick (task, inside rf_camp_watchdog_tick after the terminal check). Returns 1 when the
+ * tick was a window open (the caller returns), 0 to run today's silent-tick logic. */
+static uint8_t rf_win_camp_tick(void)
+{
+    uint32_t irq;
+
+    if (!rf_bond_valid) {
+        return 0u;                           /* the unbonded fresh-pair camp stays continuous (D5) */
+    }
+    if (!rf_win_mode) {
+        if (rf_win_grace_ms > RF_WIN_CAMP_TICK_MS) {
+            rf_win_grace_ms -= RF_WIN_CAMP_TICK_MS;
+            return 0u;
+        }
+        rf_win_grace_ms = 0u; rf_win_mode = 1u; rfd_win_engages++;
+    }
+    irq = __risc_v_disable_irq();
+    if (!rf_camp_is_terminal()) {
+        rf_camp_wd_active = 0u;              /* the camp ended under us: self-disable, as the tick does */
+        (void)__risc_v_enable_irq(irq);
+        return 1u;
+    }
+    if (!rf_camp_wd_active) {
+        (void)__risc_v_enable_irq(irq);
+        return 1u;                           /* ownership already passed to a sink accept */
+    }
+    hal_event_cancel(RF_EVT_RX_RESTART);
+    rf_start_rx();                           /* the camp's own arm: session AA, channel 8 */
+    if (rf_win_fault_next) {                 /* rung 3: a deaf window; the next tick must recover */
+        rf_win_fault_next = 0u; hal_rf_shut(); rfd_win_faults++;
+    }
+    rf_win_open = 1u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    rfd_win_opens++;
+    hal_event_post_delayed(RF_EVT_RX_WIN_CLOSE, RF_WIN_MS_TO_TICKS(DONGLE_RX_WINDOW_MS));
+    (void)__risc_v_enable_irq(irq);
+    rf_arm_retry_if_failed();
+    if (rf_camp_wd_active) {
+        hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_WIN_MS_TO_TICKS(DONGLE_RX_PERIOD_MS), rf_boot_window_cb);
+    }
+    return 1u;
+}
+
+/* True only when the radio is genuinely shut with nothing to serve: windowed mode,
+ * no window open, and NO LIVE LINK. The connected state also has no window open
+ * (its receiver is armed by the poll cycle, not by a window), so without the state
+ * test this would report "radio off" between two 875 us polls and let a caller stop
+ * the clocks across the grid. */
+__HIGH_CODE
+uint8_t RF_WinRadioOff(void)
+{
+    return (uint8_t)(rf_win_mode && !rf_win_open && !rf_win_accepted
+                     && rf_state != RF_STATE_CONNECTED);
+}
+
+#if DONGLE_PM_HALT
+void pm_halt_diag(uint32_t *halts, uint32_t *ticks, uint16_t *usb_wakes);   /* pm_ch592.c */
+void pm_halt_diag2(uint32_t *abandons, uint32_t *reasons);                  /* pm_ch592.c */
+#endif
+
+static void rf_win_diag_fill(uint8_t *out)
+{
+    rfd_put32(&out[2],  rfd_win_opens);
+    rfd_put32(&out[6],  rfd_win_closes);
+    rfd_put32(&out[10], rfd_win_phase_opens);
+    rfd_put32(&out[14], rfd_win_phase_misses);
+    rfd_put32(&out[18], rfd_win_catches);
+    rfd_put32(&out[22], rfd_win_locks);
+    rfd_put32(&out[26], rfd_win_unlocks);
+    rfd_put32(&out[30], rfd_win_engages);
+    rfd_put16(&out[34], rf_win_link_rx);
+    rfd_put16(&out[36], rf_win_phase_ms);
+    rfd_put32(&out[38], rf_win_grace_ms);
+    out[42] = (uint8_t)((rf_win_mode ? 1u : 0u) | (rf_win_open ? 2u : 0u)
+                        | (rf_win_phase_open ? 4u : 0u) | (rf_win_locked ? 8u : 0u));
+    out[43] = rf_win_misses;
+    rfd_put32(&out[44], rfd_win_faults);
+    out[48] = rfd_win_unsched_rx; out[49] = rfd_win_unsched_long;
+    out[50] = rfd_win_unsched_late; out[51] = rfd_win_uncadenced;
+#if DONGLE_PM_HALT
+    {
+        uint32_t h, tk, at, rw; uint16_t uw;
+        pm_halt_diag(&h, &tk, &uw); pm_halt_diag2(&at, &rw);
+        rfd_put32(&out[52], h);                    /* halts that returned */
+        rfd_put32(&out[56], tk);                   /* RTC ticks actually halted */
+        rfd_put16(&out[60], (uint16_t)((at > 0xFFFFu) ? 0xFFFFu : at));   /* abandoned at the last look */
+        /* The page is full at 62 bytes; the abandon reasons and the backstop/USB counts ride
+         * page 5's spare high nibble is taken, so they stay debugger-only for now. */
+        (void)rw; (void)uw;
+    }
+#endif
+}
+#endif /* DONGLE_RX_WINDOW */
+
 static void rf_enter_stock_reacquire(void)
 {
+    rfd_supervision_lapses++;
+#if DONGLE_RX_WINDOW
+    rf_win_on_lapse();
+#endif
+    rfd_reacq_entry_systick = hal_timing_systick_now();
 #if !RF_TASK_EXECUTOR_TMOS
     if (rf_ch570_connected_rx_count == 0u) {
         rf_return_to_fresh_pair();
@@ -1225,6 +1724,7 @@ static void rf_enter_stock_reacquire(void)
     rf_pair_prep_idx = rf_proto_pair_scan_seed(rf_pair_ack15[4]);
     rf_channel = rf_pair_channels[rf_pair_prep_idx];
     rf_supervision_ev10_active = 1;
+    rfd_ev10_entries++;
 
     hal_rf_shut();
     rf_configure(rf_access_addr);
@@ -1275,6 +1775,86 @@ static void rf_arm_retry_if_failed(void)
          * fault-injection confirms the reschedule actually fires. */
         hal_event_post_delayed(RF_EVT_RX_RESTART,
                                RF_ARM_RETRY_TMOS * HAL_TMOS_UNIT_TICKS);
+        rfd_arm_retry_scheduled++;
+    }
+}
+
+static uint32_t rf_camp_wd_events(void)
+{
+    hal_rf_diag_t h;
+    hal_rf_diag_snapshot(&h);
+    return h.rx_done + h.rx_crcerr + h.rx_timeout;
+}
+
+/* The exact terminal camp the watchdog (and the 0x94 ladder) may act on:
+ * PAIRING, no EV10 scan, no boot window, no burst, not quiescing. */
+static uint8_t rf_camp_is_terminal(void)
+{
+    return (uint8_t)(rf_state == RF_STATE_PAIRING && !rf_supervision_ev10_active
+                     && !rf_boot_window_active && !rf_inject_burst_active
+                     && !rf_quiesced);
+}
+
+/* Task context, at every terminal-camp entry: start the liveness tick. */
+static void rf_camp_watchdog_arm(void)
+{
+    rf_camp_wd_seen   = rf_camp_wd_events();
+    rf_camp_wd_silent = 0u;
+    rf_camp_wd_active = 1u;
+    hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
+}
+
+/* Task context, one tick: RF_EVT_BOOT_WINDOW with the window closed. */
+static void rf_camp_watchdog_tick(void)
+{
+    uint32_t seen, irq;
+
+    if (!rf_camp_is_terminal()) {
+        rf_camp_wd_active = 0u;           /* the camp ended: self-disable */
+        return;
+    }
+#if DONGLE_RX_WINDOW
+    if (rf_win_camp_tick()) {
+        return;
+    }
+#endif
+    seen = rf_camp_wd_events();
+    if (seen != rf_camp_wd_seen) {
+        rf_camp_wd_seen   = seen;         /* alive: leave the radio alone */
+        rf_camp_wd_silent = 0u;
+    } else {
+        if (rf_camp_wd_silent < 0xFFu) {
+            rf_camp_wd_silent++;
+        }
+        /* Predicate and action under one IRQ mask (the 0x94 ladder's model):
+         * between an unmasked check and the re-arm the radio sink can accept
+         * a beacon and start a pair-ACK burst this must not tear through. */
+        irq = __risc_v_disable_irq();
+        if (!rf_camp_is_terminal()) {
+            (void)__risc_v_enable_irq(irq);
+            rf_camp_wd_active = 0u;
+            return;
+        }
+        hal_event_cancel(RF_EVT_RX_RESTART);   /* a stale restart must not race us */
+#if !RF_TASK_EXECUTOR_TMOS
+        if (rf_camp_wd_silent >= 2u) {     /* the timeout loop is dead: re-init */
+            hal_rf_shut();
+            hal_rf_init();
+            rfd_camp_wd_reinits++;
+        }
+#endif
+        rf_start_rx();
+        rfd_camp_wd_rearms++;
+        (void)__risc_v_enable_irq(irq);
+        rf_arm_retry_if_failed();
+    }
+    /* Re-arm only while still the slot's owner: a beacon accepted in the
+     * radio sink meanwhile cancelled the slot and cleared the flag, and the
+     * trailing arm must not bring it back (Copilot). The window between this
+     * read and the arm is a few instructions; a sink accept inside it costs
+     * one expiry whose tick self-disables. */
+    if (rf_camp_wd_active) {
+        hal_timer_arm(HAL_TMR_SLOT_BOOT_WINDOW, RF_CAMP_WD_TICKS_TSYS, rf_boot_window_cb);
     }
 }
 
@@ -1303,7 +1883,8 @@ static uint8_t rf_pair_tx_recover_if_failed(uint8_t status)
 
 static void rf_stock_reacquire_giveup(void)
 {
-
+    rfd_ev10_giveups++;
+    rfd_giveup_systick = hal_timing_systick_now();
     rf_supervision_ev10_active = 0;
     rf_stock_first_supervision_armed = 0;
     rf_last_conn_rx_tsys = 0;
@@ -1322,7 +1903,15 @@ static void rf_stock_reacquire_giveup(void)
     hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
     hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
     hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+    rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
     hal_event_cancel(RF_EVT_PAIR_PREP);
+#if DONGLE_RX_WINDOW
+    hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+    hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+    rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_accepted = 0u;
+    if (rf_win_locked) { rf_win_locked = 0u; rfd_win_unlocks++; }   /* the probes stopped: no lock to keep */
+    rf_win_sched_runs = 0u;
+#endif
     hal_event_cancel(RF_EVT_SEND_PAIR_ACK);
     hal_event_cancel(RF_EVT_POLL);
     hal_event_cancel(RF_EVT_POST_POLL_RX);
@@ -1381,7 +1970,7 @@ static void rf_stock_reacquire_giveup(void)
     rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
     rf_start_rx();
     rf_arm_retry_if_failed();   /* P4: don't strand deaf on a failed arm */
-    
+    rf_camp_watchdog_arm();     /* and never on a lost completion or a deaf PHY */
 }
 
 #if DONGLE_RF_CRYPT
@@ -1430,7 +2019,29 @@ static uint8_t rf_crypt_pending_plain;
  * authenticates the advert is where it gets closed properly. */
 static uint8_t rf_crypt_peer_capable;
 
-/* SPSC frame FIFO: the IRQ sink produces, the RF_EVT_CRYPT_RX task consumes.
+/* Deferred crypto work: two latches instead of two event bits.
+ *
+ * The RF task's event word has no free application bit (the windowed receiver
+ * took the last two), so the CCM verify drain and the session mint are not
+ * events. Each is a volatile byte latch, set by a plain store from any context
+ * (the radio IRQ sink posts both) and cleared by the handler BEFORE it does the
+ * work, which gives the same coalescing and never-lost contract as an event bit
+ * without a read-modify-write. RF_ProcessEvent tests the latches at the place
+ * in its priority chain the two events used to hold (after the post-poll RX
+ * arm, ahead of the poll), so dispatch order is exactly what it was.
+ *
+ * A latch cannot make the executor run, so every post also raises RF_EVT_WAKE
+ * (rf_task.h): a bit of the SAME task, so there is one owner and one ordering.
+ * RF_EVT_WAKE stays set in the handler's return value until the chain reaches
+ * the latches and finds both clear. A second TMOS task was tried first and
+ * withdrawn on review: this TMOS dispatches round-robin, not by registration
+ * order, so a separate task could run the verify ahead of a pending RX re-arm. */
+static volatile uint8_t rf_crypt_work_rx;
+static volatile uint8_t rf_crypt_work_session;
+#define rf_crypt_post_rx()      do { rf_crypt_work_rx = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+#define rf_crypt_post_session() do { rf_crypt_work_session = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+
+/* SPSC frame FIFO: the IRQ sink produces, the crypt RX work item (task context) consumes.
  * Entries hold the LEN-covered bytes (from rxBuf[2]). A ring of N slots holds
  * N-1 frames; N=2 (one in-flight frame) is what keeps CH570 under its 2 KB
  * stack floor with encryption on. That is ample in normal use -- an encrypted
@@ -1603,7 +2214,7 @@ static uint32_t rf_crypt_drops;   /* diagnostic (approximate): frames dropped;
  *   enc_shape   frames the classifier accepted (a FIFO push was attempted)
  *   fifo_full   pushes refused because the 2-deep FIFO was full or the frame
  *               was oversize (an executor stall shows up here and nowhere else)
- *   flush_drop  frames discarded unverified by the RF_EVT_CRYPT_SESSION flush,
+ *   flush_drop  frames discarded unverified by the session-mint flush,
  *               which runs on every mint and so up to 8 times per announce
  *   plain_drop  plaintext HID refused as a downgrade on an encrypted bond
  *
@@ -1629,7 +2240,7 @@ uint8_t  rf_crypt_len_max_tag;
  * the only downstream effect is an unattributed connection flap. That made an
  * active downgrade/forgery attempt indistinguishable from RF flakiness on a
  * shipping unit. 4 bytes of .bss against the CH570 floor's measured 1372 B of
- * slack. Exported in the product 0x94 (iap.c). */
+ * slack. Exported in the product 0x98 (iap.c). */
 uint32_t rf_crypt_plain_drop;
 
 static uint32_t rf_crypt_gen_session_id(void);   /* defined near rf_aa_rng16 */
@@ -1659,22 +2270,42 @@ static uint8_t rf_crypt_fifo_push(const uint8_t *frame, uint8_t len)
     return 1u;
 }
 
-/* IRQ-sink helper: may this frame steer the poll ctrl feedback on an ACTIVE
- * encrypted bond? Polls (LEN-1) and well-formed encrypted frames may; a
- * plaintext HID-shaped frame (a downgrade/forgery) may not, so an attacker
- * cannot desync the poll feedback with unauthenticated bytes. */
-__attribute__((noinline))
-static uint8_t rf_crypt_ctrl_feedback_ok(const uint8_t *rxBuf)
-{
-    if (!rf_crypt_bond_enc) {
-        return 1u;
-    }
-    if (rxBuf[1] == RF_PROTO_LEN_POLL) {
-        return 1u;
-    }
-    return rf_crypt_encrypted_body_len(rxBuf[3], rxBuf[1]) ? 1u : 0u;
-}
 #endif /* DONGLE_RF_CRYPT */
+
+#if DONGLE_RF_CRYPT
+/* Task context: discard every admitted-but-unverified frame. Only the head is
+ * moved (the consumer's index); a frame the sink pushes concurrently either
+ * lands before the tail read and is dropped, or after it and is caught by the
+ * drain's own CONNECTED check or the next session mint. */
+static void rf_crypt_rx_flush(void)
+{
+    rf_crypt_fifo_head = rf_crypt_fifo_tail;
+}
+#endif
+
+/* Control-byte feedback for a frame the CONNECTED handler admits (stock
+ * PROTOCOL.md formula, bit 1 = the keyboard's fresh-packet indicator; we flip
+ * bit 0 when it changes), plus the LED relay delivery accounting that rides
+ * the same answer (see rf_led_relay_phase): an answer to the relay poll
+ * retires it, one to the gap after an unanswered relay poll spends a try.
+ * Forced inline: it runs in the radio IRQ sink, and a flash-resident call
+ * there is the shape that degraded the link. */
+static inline __attribute__((always_inline)) void rf_connected_admit_feedback(uint8_t rx_ctrl)
+{
+    uint8_t phase;
+
+    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rx_ctrl);
+    phase = rf_led_relay_phase;
+    if (phase == RF_LED_RELAY_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
+        if (rf_app_tx_buf[1] == rf_led_relay_carried) {
+            rf_app_tx_pending = 0u;
+        }
+    } else if (phase == RF_LED_RELAY_GAP_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
+        rf_led_relay_misses++;
+    }
+}
 
 /* ---------- RF status callback (runs in interrupt context) ---------- */
 
@@ -1694,6 +2325,30 @@ static uint8_t rf_crypt_ctrl_feedback_ok(const uint8_t *rxBuf)
  * be guarded; it is NOT cooperatively serialized. The legacy body below
  * is preserved VERBATIM (it is heavily bench-validated); the (sta, rsr) pair
  * it branches on is re-synthesized from the event. */
+/* IAP 0x92: name the gate a LEN-10 fell through (mirrors the accept condition
+ * in the sink; evaluated only on the reject path, counters only). Cold, so it
+ * runs from flash: CH570's SRAM sits at its stack floor, and the LED relay's
+ * delivery tracking in the sink needed the room. noinline, or it lands back in
+ * the sink's RAM. */
+DONGLE_HIGHCODE_COLD __attribute__((noinline))
+static uint8_t rf_diag_len10_reject_reason(const uint8_t *rxBuf)
+{
+    if (rf_bond_tombstone) {
+        return RFD_L10_REJ_TOMBSTONE;
+    }
+    if (rf_bond_valid && !rf_pair_window_open) {
+        return RFD_L10_REJ_LOCKED;      /* bonded lockout: window closed and the
+                                         * known-peer disjunct did not match */
+    }
+    if (!rf_accept_peer_mac(&rxBuf[2])) {
+        return RFD_L10_REJ_BAD_MAC;
+    }
+    if (rf_rssi < RF_PAIR_MIN_RSSI) {
+        return RFD_L10_REJ_RSSI;
+    }
+    return RFD_L10_REJ_OTHER;
+}
+
 __HIGH_CODE
 static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxlen)
 {
@@ -1719,30 +2374,17 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     default:
         return;
     }
-    if (sta == 0x03) {
-        if (rsr == 0 && rxBuf
-#if DONGLE_RF_CRYPT
-            /* On an ACTIVE encrypted bond, only polls and well-formed encrypted
-             * frames may steer the poll ctrl feedback; a plaintext HID forgery
-             * must not (it is dropped below, and its clear ctrl is unauthenticated).
-             * An encrypted frame's ctrl is authenticated as AAD and re-checked in
-             * the task -- a tampered ctrl there fails the tag and is dropped, so
-             * the only residual is a jammer desyncing poll feedback (DoS), never
-             * HID injection. */
-            && rf_crypt_ctrl_feedback_ok(rxBuf)
-#endif
-           ) {
-            /* Stock dongle's tx_ctrl feedback formula (PROTOCOL.md:324):
-             *   if ((rx_ctrl ^ tx_ctrl) & 2)
-             *       tx_ctrl = ((tx_ctrl & ~2) | (rx_ctrl & 2)) ^ 1;
-             * Synchronises bit 1 with the keyboard's "fresh packet"
-             * indicator. Without this update our tx_ctrl never matches
-             * what the keyboard expects, so its CONNECTED-state RX
-             * validator stale-rejects most polls. */
-            rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0],
-                                                  rxBuf[2]);
-        }
-    }
+    /* The stock control-byte feedback (rf_proto_ctrl_update) used to run
+     * HERE, on every good RX before the state switch. That acked frames this
+     * task never admitted: a LEN-10 that the not-CONNECTED consumer below
+     * swallowed as a beacon (or rejected) still flipped our poll bit, and the
+     * keyboard's ack-retired FIFO released a report we never dispatched.
+     * Bench 2026-09-13: first key after a dongle reset, keyboard
+     * ll_hid_tx_done_down advanced, rfd_hid_rx unchanged, no retransmit. The
+     * feedback now lives in the CONNECTED handler, applied only to a frame
+     * this session admits (a LEN-1 keepalive or a classified HID report), so
+     * an ack means "admitted by the RF task" -- it precedes the optional
+     * forwarding callback; the EP1 queue's counters cover the USB hop. */
     switch (sta) {
     case RX_MODE_RX_DATA:
         if (rsr != 0) {
@@ -1866,6 +2508,14 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                         rf_bond_persisted = 0;  /* tuple not the verified DataFlash one */
                     }
                 }
+                rfd_len10_seen++;
+                if (rf_pair_is_fresh) {
+                    rfd_len10_accept_fresh++;
+                    rfd_len10_last_disp = RFD_L10_ACCEPT_FRESH;
+                } else {
+                    rfd_len10_accept_known++;
+                    rfd_len10_last_disp = RFD_L10_ACCEPT_KNOWN;
+                }
 #endif
 #if DONGLE_RF_CRYPT
                 /* Peer-change / fresh-dongle accept ONLY (this runs before the
@@ -1902,6 +2552,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 rf_boot_window_active = 0;
                 rf_pair_window_open   = 0;
                 hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+                rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
                 /* Arm the burst state machine — the IRQ-side TX_FINISH
                  * for this first TX will then chain RF_EVT_TX_PAIR_15B
                  * to fire 5 more 15-byte TXes on session AA across the
@@ -1924,6 +2575,8 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #else
                 hal_event_post(RF_EVT_TX_PAIR_15);
 #endif
+                rfd_pair_ack_posted++;
+                rfd_ack_accept_systick = (uint32_t)SysTick->CNT;
                 break;
             }
 
@@ -1945,6 +2598,12 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             }
 #endif
 
+            /* IAP 0x92: a LEN-10 that fell through the accept gate above. */
+            if (rxBuf[1] == 10) {
+                rfd_len10_seen++;
+                rfd_len10_rejected++;
+                rfd_len10_last_disp = rf_diag_len10_reject_reason(rxBuf);
+            }
             /* Ignore any non-pair packet while listening for a connection. */
             hal_event_post(RF_EVT_RX_RESTART);
             break;
@@ -1958,6 +2617,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                                             * stamps refresh every RX, reads
                                             * within the 10 s deadline) */
             rf_last_conn_rx_tsys = rx_now;
+#if DONGLE_RX_WINDOW
+            if (rf_win_link_rx != 0xFFFFu) { rf_win_link_rx++; }
+#endif
 
 #if !RF_TASK_EXECUTOR_TMOS
             rf_ch570_connected_rx_count++;
@@ -1987,8 +2649,6 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * re-broadcasting). The supervision/EV10 machinery handles the
              * recovery. */
 
-            /* Save control byte */
-            rf_ctrl_byte = rxBuf[2];
 
             /* Dispatch HID data if callback registered and payload present.
              * On-wire layout (validated against sniff-mode decoder at the
@@ -2004,13 +2664,21 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 if (rf_crypt_bond_enc) {
                     if (rf_crypt_encrypted_body_len(rxBuf[3], len)) {
                         /* Encrypted HID frame: copy out and defer verify+decrypt
-                         * to the executor (RF_EVT_CRYPT_RX). Nothing is forwarded
+                         * to the executor (rf_crypt_post_rx). Nothing is forwarded
                          * until the CCM tag verifies. */
 #if RF_CRYPT_DIAG_PREV_SESSION
                         rf_crypt_enc_shape++;
 #endif
+                        /* NO control-byte feedback here. The ack that
+                         * retires the keyboard's report (and an LED relay) is
+                         * given by the drain, and only for a frame whose tag
+                         * and counter verified: acking at admission let a
+                         * replayed or forged frame of the right shape retire
+                         * a report the dongle never accepted. A frame the
+                         * FIFO refuses is not acked either, so the keyboard
+                         * retransmits it. */
                         if (rf_crypt_fifo_push(&rxBuf[2], len)) {
-                            hal_event_post(RF_EVT_CRYPT_RX);
+                            rf_crypt_post_rx();
                         }
                         enc_handled = 1u;
                     } else if (rf_proto_hid_report_tag_for_peer(rxBuf, len,
@@ -2028,6 +2696,45 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 {
                 uint8_t hid_tag =
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
+#if DONGLE_BENCH_DROP_FIRST_HID
+                /* Bench fault injection: swallow the first non-zero boot-keyboard
+                 * report after each promote before the reception counters, the
+                 * feedback and the forwarding callback, so it is neither counted
+                 * nor acked nor forwarded (it still refreshes liveness and
+                 * supervision like any connected RX). Whether the keyboard's
+                 * ack-retired FIFO then loses that report or retransmits it is
+                 * exactly what the control-byte feedback placement decides. */
+                if (rf_bench_drop_armed && hid_tag == RF_PROTO_HID_TAG
+                    && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
+                    rf_bench_drop_armed = 0u;
+                    rf_bench_drops++;
+                    hid_tag = 0u;
+                }
+#endif
+                /* Control-byte feedback (stock PROTOCOL.md formula, bit 1 =
+                 * the keyboard's fresh-packet indicator; we flip bit 0 when it
+                 * changes) -- ONLY for a frame this session admits, so the
+                 * keyboard retires a report exactly when the RF task accepts
+                 * it (the forwarding callback follows). A frame the injection
+                 * above swallowed, or one the classifier rejects, must not be
+                 * acked. */
+                if (len == 1u || hid_tag != 0u) {
+                    rf_connected_admit_feedback(rxBuf[2]);
+                }
+#if DONGLE_DELIVERY_COUNTERS
+                if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
+                    rfd_hid_rx++;
+                    /* Boot keyboard only: the classifier returns RF_PROTO_HID_TAG solely
+                     * for an exact LEN-10 frame (it rejects a short 0xA1 precisely so a
+                     * sink cannot read past the body), so the tag alone makes the 8-byte
+                     * read in bounds. Consumer 0xA3 and mouse 0xA8 have shorter bodies and
+                     * route to EP3/EP2, not the EP1 path this is compared against. */
+                    if (hid_tag == RF_PROTO_HID_TAG
+                        && (rxBuf[4]|rxBuf[5]|rxBuf[6]|rxBuf[7]|rxBuf[8]|rxBuf[9]|rxBuf[10]|rxBuf[11])) {
+                        rfd_hid_rx_down++;
+                    }
+                }
+#endif
                 if (hid_tag && rf_hid_callback) {
                     rf_hid_callback(hid_tag, &rxBuf[4], len - 2);
                 }
@@ -2071,6 +2778,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 const uint8_t *payload = &rxBuf[2];
                 const uint8_t *peer_mac = payload;
                 uint8_t mac_is_zero = 1;
+
+                rfd_len10_ev10_seen++;
+                rfd_len10_last_disp = RFD_L10_EV10;
 
                 for (int j = 0; j < 6; j++) {
                     if (rf_peer_mac[j] != 0) {
@@ -2120,6 +2830,12 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 
                     if (rf_supervision_ev10_active) {
                         hal_event_cancel(RF_EVT_PAIR_PREP);
+#if DONGLE_RX_WINDOW
+                        hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+                        hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+                        rf_win_accepted = 1u;
+                        if (rf_win_open) { rf_win_open = 0u; rf_win_phase_open = 0u; rfd_win_catches++; }
+#endif
                         hal_timer_arm_periodic(HAL_TMR_SLOT_PAIR_ACK,
                                       RF_TMR0_PAIR_INIT_COUNT, rf_pair_ack_cb);
                         
@@ -2142,6 +2858,10 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     case TX_MODE_TX_FINISH:
         if (rf_inject_burst_active) {
             uint8_t promote_now = 0;
+            rfd_pair_ack_tx_done++;
+            if (rf_inject_burst_idx == 0u) {
+                rfd_ack_tx_duration = (uint32_t)SysTick->CNT - rfd_ack_tx_systick;
+            }
             if (rf_inject_burst_idx >= RF_BURST_PROMOTE_AFTER_SESSION_BURST) {
                 promote_now = 1;
             }
@@ -2235,7 +2955,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * value captured at burst#1. */
                 if (rf_hop.last == 0) {
                     rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                    rf_hop.last = rf_hop_backdate(rf_hop_read(), 13u);
+                    rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);
                     stock_seed_burst_applied = 0;
                 }
 #if RF_TASK_EXECUTOR_TMOS
@@ -2248,7 +2968,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * fixed hop-phase offset -> deaf connected poll -> rx=0
                  * (bench + codex 2026-07-07). CH570 keeps the burst#1 anchor. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                rf_hop.last = rf_hop_read();
+                rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);   /* the poll grid starts here: edge anchor */
 #endif
                 stock_seed_burst_applied = 0xFE;
                 /* Keep rf_poll_buf[0] stable (per stock: initialized
@@ -2258,11 +2978,19 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* Stock configures the session-AA radio path while still in
                  * state 1, then commits state 2. Keep that ordering so our
                  * rf_config entry context matches the stock caller trace. */
+#if DONGLE_RX_WINDOW
+                rf_win_on_promote();
+#endif
+                rfd_connected_promotes++;   /* diag: before the flip, so the
+                                             * flip -> grid-arm gap is untouched */
+#if DONGLE_BENCH_DROP_FIRST_HID
+                rf_bench_drop_armed = 1u;
+#endif
                 rf_start_rx();
                 rf_state = RF_STATE_CONNECTED;
 #if DONGLE_RF_CRYPT
                 /* On an encrypted bond, mint a fresh per-session nonce (in task
-                 * context via RF_EVT_CRYPT_SESSION) and start announcing it. */
+                 * context via rf_crypt_post_session) and start announcing it. */
                 if (rf_crypt_bond_enc) {
                     /* Arm the silence deadline HERE, not just in the mint
                      * handler. The mint is an event: rf_send_poll runs every
@@ -2272,7 +3000,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                      * reconnect. The old reception counter hid this window
                      * because it needed 64 arrivals to trip. */
                     rf_crypt_arm_silence();
-                    hal_event_post(RF_EVT_CRYPT_SESSION);
+                    rf_crypt_post_session();
                 }
 #endif
                 /* OQ7 Track 2f (2026-05-17): per stock event 0x40 disasm
@@ -2314,7 +3042,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * LED byte. Replaces the cancellable delayed LED3 event; the
                  * queue survives the supervision/EV10 rebind, and TMR0 is NOT
                  * restarted so the poll grid/phase-lock above is preserved. */
-                rf_queue_led_relay(rf_led_state);
+                rf_led_relay_resync();
 #if RF_CONFIRM_BEFORE_PERSIST
                 if (rf_pair_is_fresh) {
                     /* CODEREVIEW N11: fresh pair is tentative until the peer
@@ -2329,6 +3057,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                      * active, so the TMOS timer pool has room; the poll still runs,
                      * so a present keyboard confirms regardless. */
                     rf_confirm_state = RF_CONFIRM_STATE_WAIT_RX;
+                    rfd_confirm_armed++;
                     hal_event_post_delayed(RF_EVT_CONFIRM_TIMEOUT,
                         RF_CONFIRM_TIMEOUT_TMOS * HAL_TMOS_UNIT_TICKS);
                     /* N11 fix (bench-proven 2026-07-13, Codex-reviewed): a fresh
@@ -2382,8 +3111,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             rf_conn_interval = rf_active_conn_interval();
             rf_conn_timeout = rf_active_conn_timeout();
             rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack_buf[4]);
-            rf_hop.last = rf_ev10_rekey_tx_hop ? rf_ev10_rekey_tx_hop
-                                                : rf_hop_read();
+            rf_hop.last = rf_hop_backdate(rf_ev10_rekey_tx_hop ? rf_ev10_rekey_tx_hop
+                                                                : rf_hop_read(),
+                                          RF_PROTO_HOP_EDGE_LEAD);   /* edge anchor of the re-keyed grid */
             stock_seed_burst_applied = 0xF7;
             rf_data_ch_idx = rf_hop.prev_idx;
             rf_channel = rf_data_channels[rf_data_ch_idx];
@@ -2394,6 +3124,13 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             /* Production shape: RF config happens while still in state 1;
              * TX_FINISH then promotes to state 2 and the already-running
              * TMR0 event-0x40 cadence becomes connected polling. */
+#if DONGLE_RX_WINDOW
+            rf_win_on_promote();
+#endif
+            rfd_connected_promotes++;       /* diag: before the flip (see above) */
+#if DONGLE_BENCH_DROP_FIRST_HID
+            rf_bench_drop_armed = 1u;
+#endif
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
 #if DONGLE_RF_CRYPT
@@ -2402,13 +3139,19 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 /* Same reason as the fresh-pair promote: arm the deadline at
                  * the state change, not when the mint event is dispatched. */
                 rf_crypt_arm_silence();
-                hal_event_post(RF_EVT_CRYPT_SESSION);
+                rf_crypt_post_session();
             }
 #endif
 #if !RF_TASK_EXECUTOR_TMOS
 #endif
             rf_last_conn_rx_tsys = hal_now();
             rf_arm_connected_supervision(1);
+            /* Re-sync the keyboard LED, as the burst promote does. This is the
+             * path a bonded keyboard comes back on after every lapse -- a
+             * keyboard that rests between short probes takes it once a
+             * second -- and a host change made while the link was down was
+             * only latched in rf_led_state. */
+            rf_led_relay_resync();
 #if !RF_TASK_EXECUTOR_TMOS
             /* The CH592 phase-lock inherit, for real: rf_send_pair_ack armed
              * the PAIR_ACK slot as the hardware grid immediately before the
@@ -2447,6 +3190,13 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
          * re-enter rf_config during transient state==1 reconnect/teardown
          * windows, but not on every state==2 poll. */
         if (rf_state == RF_STATE_CONNECTED) {
+            /* A relay or gap poll is on the air: its answer counts from now. */
+            {
+                uint8_t phase = rf_led_relay_phase;
+                if (phase & 1u) {
+                    rf_led_relay_phase = (uint8_t)(phase + 1u);
+                }
+            }
             /* Stock-shaped: post the dedicated post-poll RX event so
              * the dispatcher arms RX via RF_Rx(rf_poll_buf, 10, ...)
              * without RF_Config. Mirrors stock callback's
@@ -2489,6 +3239,9 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
         }
         if (rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING) {
             hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
+#if DONGLE_RX_WINDOW
+            rf_win_accepted = 0u;   /* the accepted window is abandoned: the scan owns the radio again */
+#endif
             hal_event_post(RF_EVT_PAIR_PREP);
             
             break;
@@ -2523,15 +3276,56 @@ static void rf_arm_post_poll_rx(void)
     }
 }
 
+#if DONGLE_RF_CRYPT
+static uint16_t rf_process_event_body(uint8_t task_id, uint16_t events);
+
+/* Latched crypto work outstanding (and still wanted). */
+static inline uint8_t rf_crypt_work_pending(void)
+{
+    return (uint8_t)(!rf_quiesced && (rf_crypt_work_rx | rf_crypt_work_session));
+}
+
+/* The executor entry. The body's own "keep RF_EVT_WAKE in the return value"
+ * is not enough on TMOS: tmos_msg_receive(), which the body must call for
+ * that bit, cancels the bit behind the handler's back when the queue is empty
+ * (it stops the task's 0x8000 timer, which masks the bit out of the returned
+ * word -- found in the bundled library's disassembly on review). So the wake
+ * is re-posted here, after the body and therefore after that cancel, whenever
+ * a latch is still set. One body pass takes at most one latch, so this also
+ * chains the second. */
 static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 {
+    uint16_t left = rf_process_event_body(task_id, events);
+
+    if (rf_crypt_work_pending()) {
+        hal_event_post(RF_EVT_WAKE);
+    }
+    return left;
+}
+
+static uint16_t rf_process_event_body(uint8_t task_id, uint16_t events)
+#else
+static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
+#endif
+{
+#ifdef RF_PROCESS_EVENT_HOOK
+    /* CH592 PM_IDLE: the "app task ran this iteration" latch, so leftover bits
+     * a handler re-queues (the `events ^ bit` returns below) are never slept
+     * past. Defined by ch592/src/hal_timing_ch592.h; CH570 defines nothing. */
+    RF_PROCESS_EVENT_HOOK(events);
+#endif
 #if RF_TASK_EXECUTOR_TMOS
     if (events & SYS_EVENT_MSG) {
         uint8_t *pMsg;
         if ((pMsg = tmos_msg_receive(task_id)) != NULL) {
             tmos_msg_deallocate(pMsg);
         }
+#if !DONGLE_RF_CRYPT
         return events ^ SYS_EVENT_MSG;
+#endif
+        /* With link encryption this bit is also RF_EVT_WAKE (rf_task.h): it
+         * is NOT consumed here. It rides in `events` through every return
+         * below until the crypto latches are found clear. */
     }
 #else
     (void)task_id;   /* the pump passes 0; no TMOS message queue exists */
@@ -2568,6 +3362,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         uint8_t slot;
         uint16_t bit;
         rf_quiesced = 1;
+#if DONGLE_RX_WINDOW
+        hal_event_cancel(RF_EVT_RX_WIN_CLOSE);
+        hal_event_cancel(RF_EVT_RX_WIN_PHASE);
+        rf_win_open = 0u; rf_win_phase_open = 0u; rf_win_mode = 0u;
+#endif
         if (rf_bond_persist_pending) {
             rf_persist_bond_task();
         }
@@ -2579,8 +3378,8 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
 #if DONGLE_RF_CRYPT
         /* The crypto events sit above RF_EVT_PERSIST_BOND, outside the sweep. */
-        hal_event_cancel(RF_EVT_CRYPT_RX);
-        hal_event_cancel(RF_EVT_CRYPT_SESSION);
+        rf_crypt_work_rx = 0u;
+        rf_crypt_work_session = 0u;
         rf_crypt_announce_count = 0u;
         rf_crypt_fifo_head = rf_crypt_fifo_tail;
 #endif
@@ -2615,9 +3414,24 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * too. (Bonded already has the boot-window timer; the guard is a benign
          * faster backstop there.) */
         rf_arm_retry_if_failed();
+        if (rf_bond_valid) {
+            rf_camp_wd_active = 0u;     /* the boot-window timer owns the slot */
+        } else {
+            rf_camp_watchdog_arm();     /* the unbonded camp is terminal at once */
+        }
         return events ^ RF_EVT_START;
     }
 
+#if DONGLE_RX_WINDOW
+    if (events & RF_EVT_RX_WIN_CLOSE) {
+        rf_win_close();
+        return events ^ RF_EVT_RX_WIN_CLOSE;
+    }
+    if (events & RF_EVT_RX_WIN_PHASE) {
+        rf_win_phase_open_now();
+        return events ^ RF_EVT_RX_WIN_PHASE;
+    }
+#endif
     if (events & RF_EVT_BOOT_WINDOW) {
         /* Stock-style boot reconnect/pair window. Runs only while bonded and
          * still un-connected. Each ~300 ms tick flips the listen AA between the
@@ -2629,6 +3443,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * stops re-posting, so it self-disables without touching any promote
          * site. */
         if (!rf_boot_window_active) {
+            if (rf_camp_wd_active) {
+                rf_camp_watchdog_tick();   /* the closed camp's liveness tick */
+            }
             return events ^ RF_EVT_BOOT_WINDOW;
         }
         if (rf_state != RF_STATE_PAIRING || rf_supervision_ev10_active) {
@@ -2641,11 +3458,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * keyboard now needs a dongle replug to re-open the window. */
             rf_boot_window_active = 0;
             rf_pair_window_open   = 0;
+            rfd_bootwin_closes++;
             rf_access_addr = rf_bond_aa;
             rf_channel     = RF_PROTO_RECONNECT_CAMP_CHANNEL;
             rf_start_rx();
             rf_arm_retry_if_failed();   /* P4: closed window has no re-arm
                                          * timer — don't strand deaf */
+            rf_camp_watchdog_arm();     /* the slot stays on as the liveness tick */
         } else {
             /* Alternate: odd step = pair AA (new pair), even = session AA
              * (reconnect). rf_start_rx() does RF_Shut + reconfigure + RF_Rx so
@@ -2709,9 +3528,24 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         (void)__risc_v_enable_irq(irq);
         if (st == RF_CONFIRM_STATE_WAIT_RX) {
+#if DONGLE_RF_CRYPT
+            /* "No key is forwarded on this teardown" holds for plaintext only:
+             * a plaintext HID frame moves the latch off WAIT_RX in the sink
+             * before it is forwarded. An encrypted frame is forwarded later,
+             * by the drain, and does not touch the latch -- so a same-peer
+             * re-pair on a keyed bond whose bare replies were all lost can
+             * reach here having delivered a key-down. Drop what is queued and
+             * release, now that CONNECTED is already left. */
+            rf_crypt_rx_flush();
+            if (rf_crypt_bond_enc) {
+                rf_release_keys();
+            }
+#endif
+            rfd_confirm_to_waitrx++;
             rf_bond_persisted = 0;   /* the tentative bond was never persisted */
             rf_return_to_fresh_pair();
         } else if (st == RF_CONFIRM_STATE_WAIT_REARM) {
+            rfd_confirm_to_waitrearm++;
             rf_arm_bond_persist();            /* confirmed -> make it durable */
             /* Codex fix re-review: only (re)arm the first-supervision timer if we
              * are still the CONNECTED owner of the radio. If a persistent post-
@@ -2750,6 +3584,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * Re-arming here would RF_Shut+RF_Rx mid-dwell and gap the listen
          * window, dropping the occasional LEN-10. */
         if (rf_supervision_ev10_active && rf_state == RF_STATE_PAIRING) {
+            rfd_rx_restart_dropped_ev10++;
             return events ^ RF_EVT_RX_RESTART;
         }
         /* RX-after-RX: fast path, no Config. Closes the "keyboard reply lands
@@ -2774,6 +3609,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * funnels through. If the re-arm fails, the radio timeout that would
          * re-drive us never fires, so reschedule ourselves off the guard. */
         rf_arm_retry_if_failed();
+        rfd_rx_restart_handled++;
+        /* A restart that lands in a terminal camp without the liveness tick
+         * (the bond-clear tombstone paths reach their camp this way, with no
+         * timer left) starts it here, so no camp depends on its entry site
+         * remembering to (codex). One compare on the connected path. */
+        if (rf_state == RF_STATE_PAIRING && !rf_camp_wd_active && rf_camp_is_terminal()) {
+            rf_camp_watchdog_arm();
+        }
 #if RF_CONFIRM_BEFORE_PERSIST
         /* Only NOW (after a SUCCESSFUL post-confirm arm) commit the durable bond,
          * so the flash erase/write never runs while RX is deaf (RF_EVT_PERSIST_BOND
@@ -2816,7 +3659,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
 #if DONGLE_RF_CRYPT
-    if (events & RF_EVT_CRYPT_SESSION) {
+    if (rf_crypt_work_session) {
+        rf_crypt_work_session = 0u;   /* clear BEFORE the work: a post that
+                                       * lands during it runs another pass */
         /* Task context: mint a fresh 32-bit session nonce, reset the replay
          * window and the silence guard, drop any stale queued frames, and
          * pre-build the authenticated session-nonce frame so the next few polls
@@ -2862,14 +3707,15 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                  * handling and the boot KAT telemetry already cover. */
                 rf_crypt_announce_retry_budget--;
                 rf_crypt_announce_retry++;
-                hal_event_post(RF_EVT_CRYPT_SESSION);
+                rf_crypt_post_session();
 #endif
             }
         }
-        return events ^ RF_EVT_CRYPT_SESSION;
+        return events;
     }
 
-    if (events & RF_EVT_CRYPT_RX) {
+    if (rf_crypt_work_rx) {
+        rf_crypt_work_rx = 0u;   /* clear BEFORE the drain, as above */
         /* Task context: drain the frame FIFO the IRQ sink filled, verifying and
          * decrypting each. Nothing reaches USB without a verified CCM tag. */
         while (rf_crypt_fifo_head != rf_crypt_fifo_tail) {
@@ -2887,9 +3733,26 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 #if RF_CRYPT_DIAG_PREV_SESSION
             rf_crypt_in_aes = 0u;
 #endif
+            /* The slot's ctrl byte, read before the slot is released to the sink. */
+            uint8_t rx_ctrl = rf_crypt_fifo_buf[h][0];
             rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
 
+            if (rf_state != RF_STATE_CONNECTED) {
+                /* The link ended between admission and this drain (the release
+                 * already sent all-keys-up). Forwarding now would put a key-down
+                 * AFTER that release with no keyboard left to lift it. */
+                rf_crypt_rx_flush();
+                break;
+            }
             if (st == RF_CRYPT_OK) {
+                /* Authenticated and fresh: now, and only now, ack it. Masked
+                 * because the sink (and on CH570 the poll timer ISR) read and
+                 * write the same poll byte and relay phase. */
+                uint32_t fb_irq = __risc_v_disable_irq();
+                if (rf_state == RF_STATE_CONNECTED) {
+                    rf_connected_admit_feedback(rx_ctrl);
+                }
+                (void)__risc_v_enable_irq(fb_irq);
                 rf_crypt_ok_count++;
                 rf_crypt_last_auth_tsys = hal_now();  /* authenticated liveness */
                 rf_crypt_announce_count = 0u;    /* keyboard has the session nonce */
@@ -2914,8 +3777,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 }
             }
         }
-        return events ^ RF_EVT_CRYPT_RX;
+        return events;
     }
+    /* Both latches clear: the wake is spent. A post that lands after this
+     * line sets the bit again in the executor's own pending word. */
+    events &= (uint16_t)~RF_EVT_WAKE;
 #endif /* DONGLE_RF_CRYPT */
 
     if (events & RF_EVT_PAIR_PREP) {
@@ -2964,6 +3830,15 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         rf_configure(rf_access_addr);
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  rf_pair_ack15, sizeof(rf_pair_ack15));
+        rfd_last_pair_ack_tx_rc = status;
+        rfd_ack_tx_systick = (uint32_t)SysTick->CNT;
+        rfd_ack_latency = rfd_ack_tx_systick - rfd_ack_accept_systick;
+        rfd_last_ack_aa = rf_access_addr;
+        if (status != 0u) {
+            rfd_pair_ack_tx_fail++;
+        } else {
+            rfd_pair_ack_tx_ok++;
+        }
         /* P1': a failed StartTx here raises no TX_FINISH, so the pair-ACK chain
          * stalls with RX un-armed. Recover to the boot-window relisten. */
         if (rf_pair_tx_recover_if_failed(status)) {
@@ -3022,11 +3897,17 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                  * restores connectivity, but the %5 form is correct per
                  * stock — keeping that as the documented default. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
-                rf_hop.last = rf_hop_backdate(rf_hop_read(), 13u);
+                rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);
                 stock_seed_burst_applied = rf_inject_burst_idx;
             }
             status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                      rf_pair_ack15, sizeof(rf_pair_ack15));
+            rfd_last_pair_ack_tx_rc = status;
+            if (status != 0u) {
+                rfd_pair_ack_tx_fail++;
+            } else {
+                rfd_pair_ack_tx_ok++;
+            }
             /* P1': failed StartTx -> no TX_FINISH -> stalled burst; recover. */
             if (rf_pair_tx_recover_if_failed(status)) {
                 return events ^ RF_EVT_TX_PAIR_15B;
@@ -3192,6 +4073,9 @@ void rf_tmr0_isr_dispatch(void)
         }
         break;
     case RF_STATE_CONNECTED:
+#if DONGLE_RX_WINDOW
+        if (rf_win_link_periods != 0xFFFFFFFFu) { rf_win_link_periods++; }
+#endif
         hal_event_post(RF_EVT_POLL);
         break;
     default:
@@ -3241,6 +4125,32 @@ static void rf_send_pair_prep(void)
         return;
     }
 
+#if DONGLE_RX_WINDOW
+    if (rf_win_mode) {
+        /* Window open, atomic against the radio sink: an accept that lands between the
+         * arm and the publication would otherwise be re-armed over and re-owned. */
+        uint32_t w_irq = __risc_v_disable_irq();
+        if (rf_win_accepted) {
+            (void)__risc_v_enable_irq(w_irq);
+            return;                          /* ownership already passed to the accept path */
+        }
+        rf_channel = rf_pair_channels[0];   /* channel 8: the probe sweeps all three */
+        (void)rf_hop_read();
+        hal_rf_shut();
+        hal_rf_set_channel(rf_channel);
+        (void)hal_rf_start_rx_primed(HAL_RF_CHANNEL_CURRENT, 0, rf_pair_prep_buf, sizeof(rf_pair_prep_buf));
+        if (rf_win_fault_next) {             /* rung 3: a deaf window; the next open must recover */
+            rf_win_fault_next = 0u; hal_rf_shut(); rfd_win_faults++;
+        }
+        rf_win_open = 1u;
+        rfd_win_opens++;
+        rfd_pair_prep_runs++;
+        (void)__risc_v_enable_irq(w_irq);
+        hal_event_post_delayed(RF_EVT_RX_WIN_CLOSE,
+            RF_WIN_MS_TO_TICKS(rf_win_phase_open ? rf_win_phase_ms : DONGLE_RX_WINDOW_MS));
+        return;
+    }
+#endif
     rf_channel = rf_pair_channels[rf_pair_prep_idx % RF_PROTO_PAIR_CHANNEL_COUNT];
     rf_pair_prep_idx = (uint8_t)((rf_pair_prep_idx + 1) % 3);  /* == RF_PROTO_PAIR_CHANNEL_COUNT; signed literal kept for byte-identical codegen */
 
@@ -3256,6 +4166,7 @@ static void rf_send_pair_prep(void)
                                     rf_pair_prep_buf,
                                     sizeof(rf_pair_prep_buf));
     (void)status;
+    rfd_pair_prep_runs++;
 
     
 
@@ -3310,8 +4221,14 @@ static void rf_send_pair_ack(void)
                   rf_pair_ack_cb);
 
     hal_rf_shut();
-    (void)hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
-                          rf_pair_ack_buf, sizeof(rf_pair_ack_buf));
+    {
+        uint8_t ev10_tx_rc = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
+                                             rf_pair_ack_buf, sizeof(rf_pair_ack_buf));
+        rfd_ev10_ack_tx++;
+        if (ev10_tx_rc != 0u) {
+            rfd_ev10_ack_tx_fail++;
+        }
+    }
     if (rf_supervision_ev10_active) {
         /* Stamp the re-key TX instant so the EV10 restore can phase the first
          * resumed poll to rekey_TX + 1 interval. */
@@ -3324,8 +4241,9 @@ static void rf_send_pair_ack(void)
  * et al) so the burst-promote branch can initialize it. The formula
  * itself is implemented below in rf_send_poll. */
 
-/* CONNECTED-mode LEN=1 poll TX using the stock hop formula on the hop clock
- * (HSE-derived protocol ticks). */
+/* CONNECTED-mode LEN=1 poll TX on the channel the shared connected hop model
+ * picks (rf_protocol.h: edge anchor, whole-interval advance) from the hop
+ * clock (HSE-derived protocol ticks). */
 static void rf_send_poll(void)
 {
     /* Defense-in-depth (v0.95 half-open finding): every legitimate caller is
@@ -3376,10 +4294,10 @@ static void rf_send_poll(void)
 #endif
 
     {
-        /* The shared stock hop formula (rf_protocol.h) -- the exact block
-         * that used to live here (firmware.bin runtime 0x20000ff6..0x1016,
-         * incl. the +elapsed repeat-correction anchor) now single-sourced
-         * and host-tested; R3 ported CH570 onto the same call. */
+        /* The shared connected hop model (rf_protocol.h: edge anchor,
+         * whole-interval advance, no repeat-correction), single-sourced and
+         * host-tested (firmware/tests/test_hop_model.py); R3 ported CH570
+         * onto the same call. */
         rf_proto_hop_t h = { rf_hop.last, rf_hop.prev_idx };
         uint32_t now = rf_hop_read();
         uint8_t idx;
@@ -3398,46 +4316,71 @@ static void rf_send_poll(void)
      * 0x8c38 does, but CH58x RF_Rx arms receive mode with the buffer
      * as an auto-response payload — the opposite of what a master
      * poll needs. A master must TX first; the slave replies.) */
-    /* Stock-shaped: consume the app-payload queue if present. Send
-     * [ctrl][buf[0]][buf[1]] (3 bytes) and clear pending. Otherwise
-     * send the default LEN=1 [ctrl] poll. Per 2026-05-17 user
-     * feedback, this matches stock event 0x02 behaviour (queued app
-     * packet OR LEN=1 poll, same slot, same cadence). */
+    /* Stock-shaped: the queued app payload [ctrl][buf[0]][buf[1]] (3 bytes)
+     * or the default LEN=1 [ctrl] poll, same slot, same cadence (stock event
+     * 0x02; 2026-05-17 user feedback).
+     *
+     * The relay stays queued until the keyboard answers a poll carrying it
+     * (rf_led_relay_phase). RF_Tx()'s return can't stand in for that: on
+     * CH592 it is not a per-frame ACK, and gating on it re-sent the relay on
+     * EVERY poll -- the link went silent and never recovered (bench-observed
+     * 2026-06-14). So a relay poll that went unanswered is followed by a plain
+     * gap poll, which keeps the link fed even for a keyboard that ignores LEN-3
+     * polls, and the tries are bounded by RF_LED_RELAY_MAX_MISSES. The radio
+     * is shut above, so the sink has taken every answer to earlier polls. */
     uint8_t status;
 #if DONGLE_RF_CRYPT
     if (rf_crypt_announce_count) {
         /* Announce the fresh session nonce in this poll slot instead of a poll.
-         * The 14-byte frame is pre-built in task context (RF_EVT_CRYPT_SESSION);
-         * an authenticated RX clears the count early. Sent on the session AA where
-         * the keyboard listens; the poll grid/cadence is otherwise untouched. */
+         * The 14-byte frame is pre-built in task context (the session mint); an
+         * authenticated RX clears the count early. Sent on the session AA where
+         * the keyboard listens; the poll grid/cadence is otherwise untouched.
+         * Ahead of the LED relay on purpose: the announce is bounded (the mint
+         * arms a fixed count), the relay is not (a host that keeps changing
+         * the LED byte could hold every slot and starve the session until the
+         * authenticated-silence deadline ends the link). The relay's phase
+         * machine does not advance in an announce slot. */
         rf_crypt_announce_count--;
+        /* An answer to this slot answers the announce, not a relay poll: end
+         * any relay exchange in progress so the answer can neither retire the
+         * relay nor spend one of its tries. rf_app_tx_pending is untouched, so
+         * the LED byte goes out again once the announces are done. */
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  rf_crypt_session_tx, RF_CRYPT_LEN_SESSION);
         (void)status;
-    } else
+        return;
+    }
 #endif
-    if (rf_app_tx_pending) {
+    uint8_t send_led = 0u;
+    uint8_t phase    = rf_led_relay_phase;
+    if (phase == RF_LED_RELAY_SENT || phase == RF_LED_RELAY_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_GAP_SENT;   /* unanswered: the gap */
+    } else {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;       /* an unanswered gap spends nothing */
+        if (rf_app_tx_pending) {
+            if (rf_led_relay_misses < RF_LED_RELAY_MAX_MISSES) {
+                send_led = 1u;
+            } else {
+                rf_app_tx_pending = 0u;
+            }
+        }
+    }
+    if (send_led) {
         /* static lifetime: RF_Tx() may read the payload after this function's
-         * stack frame returns (codex); rf_send_poll runs only in TMOS task
-         * context, so a function-static is safe and matches CH570's static
+         * stack frame returns (codex). rf_send_poll is never re-entered (TMOS
+         * task context on CH592, the poll timer's ISR on CH570), so a
+         * function-static is safe and matches CH570's static
          * connected_app_payload[]. */
         static uint8_t buf3[3];
         buf3[0] = rf_poll_buf[0];
         buf3[1] = rf_app_tx_buf[0];
         buf3[2] = rf_app_tx_buf[1];
+        rf_led_relay_carried = buf3[2];
+        rf_led_relay_phase   = RF_LED_RELAY_SENT;
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  buf3, sizeof(buf3));
-        /* Decrement UNCONDITIONALLY: the relay is sent exactly rf_app_tx_pending
-         * times (bounded), then normal LEN=1 polls resume. The success-gated
-         * form (CH570 parity) re-sends the LEN=3 relay on EVERY poll whenever
-         * RF_Tx() returns non-zero -- which starves the connected poll exchange,
-         * so supervision tears the link down (bench-observed 2026-06-14: the
-         * relay fires once, then the link goes silent and never recovers). On
-         * CH592 RF_Tx()'s return is not a clean per-frame ACK signal, so gating
-         * on it is wrong here. A relay missed on a genuine TX failure is re-sent
-         * by the next host LED change / reconnect re-sync anyway. */
         (void)status;
-        rf_app_tx_pending--;
     } else {
         status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
                                  rf_poll_buf, RF_POLL_TX_LEN);
@@ -3448,6 +4391,24 @@ static void rf_send_poll(void)
      * Hz would flood UART1 at 115200 baud). */
     (void)status;
 }
+
+#if DONGLE_RF_CRYPT
+/* Foreground backstop for the crypto latches (call once per main-loop pass).
+ * A wake posted from the radio IRQ can be lost: this TMOS updates its event
+ * word with an unmasked load/OR/store, and its dispatcher has snapshot and
+ * merge windows of its own. The latch survives such a loss, so re-posting
+ * from the foreground until the work is taken makes the post loss-free, and
+ * because every post also sets the power-management latch the idle path
+ * cannot sleep past outstanding work. Returns nonzero while work is pending. */
+uint8_t RF_CryptWorkKick(void)
+{
+    if (!rf_crypt_work_pending()) {
+        return 0u;
+    }
+    hal_event_post(RF_EVT_WAKE);
+    return 1u;
+}
+#endif
 
 /* ---------- DataFlash bond persistence ---------- */
 
@@ -3791,6 +4752,7 @@ static void rf_request_bond_persist(void)
 static void rf_persist_bond_task(void)
 {
     if (rf_bond_tombstone) {
+        rfd_persist_last_reason = RFD_PERSIST_TOMBSTONE;
         rf_bond_persist_pending = 0;   /* CODEREVIEW N06 (defense-in-depth): if a
                                         * persist event slipped past RF_TombstoneBond's
                                         * cancel, do not write the cleared record. */
@@ -3847,6 +4809,7 @@ static void rf_persist_bond_task(void)
             /* stored record already matches the full tuple (incl. the N09
              * dongle identity); no write */
             rf_bond_persisted = 1;
+            rfd_persist_last_reason = RFD_PERSIST_ALREADY;
             return;
         }
     }
@@ -3858,18 +4821,15 @@ static void rf_persist_bond_task(void)
      * (rf_pair_ack15, compiled 28/600) — the air-decoded broadcast values are
      * logged but never enter the durable tuple, so this check can only fire
      * on an identity-class escape. Leaving rf_bond_persisted=0 keeps the
-     * session usable this boot; the record simply never becomes durable.
-     *
-     * ABOVE the CH570 radio teardown below, deliberately (TODO.md; 2026-08-16
-     * review): this early return used to sit after it, so the latent
-     * cannot-fire-today failure would have left the radio shut and every
-     * timer slot cancelled with nothing to restore them -- deaf until replug,
-     * directly contradicting the "keeps the session usable" promise above.
-     * An invalid record must return before ANY radio state changes. */
+     * session usable this boot; the record simply never becomes durable. */
     if (!bond_record_semantic_valid(&want, rf_factory_mac)) {
+        rfd_persist_last_reason = RFD_PERSIST_SEMANTIC;
         return;
     }
-
+    /* The validation above sits BEFORE the CH570 teardown below on purpose:
+     * an invalid record must return before any radio state changes, or the
+     * shut radio and cancelled timers were never restored (TODO defect,
+     * latent: the producer cannot build a record the check rejects today). */
 #if !RF_TASK_EXECUTOR_TMOS
     /* CX4 (codex, hardware-forced CH570 delta), root-cause-revised 2026-07-07.
      * This runs ONCE per session — the first promote of a fresh pair, before
@@ -3884,11 +4844,14 @@ static void rf_persist_bond_task(void)
         hal_timer_cancel(HAL_TMR_SLOT_PAIR_ACK);
         hal_timer_cancel(HAL_TMR_SLOT_EV10_REKEY);
         hal_timer_cancel(HAL_TMR_SLOT_BOOT_WINDOW);
+        rf_camp_wd_active = 0u;   /* the slot is the camp watchdog's tick too */
         hal_timer_cancel(HAL_TMR_SLOT_CONNECTED_POLL);
         hal_rf_shut();
     }
 #endif
+    rfd_persist_attempts++;
     int save_rc = bond_save(&want);
+    rfd_last_save_rc = (uint8_t)save_rc;
 #if !RF_TASK_EXECUTOR_TMOS
     if (was_connected) {
         /* CH592-style: the poll cadence kept running through the write; just
@@ -3902,16 +4865,21 @@ static void rf_persist_bond_task(void)
         rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
         rf_start_rx();
         rf_arm_retry_if_failed();   /* P4: this recamp arms no timer */
+        rf_camp_watchdog_arm();     /* a terminal camp too (codex: it was the one without the tick) */
     }
 #endif
     if (save_rc != 0) {
-        
+        rfd_persist_last_reason = RFD_PERSIST_SAVE_FAIL;
         return;                  /* leave rf_bond_persisted = 0 to retry */
     }
 
     bond_record_t back __attribute__((aligned(4)));
     if (bond_load(&back) && bond_tuple_equal(&back, &want)) {
         rf_bond_persisted = 1;
+        rfd_persist_ok++;
+        rfd_persist_last_reason = RFD_PERSIST_OK;
+    } else {
+        rfd_persist_last_reason = RFD_PERSIST_READBACK;
     }
 }
 
@@ -4161,9 +5129,9 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
         }
         if (connected) {
             /* Fresh session under the new key: flush + mint + announce, the
-             * existing RF_EVT_CRYPT_SESSION machinery. Without this the peer
+             * existing session-mint machinery. Without this the peer
              * would keep sealing under a session the new key cannot verify. */
-            hal_event_post(RF_EVT_CRYPT_SESSION);
+            rf_crypt_post_session();
         }
     } else {
         /* Key removal. The live-link test and the latch writes must be one
@@ -4218,8 +5186,9 @@ void RF_SetLEDState(uint8_t led)
     /* Forward the host's HID LED output report (CapsLock/NumLock/ScrollLock) to
      * the keyboard. Called from the foreground (Main_Circulation) on a host LED
      * change. Latch the byte and, if connected, queue the relay DIRECTLY for the
-     * next poll (rf_send_poll sends [ctrl][0xA1][led]). When not connected, the
-     * burst-promote re-syncs the current rf_led_state on the next connect.
+     * next poll (rf_send_poll sends [ctrl][0xA1][led] until the keyboard
+     * answers one). When not connected, the next promote (burst or EV10)
+     * re-syncs the current rf_led_state.
      *
      * NO IRQ critical section here -- but not because nothing preempts: the
      * burst-promote producer runs in the rf_phy_event_sink IRQ-tail callback,
@@ -4244,9 +5213,360 @@ uint8_t RF_GetState(void)
     return rf_state;
 }
 
+#if DONGLE_PM_IDLE
+/* Idle-admission class for the CH592 main-loop idle (pm_ch592.c): the
+ * terminal-camp predicate of RF_DiagIntervene plus every state the level
+ * policy distinguishes, as one byte. SRAM-resident because it is re-read under
+ * the IRQ mask right before the WFE, where no XIP fetch may sit. */
+DONGLE_HIGHCODE_RF_HOT
+uint8_t RF_IdleClass(void)
+{
+    uint8_t c = 0u;
+
+    if (rf_state == RF_STATE_CONNECTED) {
+        c |= RF_IDLE_CLASS_CONNECTED;
+    } else if (rf_state == RF_STATE_IDLE) {
+        c |= RF_IDLE_CLASS_IDLE;
+    }
+    if (rf_supervision_ev10_active) c |= RF_IDLE_CLASS_EV10;
+    if (rf_boot_window_active)      c |= RF_IDLE_CLASS_BOOTWIN;
+    if (rf_inject_burst_active)     c |= RF_IDLE_CLASS_BURST;
+#if RF_CONFIRM_BEFORE_PERSIST
+    if (rf_confirm_state != RF_CONFIRM_STATE_NONE) c |= RF_IDLE_CLASS_CONFIRM;
+#endif
+    if (rf_quiesced)                c |= RF_IDLE_CLASS_QUIESCED;
+    if (rf_bond_persist_pending)    c |= RF_IDLE_CLASS_PERSIST;
+    return c;
+}
+#endif /* DONGLE_PM_IDLE */
+
 int8_t RF_GetRSSI(void)
 {
     return rf_rssi;
+}
+
+/* ---------- IAP 0x92 RF diagnostics ----------
+ * Five RF_DIAG_PAGE_LEN-byte pages, little-endian, byte [0] = page version,
+ * [1] = page id. Decoded by tools/src/rfdiag.rs.
+ *
+ * Page 0 (runtime snapshot):
+ *   [2] rf_state  [3] rf_channel
+ *   [4] flags0: b0 bond_valid b1 bond_persisted b2 persist_pending
+ *               b3 ev10_active b4 boot_window_active b5 pair_window_open
+ *               b6 tombstone b7 pair_is_fresh
+ *   [5] flags1: b0 quiesced b1 burst_active b2 first_supervision_armed
+ *               b3 hal.rx_armed
+ *   [6] confirm_state [7] boot_window_step [8] pair_prep_idx [9] data_ch_idx
+ *   [10] rf_rssi (int8) [11] last LEN-10 disposition (RFD_L10_*)
+ *   [12..15] rf_access_addr [16..19] rf_bond_aa [20..23] hal.last_rx_aa
+ *   [24] hal.last_rx_channel [25] hal.last_rx_rc [26] hal.last_tx_rc
+ *   [27] hal.last_shut_rc [28..29] hal.last_rx_timeout [30..33] hal_now()
+ *   [34..39] rf_peer_mac [40..43] session AA advertised in the pair-ACK
+ *   [44..45] conn_interval [46..47] conn_timeout
+ *   [48..51] connected RX count (CH570) [52..55] rf_last_conn_rx_tsys
+ *   [56] persist last reason (RFD_PERSIST_*) [57] last bond_save rc
+ *   [58] last pair-ACK StartTx rc [59] hal.last_tx_channel [60] hal.rx_armed
+ * Page 1 (PHY + executor):
+ *   [2] timer active mask [3] periodic slot+1
+ *   [4..39] u32: rx_arm_attempts rx_arm_fail rx_done rx_crcerr rx_timeout
+ *                tx_start tx_fail tx_done shut_calls
+ *   [40..41] dispatch pending [42..43] delay slot 0 bit [44..45] delay slot 1 bit
+ *   [46..47] delayed posts degraded
+ *   [48..59] i16 remaining ms per timer slot (6 slots; clamped)
+ * Page 2 (protocol counters A, 15 u32 from [2]):
+ *   len10_seen len10_accept_known len10_accept_fresh len10_rejected
+ *   len10_ev10_seen pair_ack_posted pair_ack_tx_ok pair_ack_tx_fail
+ *   pair_ack_tx_done rx_restart_handled rx_restart_dropped_ev10
+ *   arm_retry_scheduled pump_passes supervision_lapses ev10_entries
+ * Page 3 (protocol counters B, 15 u32 from [2]):
+ *   ev10_giveups pair_prep_runs ev10_ack_tx ev10_ack_tx_fail
+ *   connected_promotes fresh_relistens bootwin_closes confirm_armed
+ *   confirm_to_waitrx confirm_to_waitrearm persist_attempts persist_ok
+ *   ack_latency (gauge, SysTick ticks at the core clock: LEN-10 accept ->
+ *   first pair-ACK StartTx returned) ack_tx_duration (gauge: StartTx returned
+ *   -> its TX_FINISH callback) last_ack_aa (gauge). Software endpoints, not
+ *   on-air instants.
+ * Page 4 (radio internals, continuous timebase):
+ *   [2..5] lle_irqs [6..9] bb_irqs [10..13] cb_calls [14..17] systick now
+ *   [18..21] systick at last callback [22..25] at last reacquire entry
+ *   [26..29] at last give-up [30..33] LLE[0] [34..37] LLE[8] [38..41] LLE[0xC]
+ *   [42..45] LLE[0x64] [46..49] BB[0x40] [50..53] lib gStatus
+ *   [54..55] lib WaitRecvTime (u16) [56] tuned channel [57] rx whiteChannel
+ *   [58] burst idx [59] irq bits [60..61] USB suspend episodes */
+static void rfd_put32(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
+static void rfd_put16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+uint8_t RF_DiagFill(uint8_t page, uint8_t *out, uint8_t max)
+{
+    uint8_t i;
+
+    if (max < RF_DIAG_PAGE_LEN || page >= RF_DIAG_PAGE_COUNT) {
+        return 0u;
+    }
+    for (i = 0u; i < RF_DIAG_PAGE_LEN; i++) {
+        out[i] = 0u;
+    }
+    out[0] = RF_DIAG_PAGE_VERSION;
+    out[1] = page;
+
+    if (page == 0u) {
+        hal_rf_diag_t h;
+        uint8_t f0 = 0u, f1 = 0u;
+
+        hal_rf_diag_snapshot(&h);
+        if (rf_bond_valid)              f0 |= 0x01u;
+        if (rf_bond_persisted)          f0 |= 0x02u;
+        if (rf_bond_persist_pending)    f0 |= 0x04u;
+        if (rf_supervision_ev10_active) f0 |= 0x08u;
+        if (rf_boot_window_active)      f0 |= 0x10u;
+        if (rf_pair_window_open)        f0 |= 0x20u;
+        if (rf_bond_tombstone)          f0 |= 0x40u;
+#if RF_CONFIRM_BEFORE_PERSIST
+        if (rf_pair_is_fresh)           f0 |= 0x80u;
+#endif
+        if (rf_quiesced)                       f1 |= 0x01u;
+        if (rf_inject_burst_active)            f1 |= 0x02u;
+        if (rf_stock_first_supervision_armed)  f1 |= 0x04u;
+        if (h.rx_armed)                        f1 |= 0x08u;
+        out[2] = rf_state;
+        out[3] = rf_channel;
+        out[4] = f0;
+        out[5] = f1;
+#if RF_CONFIRM_BEFORE_PERSIST
+        out[6] = rf_confirm_state;
+#endif
+        out[7] = rf_boot_window_step;
+        out[8] = rf_pair_prep_idx;
+        out[9] = rf_data_ch_idx;
+        out[10] = (uint8_t)rf_rssi;
+        out[11] = rfd_len10_last_disp;
+        rfd_put32(&out[12], rf_access_addr);
+        rfd_put32(&out[16], rf_bond_aa);
+        rfd_put32(&out[20], h.last_rx_aa);
+        out[24] = h.last_rx_channel;
+        out[25] = h.last_rx_rc;
+        out[26] = h.last_tx_rc;
+        out[27] = h.last_shut_rc;
+        rfd_put16(&out[28], h.last_rx_timeout);
+        rfd_put32(&out[30], hal_now());
+        for (i = 0u; i < 6u; i++) {
+            out[34u + i] = rf_peer_mac[i];
+        }
+        rfd_put32(&out[40], rf_protocol_pair_ack_session_aa(rf_pair_ack15));
+        rfd_put16(&out[44], rf_conn_interval);
+        rfd_put16(&out[46], rf_conn_timeout);
+#if !RF_TASK_EXECUTOR_TMOS
+        rfd_put32(&out[48], rf_ch570_connected_rx_count);
+#endif
+        rfd_put32(&out[52], rf_last_conn_rx_tsys);
+        out[56] = rfd_persist_last_reason;
+        out[57] = rfd_last_save_rc;
+        out[58] = rfd_last_pair_ack_tx_rc;
+        out[59] = h.last_tx_channel;
+        out[60] = h.rx_armed;
+    } else if (page == 1u) {
+        hal_rf_diag_t h;
+        hal_dispatch_diag_t d;
+        hal_timing_diag_t t;
+
+        hal_rf_diag_snapshot(&h);
+        hal_dispatch_diag_snapshot(&d);
+        hal_timing_diag_snapshot(&t);
+        out[2] = t.active_mask;
+        out[3] = t.periodic_slot_p1;
+        rfd_put32(&out[4],  h.rx_arm_attempts);
+        rfd_put32(&out[8],  h.rx_arm_fail);
+        rfd_put32(&out[12], h.rx_done);
+        rfd_put32(&out[16], h.rx_crcerr);
+        rfd_put32(&out[20], h.rx_timeout);
+        rfd_put32(&out[24], h.tx_start);
+        rfd_put32(&out[28], h.tx_fail);
+        rfd_put32(&out[32], h.tx_done);
+        rfd_put32(&out[36], h.shut_calls);
+        rfd_put16(&out[40], d.pending);
+        rfd_put16(&out[42], d.delay_bit[0]);
+        rfd_put16(&out[44], d.delay_bit[1]);
+        rfd_put16(&out[46], d.degraded);
+        for (i = 0u; i < HAL_TIMING_DIAG_SLOTS; i++) {
+            /* Tsys ticks -> ms: HAL_TMOS_UNIT_TICKS is 625 us. */
+            int32_t ms = t.remaining[i] / (int32_t)(HAL_TMOS_UNIT_TICKS * 8u / 5u);
+            if (ms > 32767) {
+                ms = 32767;
+            } else if (ms < -32768) {
+                ms = -32768;
+            }
+            rfd_put16(&out[48u + 2u * i], (uint16_t)(int16_t)ms);
+        }
+        _Static_assert(48u + 2u * HAL_TIMING_DIAG_SLOTS <= 60u, "page 1 slot table overlaps the watchdog counter");
+        rfd_put16(&out[60], rfd_camp_wd_rearms);   /* camp watchdog re-arms (u16) */
+    } else if (page == 2u) {
+        const uint32_t v[15] = {
+            rfd_len10_seen, rfd_len10_accept_known, rfd_len10_accept_fresh,
+            rfd_len10_rejected, rfd_len10_ev10_seen, rfd_pair_ack_posted,
+            rfd_pair_ack_tx_ok, rfd_pair_ack_tx_fail, rfd_pair_ack_tx_done,
+            rfd_rx_restart_handled, rfd_rx_restart_dropped_ev10,
+            rfd_arm_retry_scheduled, rfd_pump_passes, rfd_supervision_lapses,
+            rfd_ev10_entries
+        };
+        for (i = 0u; i < 15u; i++) {
+            rfd_put32(&out[2u + 4u * i], v[i]);
+        }
+    } else if (page == 4u) {
+        hal_rf_diag2_t d2;
+
+        hal_rf_diag2_snapshot(&d2);
+        rfd_put32(&out[2],  d2.lle_irqs);
+        rfd_put32(&out[6],  d2.bb_irqs);
+        rfd_put32(&out[10], d2.cb_calls);
+        rfd_put32(&out[14], hal_timing_systick_now());
+        rfd_put32(&out[18], d2.last_cb_systick);
+        rfd_put32(&out[22], rfd_reacq_entry_systick);
+        rfd_put32(&out[26], rfd_giveup_systick);
+        rfd_put32(&out[30], d2.lle_ctrl);
+        rfd_put32(&out[34], d2.lle_status);
+        rfd_put32(&out[38], d2.lle_mask);
+        rfd_put32(&out[42], d2.lle_timeout);
+        rfd_put32(&out[46], d2.bb_status);
+        rfd_put32(&out[50], d2.lib_status);
+        rfd_put16(&out[54], (uint16_t)d2.lib_wait_recv);
+        out[56] = d2.tuned_channel;
+        out[57] = d2.rx_white_channel;
+        out[58] = rf_inject_burst_idx;
+        out[59] = d2.irq_bits;
+        rfd_put16(&out[60], USB_SuspendEpisodes());
+#if DONGLE_PM_IDLE
+#if DONGLE_RX_WINDOW
+    } else if (page == 7u) {
+        rf_win_diag_fill(out);
+#endif
+    } else if (page >= 5u) {
+        /* Pages 5 "power" and 6 "power detail": ch592/src/pm_ch592.c. */
+        dongle_pm_diag_fill(page, out);
+#endif
+    } else {
+        const uint32_t v[15] = {
+            rfd_ev10_giveups, rfd_pair_prep_runs, rfd_ev10_ack_tx,
+            rfd_ev10_ack_tx_fail, rfd_connected_promotes, rfd_fresh_relistens,
+            rfd_bootwin_closes, rfd_confirm_armed, rfd_confirm_to_waitrx,
+            rfd_confirm_to_waitrearm, rfd_persist_attempts, rfd_persist_ok,
+            rfd_ack_latency, rfd_ack_tx_duration, rfd_last_ack_aa
+        };
+        for (i = 0u; i < 15u; i++) {
+            rfd_put32(&out[2u + 4u * i], v[i]);
+        }
+    }
+    return RF_DIAG_PAGE_LEN;
+}
+
+/* IAP 0x94: the intervention ladder (task context, armed session). Rung 1 is
+ * the camp's own re-arm (rf_start_rx: shut + reconfigure + arm) issued from
+ * task context; rung 2 additionally re-runs the vendor init that only
+ * hal_rf_init otherwise performs. Both end on the P4 guard. Rungs 1-3 are
+ * refused while a link is up (they belong to the terminal camp), rungs 40-79
+ * below are refused unless one is, and every rung is refused while a reboot
+ * quiesce is in progress. */
+/* Bench facility (rf-poke rungs 40..79, armed session): mask every IRQ for
+ * a nominal (rung - 40) poll slots of 875 us on a live link (60..79: a 5- or
+ * 6-slot gap plus a remainder), so the TMR0 poll events coalesce into one
+ * gap of about that many intervals. This is how the hop
+ * repeat-correction defect was reproduced and its fix validated (gaps of 5
+ * and 10 slots dropped the link every time on the old rule, never on the
+ * new one; rf_protocol.h). CONNECTED only. */
+static void rf_bench_spin_ticks(uint32_t ticks)   /* protocol ticks of 31.25 us */
+{
+    uint32_t t0 = hal_now();
+    while ((uint32_t)(hal_now() - t0) < ticks * HAL_TICKS_PER_PROTO_TICK) { }
+}
+
+uint8_t RF_DiagIntervene(uint8_t rung)
+{
+    uint32_t irq;
+
+    if (rung >= 40u && rung < 80u) {
+        /* 40..59: (rung-40) whole slots; 60..69: 5 slots + 3*(rung-60) ticks;
+         * 70..79: 6 slots + 3*(rung-70) ticks (the remainder bands). The
+         * masking starts asynchronously to the previous poll, at whatever
+         * phase of the slot the command is dispatched, so the realised gap is
+         * the request plus that phase and the coalesced step is around the
+         * nominal, not exactly it (nothing reports the realised gap); it is a
+         * regression stimulus, not a precise input. */
+        uint32_t ticks = (rung < 60u) ? ((uint32_t)rung - 40u) * 28u
+                       : (rung < 70u) ? 5u * 28u + 3u * ((uint32_t)rung - 60u)
+                       :                6u * 28u + 3u * ((uint32_t)rung - 70u);
+        if (rf_quiesced) {
+            return 0xE2u;
+        }
+        if (rf_state != RF_STATE_CONNECTED) {
+            return 0xE1u;
+        }
+        irq = __risc_v_disable_irq();
+        rf_bench_spin_ticks(ticks);
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
+    if (rung != 1u && rung != 2u && rung != 3u) {
+        return 0xE0u;
+    }
+#if RF_TASK_EXECUTOR_TMOS
+    /* CH59x: a live second RF_RoleInit under a global IRQ mask is not
+     * validated on the TMOS radio; rung 1 (re-arm) and rung 3 (shut only,
+     * the camp watchdog's fault injection) are. */
+    if (rung == 2u) {
+        return 0xE3u;
+    }
+#endif
+    /* Snapshot the predicate AND act under one IRQ mask (codex final review):
+     * between an unmasked check and the mask a radio IRQ can accept a beacon
+     * and start a pair-ACK burst, which the intervention would then tear
+     * through while reporting success. Only the exact terminal camp qualifies:
+     * PAIRING, no EV10 scan, no boot window, no burst, not quiescing. */
+    irq = __risc_v_disable_irq();           /* ~100 us for the vendor init */
+    if (rf_quiesced) {
+        (void)__risc_v_enable_irq(irq);
+        return 0xE2u;
+    }
+    if (!rf_camp_is_terminal()) {
+        (void)__risc_v_enable_irq(irq);
+        return 0xE1u;
+    }
+    hal_event_cancel(RF_EVT_RX_RESTART);    /* a stale restart must not race us */
+#if DONGLE_RX_WINDOW
+    if (rung == 3u && rf_win_mode) {
+        rf_win_fault_next = 1u;             /* inject inside the next window: arm, then shut */
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
+#endif
+    if (rung == 3u) {
+        /* Fault injection: shut the radio and leave it deaf. The camp
+         * watchdog must bring it back at its next tick: reset its baseline
+         * here, or an event that landed between the last tick and this shut
+         * would make that tick read "alive" and cost a second one (codex). */
+        hal_rf_shut();
+        rf_camp_wd_seen   = rf_camp_wd_events();
+        rf_camp_wd_silent = 0u;
+        (void)__risc_v_enable_irq(irq);
+        return 0u;
+    }
+    if (rung == 2u) {
+        hal_rf_shut();
+        hal_rf_init();
+    }
+    rf_start_rx();
+    (void)__risc_v_enable_irq(irq);
+    rf_arm_retry_if_failed();
+    return 0u;
 }
 
 uint8_t RF_GetConnectionStatus(void)
@@ -4289,6 +5609,7 @@ void RF_TaskPump(void)
     while (ev) {
         ev = RF_ProcessEvent(0u, ev);
     }
+    rfd_pump_passes++;   /* diag: after the dispatch, off the event path */
 }
 
 #endif

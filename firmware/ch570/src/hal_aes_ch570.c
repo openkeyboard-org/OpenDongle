@@ -1,6 +1,7 @@
 /*
  * OpenKeyboard.org OpenDongle -- CH570 AES HAL.
  * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * Implements hal_aes.h in software, because the CH570 has no hardware AES
  * engine. That is measured, not assumed: the address space at 0x4000C300 that

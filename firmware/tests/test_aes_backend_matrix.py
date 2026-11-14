@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Build-level invariants for the AES backends. No device, no cross toolchain.
 
 These are text assertions over the Makefiles and headers, deliberately not

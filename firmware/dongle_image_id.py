@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Parse, validate, and finalize OpenDongle ODG2 application images."""
 
 from __future__ import annotations
