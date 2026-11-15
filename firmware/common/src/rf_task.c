@@ -27,6 +27,7 @@
                             * core_riscv.h predates it -- see ch582 dongle_chip.h) */
 #include "rf_task.h"
 #include "bond.h"
+#include "rf_crypt.h"
 
 /* CH570 pair-ACK pre-TX gap (V1, bench-derived 2026-07-10). The real Bridge75
  * needs 1..8 ms between its PAIR_BCAST and our 15-byte pair-ACK; answering
@@ -64,7 +65,7 @@
 #include "hal_timing_ch592.h"  /* CH592 task-dispatch shim (CONNECTED_POLL slot) */
 #include "hal_dispatch.h"      /* deferred-event seam (chip header aliases above) */
 #if !RF_TASK_EXECUTOR_TMOS
-/* CX1 (codex): CONNECTED-state RF re-arms are timing-critical (the keyboard
+/* CX1: CONNECTED-state RF re-arms are timing-critical (the keyboard
  * replies inside the ~875 us window) and the CH570 pump's worst-case latency
  * under EP6 IAP flash traffic is milliseconds — so on this executor the
  * radio-IRQ sink arms them SYNCHRONOUSLY (its validated legacy shape). On
@@ -84,7 +85,7 @@ void hal_timer_promote_periodic(uint8_t from_slot, uint8_t to_slot,
                                 uint32_t fallback_period,
                                 hal_timer_cb_t cb);  /* hal_timing_ch570.c */
 uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
-/* Phase acquisition (Codex option C, 2026-07-08). A crystal-flat grid that
+/* Phase acquisition (option C, 2026-07-08). A crystal-flat grid that
  * starts outside the sleeping keyboard's narrow RX window misses it
  * IDENTICALLY forever (real-Bridge75 finding: promote+bond OK, rx=0 for
  * every poll at two different anchors). The v0.96 software timer acquired
@@ -94,7 +95,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
  * fixed offset (v0.96's effective mod-slot phase ≈ the ~9.7 ms print delay
  * ≈ +75 us; replace with the measured CH592 value when its probe returns),
  * then, while CONNECTED with zero poll responses, stretch the grid +8 us
- * per poll (Codex band 4-8 us — bigger steps can hop a narrow window) until
+ * per poll (band 4-8 us — bigger steps can hop a narrow window) until
  * the first reply, then hold flat.
  * N10 SCOPE (CODEREVIEW, accepted residual): this sweep is LOCAL to one
  * uninterrupted grid — a ~26-poll session covers ~0..267 us, and the step
@@ -102,7 +103,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
  * full-slot cross-session tiling is NOT achieved. The stock Bridge75 locks in
  * practice (production-validated); a true cumulative-phase primitive is
  * deferred pending a phase-controllable failing control. See rf_ch570_acq_arm
- * and analysis/codex-review-campaign-2026-07-17/change12-N10-sweep-spike.md. */
+ * and the 2026-07-17 review campaign's change12-N10-sweep-spike.md. */
 #define RF_CH570_GRID_PHASE_OFFSET_TICKS 7500u   /* 75 us @100 MHz */
 #define RF_CH570_ACQ_STEP_TICKS 800u             /* 8 us per poll */
 #define RF_CH570_ACQ_MAX_NUDGES 150u   /* 150*8us=1.2ms; > one full slot only
@@ -113,7 +114,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
 static void rf_ch570_acq_arm(uint8_t seed);  /* flash helper below */
 static volatile uint32_t rf_ch570_acq_base; /* RX tally at promote:
                                          * ANY connected RX freezes the
-                                         * sweep (Codex: the first reply may
+                                         * sweep (the first reply may
                                          * be a LEN-10 HID report, not a
                                          * LEN-1 poll response)             */
 static volatile uint32_t rf_ch570_acq_nudges;
@@ -748,7 +749,7 @@ static volatile uint8_t rf_confirm_state;
 static uint8_t rf_pair_is_fresh;
 #endif /* RF_CONFIRM_BEFORE_PERSIST */
 #if RF_TASK_EXECUTOR_TMOS
-/* Codex full-batch review (merge blocker): set by a burst-active async TX_FAIL in
+/* Full-batch review (merge blocker): set by a burst-active async TX_FAIL in
  * the radio callback (IRQ) to defer the dual-AA fresh-pair fallback to task
  * context — rf_return_to_fresh_pair does RF_Shut+reconfigure, illegal from the
  * callback. Without it a burst TX_FAIL re-arms RX on the session AA only and can
@@ -920,7 +921,7 @@ static uint32_t rf_hop_read(void)
     return ticks;
 }
 
-/* Wrap-safe backdate on the hop clock's modulus (codex: never leave a raw
+/* Wrap-safe backdate on the hop clock's modulus (never leave a raw
  * `- 13` that can underflow past zero near the wrap). always_inline makes the
  * no-call-from-IRQ contract explicit (callers include the radio-IRQ sink). */
 __attribute__((always_inline))
@@ -968,6 +969,16 @@ static void rf_win_reset(void);
 #endif
 static void rf_configure(uint32_t access_addr);
 static void rf_send_poll(void);
+#if DONGLE_RF_CRYPT
+/* Task-context: recompute the silence deadline from rf_conn_interval. */
+static void rf_crypt_silence_set_deadline(void);
+static void rf_crypt_rx_flush(void);
+static void rf_crypt_kbd_last_reset(void);
+#if DONGLE_KEX
+static void rf_kex_service(void);
+static void rf_kex_poll_tick(void);
+#endif
+#endif
 static void rf_send_pair_prep(void);
 static void rf_send_pair_ack(void);
 static void rf_request_bond_persist(void);
@@ -982,7 +993,7 @@ static void rf_arm_bond_persist(void);
  * air-persist a record the boot validator then rejects — re-pair every boot
  * — so it must never be accepted in the first place). On CH570 the accept
  * sites live in the __HIGH_CODE radio-IRQ sink and the product sits against
- * the 2 KB stack-floor assert, so keep the check flash-resident (a call, not
+ * the CH570_STACK_FLOOR assert, so keep the check flash-resident (a call, not
  * an inline body — same precedent as rf_return_to_fresh_pair /
  * rf_test_synth_hid_tick). On CH59x (TMOS, ample SRAM) inline it. */
 #if !RF_TASK_EXECUTOR_TMOS
@@ -1031,7 +1042,7 @@ static inline uint8_t rf_accept_peer_mac(const uint8_t *mac)
  * is NOT implemented (CODEREVIEW N10, accepted residual — the stock Bridge75
  * is production-validated regardless; a true cumulative-phase primitive is
  * deferred pending a phase-controllable failing control, see
- * analysis/codex-review-campaign-2026-07-17/change12-N10-sweep-spike.md).
+ * the 2026-07-17 review campaign's change12-N10-sweep-spike.md).
  * Flash-resident noinline: the promote paths run in the HIGH_CODE sink (SRAM). */
 __attribute__((noinline))
 static void rf_ch570_acq_arm(uint8_t seed)
@@ -1197,9 +1208,27 @@ static void rf_refresh_connected_supervision(void)
                   rf_connected_supervision_ticks(0), rf_ev10_rekey_cb);
 }
 
+static void rf_release_keys(void);
 static void rf_send_keys_up_on_link_loss(void)
 {
-    if (rf_state != RF_STATE_CONNECTED || !rf_hid_callback) {
+#if DONGLE_RF_CRYPT
+    /* Frames admitted but not yet verified belong to the link that is ending.
+     * Drop them here, ahead of the release below, so the deferred drain cannot
+     * forward a key-down after the all-keys-up. */
+    rf_crypt_rx_flush();
+    rf_crypt_kbd_last_reset();
+#endif
+    if (rf_state != RF_STATE_CONNECTED) {
+        return;
+    }
+    rf_release_keys();
+}
+
+/* The release itself, without the CONNECTED test: for a caller that has
+ * already left CONNECTED under its own IRQ mask (the confirm timeout). */
+static void rf_release_keys(void)
+{
+    if (!rf_hid_callback) {
         return;
     }
     /* Always drop any wake-time key-DOWN stash first: the keyboard is gone, so
@@ -1256,6 +1285,13 @@ static void rf_abort_pair_burst(void)
  * stack-floor assert. Consequence: after any CONFIRMED link this boot, a
  * later failed re-pair takes the old reacquire path — acceptable, since a
  * new-keyboard pair needs a replug boot window anyway.) */
+#if DONGLE_RF_CRYPT
+/* Tentative re-declarations (C11 6.9.2): the crypt state block further down
+ * owns the commented definitions; these make the two latches visible to the
+ * fresh-pair teardown, which consumes the deferred key-removal downgrade. */
+static volatile uint8_t rf_crypt_bond_enc;
+static uint8_t rf_crypt_pending_plain;
+#endif
 static void rf_return_to_fresh_pair(void)
 {
     rfd_fresh_relistens++;
@@ -1282,6 +1318,17 @@ static void rf_return_to_fresh_pair(void)
     rf_supervision_ev10_active = 0;
     rf_stock_first_supervision_armed = 0;
     rf_last_conn_rx_tsys = 0;
+
+#if DONGLE_RF_CRYPT
+    /* Deferred key-removal (RF_ApplyBondRecord while the encrypted link was
+     * live): the link is down now, so the downgrade the host provisioned
+     * takes effect -- the record in flash is already keyless, and the key
+     * schedule was zeroized at apply time. */
+    if (rf_crypt_pending_plain) {
+        rf_crypt_pending_plain = 0u;
+        rf_crypt_bond_enc = 0u;
+    }
+#endif
 
     rf_boot_window_active = 1u;
     rf_pair_window_open   = 0u;
@@ -1633,7 +1680,7 @@ static void rf_enter_stock_reacquire(void)
 #endif
 
 #if RF_TASK_EXECUTOR_TMOS
-    /* Codex full-batch review (+ 2-fix re-review): send the all-keys-up and LEAVE
+    /* Full-batch review (+ 2-fix re-review): send the all-keys-up and LEAVE
      * CONNECTED under one IRQ mask. rf_send_keys_up_on_link_loss only fires while
      * rf_state==CONNECTED, and the connected RX sink (radio IRQ) forwards a
      * key-DOWN while CONNECTED — so without this, a late HID RX landing between the
@@ -1642,7 +1689,7 @@ static void rf_enter_stock_reacquire(void)
      * atomically with the keys-up closes that RF-ordering window.
      *
      * CH570 uses its established non-TMOS path below.
-     * KNOWN RESIDUAL (Codex, NOT closed here): this closes the RF-state ordering
+     * KNOWN RESIDUAL (NOT closed here): this closes the RF-state ordering
      * race, not the full host-delivery guarantee — a key-DOWN already consumed by
      * the host can leave a pending EP1 completion IRQ that NAKs the newly-stashed
      * keys-up after unmask; fully closing that needs USB endpoint-completion
@@ -1676,6 +1723,9 @@ static void rf_enter_stock_reacquire(void)
     rf_access_addr = rf_bond_aa;
     rf_conn_interval = rf_active_conn_interval();
     rf_conn_timeout = rf_active_conn_timeout();
+#if DONGLE_RF_CRYPT
+    rf_crypt_silence_set_deadline();
+#endif
     rf_data_ch_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
     rf_pair_prep_idx = rf_proto_pair_scan_seed(rf_pair_ack15[4]);
     rf_channel = rf_pair_channels[rf_pair_prep_idx];
@@ -1873,13 +1923,13 @@ static void rf_stock_reacquire_giveup(void)
     hal_event_cancel(RF_EVT_POST_POLL_RX);
     rf_abort_pair_burst();
 #if RF_CONFIRM_BEFORE_PERSIST
-    /* Codex fix re-review: a WAIT_REARM here means the peer HAD confirmed the
+    /* Fix re-review: a WAIT_REARM here means the peer HAD confirmed the
      * session (a valid connected RX was seen) but the post-confirm rearm never
      * succeeded and reacquire has now exhausted. The pair is genuine, so make it
      * durable before giving up (matches the confirm-timeout WAIT_REARM branch);
      * otherwise a confirmed bond is silently lost if this races ahead of the
      * confirm deadline (e.g. a failed RF_EVT_CONFIRM_TIMEOUT allocation). */
-    /* Codex 2-fix re-review (blocking): claim the confirm state under an IRQ mask
+    /* 2-fix re-review (blocking): claim the confirm state under an IRQ mask
      * (the confirm-timeout handler's model). Giveup runs in task context but a late
      * EV10 TX_FINISH can promote back to CONNECTED just before this, and the radio
      * IRQ sink can advance WAIT_RX->WAIT_REARM (and forward HID) between an unmasked
@@ -1900,7 +1950,7 @@ static void rf_stock_reacquire_giveup(void)
     if (gv_confirm == RF_CONFIRM_STATE_WAIT_REARM) {
         rf_arm_bond_persist();
     } else if (gv_confirm == RF_CONFIRM_STATE_WAIT_RX) {
-        /* Codex full-batch review (#3, low): an UNCONFIRMED fresh pair reached
+        /* Full-batch review (#3, low): an UNCONFIRMED fresh pair reached
          * giveup. Normally RF_EVT_CONFIRM_TIMEOUT routes an unconfirmed pair to the
          * dual-AA fresh-pair fallback, but if that delayed post failed to allocate
          * there is no deadline, so reacquire exhaustion lands here instead. The
@@ -1927,6 +1977,826 @@ static void rf_stock_reacquire_giveup(void)
     rf_start_rx();
     rf_arm_retry_if_failed();   /* P4: don't strand deaf on a failed arm */
     rf_camp_watchdog_arm();     /* and never on a lost completion or a deaf PHY */
+}
+
+#if DONGLE_RF_CRYPT
+/* ---------- Encrypted-link (AES-128-CCM) integration ----------
+ *
+ * Every site that follows is gated so a plaintext bond -- every bond today --
+ * behaves byte-for-byte as before. The IRQ sink only ever copies an encrypted
+ * frame into a small FIFO and posts an event; all AES work runs in task context
+ * (hal_aes is not reentrant), matching rf_crypt.h's contract. */
+
+/* Set in task context at bond load once a keyed+capable bond is installed (the
+ * key lives in rf_crypt); read by the IRQ sink. Single writer, plain byte. */
+static volatile uint8_t rf_crypt_bond_enc;
+
+/* RF_ApplyBondRecord accepted a key REMOVAL while the encrypted link was
+ * live. The tombstone rule applies (see RF_TombstoneBond): rf_crypt_bond_enc
+ * must NOT drop mid-link or the still-live connection reverts to the
+ * plaintext dispatch and accepts forged HID. The key is zeroized
+ * immediately -- the link goes dead, not open -- and this latch downgrades
+ * the bond to plaintext at the next return to the fresh-pair camp. */
+static uint8_t rf_crypt_pending_plain;
+
+/* Latched when a peer advertises encryption at pairing; rf_commit_bond_ram
+ * persists it as BOND_FLAG_ENC_CAPABLE (read exactly once, at burst-promote).
+ *
+ * Scope: boot (bond load derives it from the record's flag, or zeroes it
+ * unbonded) and tombstone are the reset points -- NOT the beacon accept, and
+ * NOT the fresh-pair relisten. Both of those look like tidy scope boundaries
+ * and both lose the negotiation:
+ *   - the advert is anonymous and arrives BEFORE the beacon we accept: the
+ *     keyboard leads every beacon with one (2.5 ms earlier, same channel), so
+ *     clearing at accept deterministically erases the latch the advert had
+ *     just set -- the capability is never persisted and encryption can never
+ *     activate (2026-08-16 review, finding 3). Before 2026-08-22 the advert
+ *     rode slots 0,1 then one in eight, which made this true only for a dongle
+ *     camped from the keyboard's first slot; joining mid-stream met a beacon
+ *     first and lost the capability outright (OC-01, measured 0/10 in the
+ *     documented pairing order, 12/12 after);
+ *   - the relisten path retries the SAME still-broadcasting keyboard, so a
+ *     reset there throws away a latch that is about to be re-set anyway, and
+ *     loses the race on any retry that promotes before the next advert.
+ * The cost of the wide scope is a mislatch when a capable keyboard advertises
+ * and a DIFFERENT keyboard's pair completes in the same camp session. That is
+ * inert -- capability alone never enables encryption; a key must be
+ * host-provisioned -- and the establishment handshake that binds and
+ * authenticates the advert is where it gets closed properly. */
+static uint8_t rf_crypt_peer_capable;
+#if DONGLE_KEX
+/* Re-pairing the stored keyboard (policy: rf_crypt.h, rf_crypt_repair_offered).
+ *   rf_repair_pending   a beacon made the offer and nothing has answered it.
+ *                       Set at the accept; withdrawn by a frame that verifies
+ *                       under the stored key, by a different keyboard's
+ *                       accept, by a host apply or clear, and when acted on.
+ *   rf_repair_void_req  a plaintext HID frame arrived while it was pending.
+ *                       Set in the radio IRQ sink, acted on in task context
+ *                       (rf_repair_void).
+ *   rf_bond_key_void    the stored link key has been dropped; the persist
+ *                       that follows must write the keyless candidate rather
+ *                       than carry the key over. Cleared once a persist has
+ *                       made flash agree, and by a host apply or clear.
+ * All three are RAM only: after a reset before the keyless record is written
+ * the old key is normally still on flash (a reset during the write itself
+ * can leave no record at all), and the user pairs again.
+ *
+ * rf_rx_aa is the access address rf_start_rx last armed the radio to receive
+ * on, written once the previous receive has been shut down. rf_access_addr is
+ * the address REQUESTED, and is assigned before that: for the moment in
+ * between, a frame caught on the old address would be judged by the new one.
+ * The offer is judged by rf_rx_aa. Two limits. It is right wherever an offer
+ * can be made, not everywhere: the EV10 reacquire configures the bond's
+ * address without going through rf_start_rx (a host-applied record can have
+ * changed it), but the beacon accept is disabled there and rf_start_rx runs
+ * before accepts resume. And whether the radio can still deliver a frame
+ * after RF_Shut returns is not established; if it can, this narrows the
+ * mismatch rather than closing it. */
+static volatile uint8_t rf_repair_pending;
+static volatile uint8_t rf_repair_void_req;
+static volatile uint8_t rf_bond_key_void;
+static volatile uint32_t rf_rx_aa;
+#endif
+
+/* Deferred crypto work: two latches instead of two event bits.
+ *
+ * The RF task's event word has no free application bit (the windowed receiver
+ * took the last two), so the CCM verify drain and the session mint are not
+ * events. Each is a volatile byte latch, set by a plain store from any context
+ * (the radio IRQ sink posts both) and cleared by the handler BEFORE it does the
+ * work, which gives the same coalescing and never-lost contract as an event bit
+ * without a read-modify-write. RF_ProcessEvent tests the latches at the place
+ * in its priority chain the two events used to hold (after the post-poll RX
+ * arm, ahead of the poll), so dispatch order is exactly what it was.
+ *
+ * A latch cannot make the executor run, so every post also raises RF_EVT_WAKE
+ * (rf_task.h): a bit of the SAME task, so there is one owner and one ordering.
+ * RF_EVT_WAKE stays set in the handler's return value until the chain reaches
+ * the latches and finds both clear. A second TMOS task was tried first and
+ * withdrawn on review: this TMOS dispatches round-robin, not by registration
+ * order, so a separate task could run the verify ahead of a pending RX re-arm. */
+static volatile uint8_t rf_crypt_work_rx;
+static volatile uint8_t rf_crypt_work_session;
+#define rf_crypt_post_rx()      do { rf_crypt_work_rx = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+#define rf_crypt_post_session() do { rf_crypt_work_session = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+
+#if DONGLE_KEX
+/* ---------------------------------------------------------- link-key exchange
+ *
+ * After a fresh pair with a keyboard that advertised encryption, the two ends
+ * agree a link key over the air (kex_proto.c: X25519, confirmed with AES-CMAC)
+ * and the dongle writes it to the bond exactly as a host BondWrite would. It
+ * runs once per pairing: a bond that already holds a key never starts one.
+ *
+ * Everything here is task context. The radio IRQ sink only queues a received
+ * exchange frame on the crypto FIFO; rf_send_poll (task context on TMOS)
+ * sends an exchange frame in a poll slot in place of the poll, and the
+ * keyboard answers it as it answers a poll. The arithmetic is done a few
+ * steps per poll by a third work latch, behind the verify drain.
+ *
+ * PRIVATE KEY. There is no hardware random source. The pool below collects
+ * the SysTick stamp the IRQ sink already takes at every connected reception
+ * (60 MHz, so 16.7 ns resolution, against a frame timed by the keyboard's own
+ * crystal) and the dispatch time of the poll that follows, and a key is drawn
+ * only after RF_KEX_ENTROPY_SAMPLES of them, conditioned through AES-CMAC and
+ * mixed with the chip's unique ID. How many bits a sample is really worth has
+ * NOT been measured; the threshold is the design document's 1/4 bit per
+ * sample for 256 bits, and that estimate is the weakest part of this. */
+#include "kex_proto.h"
+
+/* Upper bound on steps per slot. The real limit is time: the loop stops
+ * RF_KEX_POLL_MARGIN_TICKS before the next poll is due, so the arithmetic
+ * uses whatever dead time the slot has without making a poll late. One step
+ * is the exception: the last one of the shared secret also derives the keys
+ * (about 0.9 ms of AES-CMAC in one call), which costs one slot per exchange. */
+#ifndef RF_KEX_STEPS_PER_POLL
+#define RF_KEX_STEPS_PER_POLL   12u
+#endif
+#define RF_KEX_POLL_MARGIN_TICKS 9000u   /* 150 us at 60 MHz; a step is <= ~34 us */
+#define RF_KEX_MAX_FAILURES     3u       /* then no more attempts until a new pairing or a reboot */
+#define RF_KEX_ENTROPY_SAMPLES  1024u
+#define RF_KEX_TIMEOUT_POLLS    6860u    /* about 6 s of 875 us poll slots */
+
+/* The exchange context is about half a kilobyte and is needed for about a
+ * second, once per pairing, so it is borrowed from the TMOS heap for that
+ * time instead of occupying .bss for good. Task context only; the pointer is
+ * valid exactly while rf_kex_active is set. rf_kex_mem is what the allocator
+ * returned (its alignment is not documented, so the context is placed at the
+ * next word boundary inside a slightly larger block). */
+static kex_t           *rf_kex;
+static uint8_t         *rf_kex_mem;
+static volatile uint8_t rf_kex_active;        /* an exchange is running            */
+static uint8_t          rf_kex_tried;         /* already attempted this connection */
+static uint32_t         rf_kex_epoch;         /* rfd_connected_promotes at start   */
+static uint16_t         rf_kex_polls;         /* poll slots since the start        */
+static uint32_t         rf_kex_poll_tsys;     /* when the last poll slot began     */
+static uint8_t          rf_kex_failures;      /* consecutive failed attempts       */
+static uint8_t          rf_kex_slot;          /* alternates exchange frame / poll  */
+static uint32_t         rf_kex_aa;            /* the bond's session AA at the start */
+static volatile uint8_t rf_crypt_work_kex;
+static uint32_t         rf_kex_pool[8];
+static uint16_t         rf_kex_samples;
+static uint8_t          rf_kex_pool_at;
+static uint32_t         rf_kex_last_stamp;
+static uint8_t          rf_kex_seed[KEX_SEED_BYTES];   /* host seed, until the next draw */
+static volatile uint8_t rf_kex_seed_fresh;
+static uint8_t          rf_kex_stat_seeds, rf_kex_stat_seeded_draws;
+/* IAP 0x9A */
+uint8_t rf_kex_stat_starts, rf_kex_stat_done, rf_kex_stat_last_fail, rf_kex_stat_commit_fail;
+uint8_t rf_kex_stat_alloc_fail;
+static uint8_t rf_kex_peer_status[8];     /* the keyboard's last status frame */
+static uint8_t rf_kex_peer_status_n;
+
+#define rf_kex_post_work() do { rf_crypt_work_kex = 1u; hal_event_post(RF_EVT_WAKE); } while (0)
+#endif
+
+/* SPSC frame FIFO: the IRQ sink produces, the crypt RX work item (task context) consumes.
+ * Entries hold the LEN-covered bytes (from rxBuf[2]). A ring of N slots holds
+ * N-1 frames; N=2 (one in-flight frame) is what keeps CH570 under its 2 KB
+ * stack floor with encryption on. That is ample in normal use -- an encrypted
+ * frame arrives at most once per 875 us poll slot and the task drains it within
+ * the slot -- and only bites if the executor stalls (EP6 IAP flash traffic,
+ * hal_dispatch.h): a second encrypted frame arriving during a >875 us stall is
+ * dropped, fail-closed (never a security issue; the keyboard's next report
+ * recovers state). The producer publishes the tail AFTER the payload and the
+ * consumer the head after the read -- the one-way-preemption discipline of
+ * rf_app_tx_buf. */
+#define RF_CRYPT_FIFO_N 2u
+static uint8_t          rf_crypt_fifo_buf[RF_CRYPT_FIFO_N][RF_CRYPT_LEN_BOOT_KBD];
+static uint8_t          rf_crypt_fifo_len[RF_CRYPT_FIFO_N];
+static volatile uint8_t rf_crypt_fifo_head;   /* task consumer */
+static volatile uint8_t rf_crypt_fifo_tail;   /* IRQ producer */
+
+/* Pre-built session-nonce frame and the number of polls that should still carry
+ * it (a short announce window; an authenticated RX confirms and stops it).
+ * announce_count is written by the task (session mint, publish-AFTER building
+ * session_tx) and decremented by rf_send_poll -- which is the TMR ISR on CH570 --
+ * so it is volatile and read before session_tx (the same publish/consume
+ * discipline as the FIFO): rf_send_poll only touches session_tx when the count
+ * it read is nonzero, and the task sets the count only after session_tx is whole. */
+#define RF_CRYPT_ANNOUNCE_POLLS 8u
+static uint8_t          rf_crypt_session_tx[RF_CRYPT_LEN_SESSION];
+static volatile uint8_t rf_crypt_announce_count;
+
+#if RF_CRYPT_AES_DOUBLE
+/* Announce-seal engine-fault retries. A wrongly-built or unbuildable session
+ * announce is a SILENT dead epoch: the announce is fire-and-forget (8 polls,
+ * never verified locally), so the keyboard keeps sealing under a session the
+ * dongle cannot verify until the next mint. The seal is 3 AES blocks in task
+ * context -- the stale-abort window -- so on a build fault the mint is
+ * re-posted (cheap: no state has been announced) up to this budget. */
+#define RF_CRYPT_ANNOUNCE_RETRIES 3u
+uint32_t rf_crypt_announce_retry;   /* product telemetry (CMD_CRYPT_DIAG) */
+static uint8_t rf_crypt_announce_retry_budget = RF_CRYPT_ANNOUNCE_RETRIES;
+#endif
+
+/* Authenticated-HID silence guard: an active encrypted bond that goes this long
+ * with nothing verifying is released. rf_send_poll posts RF_EVT_TIMEOUT -- the
+ * existing link-loss path, which releases the keyboard and re-enters reacquire
+ * in task context -- so an attacker who keeps supervision alive with
+ * unauthenticated traffic cannot hold a previously-forwarded key-down stuck.
+ * Genuine silence (no frames at all) still reaches supervision first: its lapse
+ * is ~23 ms against this deadline's 500 ms floor, so the guard only ever
+ * decides the case supervision cannot see -- traffic arriving that never
+ * authenticates.
+ *
+ * This was a FRAME count (64 receptions, "roughly 56 ms at the connected
+ * cadence") and that was wrong in kind, not merely in size. The count was
+ * incremented by every connected RX -- overwhelmingly the keyboard's own bare
+ * 1-byte poll acks, measured at ~975/s -- but satisfied only by an
+ * authenticated frame, which the keyboard schedules against ITS OWN reception
+ * count (KBD_CRYPT_KEEPALIVE_POLLS, ~33 ms). Two different clocks sharing one
+ * budget: the real deadline was ~65 ms against a ~33 ms keepalive, so any two
+ * missed keepalives crossed it. On the bench that released 7 of 7 healthy keyed
+ * links (2026-08-23) -- every one with enc_shape == ok exactly, no drops, no
+ * FIFO loss and a single session mint, i.e. nothing wrong but this guard.
+ *
+ * Worse, a reception count is attacker-rate-dependent in the wrong direction: a
+ * faster flood spent the budget SOONER, so the mechanism meant to bound an
+ * attacker instead handed them the teardown. A deadline in time is independent
+ * of how fast anyone transmits, which is the property this needs.
+ *
+ * The deadline itself is derived per connection interval by
+ * rf_crypt_silence_deadline_ticks() (rf_crypt.h), which is where the policy and
+ * its headroom argument live. It is floored at 500 ms and capped at 3 s: the
+ * floor keeps a fast link from inheriting a deadline barely above the
+ * keepalive, and the cap is what actually bounds an attacker-held key-down.
+ * Deliberately NOT tightened further -- a thin margin is what was wrong. */
+/* The 2^32-modular delta is only unambiguous while the deadline stays far
+ * inside half the counter's range; at the 3 s ceiling this is ~1.8e8 (CH592) /
+ * ~3.0e8 (CH570) against 2^31, so the margin is ~7x. An edit that pushed the
+ * ceiling into tens of seconds would silently read stale deltas as fresh. */
+_Static_assert((uint64_t)RF_CRYPT_SILENCE_MAX_TICKS * HAL_TICKS_PER_PROTO_TICK
+                   < 0x40000000u,
+               "silence deadline must stay well inside the 2^32 wrap window");
+/* Tsys stamp of the last frame that authenticated, the deadline it is measured
+ * against (derived from the connection interval at each promote), and whether
+ * the guard is armed at all. `armed` is a separate byte on purpose: zero is a
+ * legitimate hal_now() value once every 2^32 ticks, so it must not double as a
+ * "stand down" sentinel for what is security state.
+ *
+ * Volatile: written in task context and the radio IRQ sink, read in task and
+ * (CH570) TMR ISR context. hal_now() is already called from the radio IRQ sink
+ * and IRQ-masks internally, so it is safe in all three. */
+static volatile uint32_t rf_crypt_last_auth_tsys;
+static volatile uint8_t  rf_crypt_silence_armed;
+/* Volatile: written in task context by rf_crypt_silence_set_deadline() and read
+ * by the guard in rf_send_poll(), which is the TMR ISR on CH570. It sits beside
+ * two volatile siblings and was the one field that was not -- a stale cached
+ * read here would compare the idle time against the wrong deadline. */
+static volatile uint32_t rf_crypt_silence_deadline_tsys;
+/* Set by the silence guard, honored by the RF_EVT_TIMEOUT handler to FORCE a
+ * reacquire even though unauthenticated traffic keeps supervision's RX stamp
+ * fresh (otherwise the timeout handler would just re-arm and never release). */
+static volatile uint8_t  rf_crypt_force_release;
+
+/* Recompute the deadline for the current connection interval. TASK CONTEXT
+ * ONLY -- it is deliberately separate from arming because it carries a
+ * multiply and two clamps, and the arm sites include the __HIGH_CODE
+ * radio-IRQ sink. Called wherever rf_conn_interval is established. */
+static void rf_crypt_silence_set_deadline(void)
+{
+    uint16_t ivl = rf_conn_interval ? rf_conn_interval
+                                    : (uint16_t)RF_TMR0_DEFAULT_INTERVAL;
+
+    rf_crypt_silence_deadline_tsys =
+        rf_crypt_silence_deadline_ticks(ivl) * HAL_TICKS_PER_PROTO_TICK;
+}
+
+/* Arm (or re-arm) the guard from NOW.
+ *
+ * Three stores and a hal_now(), no call into flash: two callers are the
+ * promote-to-CONNECTED sites inside the __HIGH_CODE radio-IRQ sink, and the
+ * promote is the moment the poll grid is set up. An earlier revision put the
+ * deadline arithmetic here and made it noinline to keep it out of SRAM -- which
+ * bought an XIP flash call inside the radio IRQ at exactly that moment, and
+ * measurably degraded the link (5 of 6 links died with the guard never firing).
+ * Keep the deadline computation in rf_crypt_silence_set_deadline() and keep
+ * this cheap enough to inline.
+ *
+ * Clearing rf_crypt_force_release matters: the guard gates on it to avoid
+ * re-posting every poll, so a latch whose RF_EVT_TIMEOUT was cancelled rather
+ * than dispatched (the EV10-entry sites cancel explicitly) would otherwise
+ * disarm the guard for good -- the same unbounded-stuck-key class this change
+ * exists to close. Every arm site is a state change, so this is always right. */
+static inline void rf_crypt_arm_silence(void)
+{
+    rf_crypt_last_auth_tsys = hal_now();
+    rf_crypt_silence_armed = 1u;
+    rf_crypt_force_release = 0u;
+}
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* Bench only. The guard and a genuine supervision lapse both end in
+ * rf_enter_stock_reacquire(), and leaving CONNECTED freezes every exported
+ * counter at the same instant -- so post-mortem telemetry cannot say WHICH tore
+ * the link down. These two make the guard self-reporting: a link that dies with
+ * rf_crypt_guard_fires unchanged was NOT released by the guard, and one that
+ * dies as it increments was. rf_crypt_guard_at_fire keeps how long the link had
+ * gone unauthenticated when it tripped, in milliseconds -- saturating at 0xFFFF,
+ * which no healthy link can reach. */
+uint32_t rf_crypt_crc_err;   /* connected receptions that failed CRC/type */
+uint16_t rf_crypt_guard_fires;
+uint16_t rf_crypt_guard_at_fire;
+#endif
+/* Why frames were dropped, indexed by rf_crypt_status_t. A single total says a
+ * peer is being rejected but not whether its tag failed, its counter looked
+ * replayed, or its shape was wrong -- which are entirely different bugs on the
+ * transmitting end. Product telemetry: with ok_count these are the "is the
+ * encrypted link healthy" signal, read over IAP (CMD_CRYPT_DIAG). */
+uint32_t rf_crypt_drop_reason[6];
+uint32_t rf_crypt_ok_count;
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+static uint32_t rf_crypt_drops;   /* diagnostic (approximate): frames dropped;
+                                   * redundant with drop_reason + fifo_full */
+/* Pre-verify sink telemetry. rf_crypt_drop_reason only counts frames that
+ * actually reached rf_crypt_rx(); a frame lost BEFORE that -- never received,
+ * not recognised as an encrypted shape, refused by a full FIFO, or discarded by
+ * the session-mint flush -- leaves every exported counter at zero, which reads
+ * identically to "the keyboard transmitted nothing". These split those cases:
+ *
+ *   conn_rx     every connected RX while the bond is encryption-active
+ *   len_max     largest LEN seen in that state, and the tag byte beside it --
+ *               the decisive datum. Never reaching 22/0xA1 means the frame is
+ *               lost on air or before the sink; reaching it while ok_count
+ *               stays 0 puts the loss between the sink and rf_crypt_rx
+ *   enc_shape   frames the classifier accepted (a FIFO push was attempted)
+ *   fifo_full   pushes refused because the 2-deep FIFO was full or the frame
+ *               was oversize (an executor stall shows up here and nowhere else)
+ *   flush_drop  frames discarded unverified by the session-mint flush,
+ *               which runs on every mint and so up to 8 times per announce
+ *   plain_drop  plaintext HID refused as a downgrade on an encrypted bond
+ *
+ * Diagnostic only: approximate under preemption, and nothing here gates a
+ * forwarding decision. Read over IAP (CMD_CRYPT_DIAG, bench layout).
+ *
+ * Bench-gated since the sink-forensics campaign answered its question: these
+ * ten-odd bytes of .bss were part of what pushed CH570 through its stack
+ * floor (the 2026-08-16 review, finding 4), and a lost pre-verify frame in
+ * the field still shows up as the drop_reason[] pattern above. */
+uint32_t rf_crypt_conn_rx;
+uint32_t rf_crypt_enc_shape;
+uint32_t rf_crypt_fifo_full;
+uint32_t rf_crypt_flush_drop;
+uint8_t  rf_crypt_len_max;
+uint8_t  rf_crypt_len_max_tag;
+#endif /* RF_CRYPT_DIAG_PREV_SESSION */
+
+/* NOT bench-gated, unlike its neighbours above: a refused plaintext downgrade
+ * on an ACTIVE encrypted bond is the one pre-verify drop with a security
+ * meaning, and on a product build it was previously invisible in EVERY channel
+ * -- the frame never reaches rf_crypt_rx, so no drop_reason[] bucket moves and
+ * the only downstream effect is an unattributed connection flap. That made an
+ * active downgrade/forgery attempt indistinguishable from RF flakiness on a
+ * shipping unit. 4 bytes of .bss against the CH570 floor's measured 1372 B of
+ * slack. Exported in the product 0x98 (iap.c). */
+uint32_t rf_crypt_plain_drop;
+
+static uint32_t rf_crypt_gen_session_id(void);   /* defined near rf_aa_rng16 */
+
+/* IRQ-sink helper (flash-resident noinline: the sink is __HIGH_CODE and CH570
+ * sits against the CH570_STACK_FLOOR assert -- same precedent as
+ * rf_accept_peer_mac). Copy one encrypted frame into the FIFO; 1 if queued. */
+__attribute__((noinline))
+static uint8_t rf_crypt_fifo_push(const uint8_t *frame, uint8_t len)
+{
+    uint8_t tail = rf_crypt_fifo_tail;
+    uint8_t next = (uint8_t)((tail + 1u) % RF_CRYPT_FIFO_N);
+    uint8_t i;
+
+    if (len > RF_CRYPT_LEN_BOOT_KBD || next == rf_crypt_fifo_head) {
+#if RF_CRYPT_DIAG_PREV_SESSION
+        rf_crypt_drops++;
+        rf_crypt_fifo_full++;   /* the only trace this frame ever existed */
+#endif
+        return 0u;   /* oversize or full: drop newest */
+    }
+    for (i = 0; i < len; i++) {
+        rf_crypt_fifo_buf[tail][i] = frame[i];
+    }
+    rf_crypt_fifo_len[tail] = len;
+    rf_crypt_fifo_tail = next;   /* publish AFTER the payload */
+    return 1u;
+}
+
+#endif /* DONGLE_RF_CRYPT */
+
+#if DONGLE_RF_CRYPT
+/* Task context: discard every admitted-but-unverified frame. Only the head is
+ * moved (the consumer's index); a frame the sink pushes concurrently either
+ * lands before the tail read and is dropped, or after it and is caught by the
+ * drain's own CONNECTED check or the next session mint. */
+static void rf_crypt_rx_flush(void)
+{
+    rf_crypt_fifo_head = rf_crypt_fifo_tail;
+}
+
+/* The boot-keyboard state last forwarded on this link, so a verified frame
+ * that only repeats it is not forwarded again. The keyboard repeats state on
+ * purpose: an idle keepalive every ~28 ms, and a fresh seal of an unacked
+ * report on every poll. Forwarding those would hand USB a stream of unchanged
+ * reports, and usb_hid_in_ready() requests a remote wake for ANY report while
+ * the host is suspended -- an idle keyboard would wake a sleeping host. A
+ * boot-keyboard report is the whole key state, so dropping an exact repeat
+ * loses nothing. Mouse and consumer bodies are NOT covered: relative motion
+ * may legitimately repeat, and deduplicating it needs a report identity the
+ * frame does not carry yet. */
+static uint8_t rf_crypt_kbd_last[8];
+
+/* Task context. Zeros = all keys up, which is what the host holds after any
+ * link loss (rf_send_keys_up_on_link_loss) and at boot. */
+static void rf_crypt_kbd_last_reset(void)
+{
+    uint8_t i;
+
+    for (i = 0; i < sizeof(rf_crypt_kbd_last); i++) {
+        rf_crypt_kbd_last[i] = 0u;
+    }
+}
+
+/* Returns 1 for a boot-keyboard body identical to the last one forwarded;
+ * otherwise records it (when it is a boot-keyboard body) and returns 0. */
+static uint8_t rf_crypt_kbd_repeat(uint8_t tag, const uint8_t *body, uint8_t n)
+{
+    uint8_t i, same = 1u;
+
+    if (tag != RF_PROTO_HID_TAG || n != sizeof(rf_crypt_kbd_last)) {
+        return 0u;
+    }
+    for (i = 0; i < sizeof(rf_crypt_kbd_last); i++) {
+        if (rf_crypt_kbd_last[i] != body[i]) {
+            same = 0u;
+        }
+        rf_crypt_kbd_last[i] = body[i];
+    }
+    return same;
+}
+#endif
+
+#if DONGLE_KEX
+/* One entropy sample into the pool (task context). */
+static void rf_kex_absorb(uint32_t s)
+{
+    uint8_t i = rf_kex_pool_at;
+
+    rf_kex_pool[i] = ((rf_kex_pool[i] << 7) | (rf_kex_pool[i] >> 25)) ^ s;
+    rf_kex_pool[i] += rf_kex_pool[(i + 3u) & 7u];
+    rf_kex_pool_at = (uint8_t)((i + 1u) & 7u);
+}
+
+/* Draw a 32-byte private scalar from the pool and re-key the pool so the
+ * draw cannot be reconstructed from what is left. Returns 0 on success. */
+static int rf_kex_draw(uint8_t priv[32])
+{
+    uint8_t key[16], msg[16u + 8u + 1u], next[32];
+    uint8_t uid[8] __attribute__((aligned(4)));
+    uint8_t i;
+    int rc;
+
+    /* A host seed, if one is waiting: XORed over the whole pool, so the pool
+     * is at least as unpredictable as the better of the two. Cleared before
+     * it is read; a seed that arrives while this runs is kept for the next
+     * draw (whatever part of it was folded here does no harm). */
+    if (rf_kex_seed_fresh) {
+        rf_kex_seed_fresh = 0u;
+        for (i = 0; i < KEX_SEED_BYTES; i++) {
+            rf_kex_pool[i >> 2] ^= (uint32_t)rf_kex_seed[i] << (8u * (i & 3u));
+            rf_kex_seed[i] = 0u;
+        }
+        if (rf_kex_stat_seeded_draws < 0x7Fu) {
+            rf_kex_stat_seeded_draws++;
+        }
+    }
+    GET_UNIQUE_ID(uid);
+    for (i = 0; i < 16u; i++) {
+        key[i] = (uint8_t)(rf_kex_pool[i >> 2] >> (8u * (i & 3u)));
+        msg[i] = (uint8_t)(rf_kex_pool[4u + (i >> 2)] >> (8u * (i & 3u)));
+    }
+    for (i = 0; i < 8u; i++) {
+        msg[16u + i] = uid[i];
+    }
+    msg[24] = 0u;
+    rc = kex_cmac(key, msg, sizeof(msg), &priv[0]);
+    msg[24] = 1u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &priv[16]);
+    msg[24] = 2u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[0]);
+    msg[24] = 3u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[16]);
+    for (i = 0; i < 32u; i++) {
+        rf_kex_pool[i >> 2] ^= (uint32_t)next[i] << (8u * (i & 3u));
+    }
+    rf_kex_samples = 0u;
+    tmos_memset(key, 0, sizeof(key));
+    tmos_memset(msg, 0, sizeof(msg));
+    tmos_memset(next, 0, sizeof(next));
+    return rc;
+}
+
+static void rf_kex_stop(void)
+{
+    rf_kex_active = 0u;           /* first: nothing may use the context after this */
+    if (rf_kex_mem) {
+        kex_reset(rf_kex);        /* wipe before the memory goes back */
+        (void)tmos_msg_deallocate(rf_kex_mem);
+    }
+    rf_kex_mem = 0;
+    rf_kex = 0;
+}
+
+/* The stored keyboard was re-paired and has sent plaintext, which is taken as
+ * it holding no key (rf_crypt.h, "re-pairing the stored keyboard"): drop the
+ * stored key and make the bond what a different keyboard's would be at this
+ * point -- keyless, plaintext dispatch, capability kept, the authenticated-
+ * silence guard stood down -- so that the exchange below may start once the
+ * keyless record is on flash, under its usual conditions. Task context.
+ *
+ * Only on a confirmed, persisted bond: before that the fresh pairing's own
+ * persist is still to run, and it would carry the key back. The request is
+ * consumed either way; the keyboard repeats an unacknowledged report every
+ * poll, so the next one asks again. */
+static void rf_repair_void(void)
+{
+    uint8_t go;
+    uint32_t irq = __risc_v_disable_irq();
+
+    go = (uint8_t)(rf_repair_pending && rf_crypt_bond_enc && rf_bond_valid
+                   && rf_bond_persisted && !rf_bond_tombstone
+                   && rf_state == RF_STATE_CONNECTED
+#if RF_CONFIRM_BEFORE_PERSIST
+                   && rf_confirm_state == RF_CONFIRM_STATE_NONE
+#endif
+                   );
+    rf_repair_void_req = 0u;
+    if (go) {
+        rf_repair_pending = 0u;
+        rf_bond_key_void = 1u;
+        rf_crypt_bond_enc = 0u;
+        /* Nothing sealed under the old key is owed or wanted any more, and
+         * the guard that polices an encrypted link must not end this one: the
+         * poll that got here may already have asked for a release. */
+        rf_crypt_announce_count = 0u;
+        rf_crypt_fifo_head = rf_crypt_fifo_tail;
+        rf_crypt_silence_armed = 0u;
+        rf_crypt_force_release = 0u;
+        /* The record on flash still has the key: not persisted, which also
+         * holds the exchange back until the keyless one is written. */
+        rf_bond_persisted = 0;
+        rf_request_bond_persist();
+    }
+    (void)__risc_v_enable_irq(irq);
+    if (go) {
+        rf_crypt_clear();       /* outside the mask, as RF_TombstoneBond does */
+    }
+}
+
+/* Once per poll slot, connected, task context: feed the pool, notice a new
+ * connection, and start an exchange when one is due. */
+static void rf_kex_poll_tick(void)
+{
+    uint32_t now = hal_now();
+    uint32_t stamp = rf_last_conn_rx_tsys;
+
+    if (rf_repair_void_req) {
+        rf_repair_void();
+    }
+    rf_kex_poll_tsys = now;
+    if (stamp != rf_kex_last_stamp) {           /* a reception since last poll */
+        rf_kex_last_stamp = stamp;
+        rf_kex_absorb(stamp);
+        /* SysTick runs from the crystal, the RTC counter from the 32 kHz RC
+         * oscillator: their relative phase is the one physically independent
+         * quantity available here. */
+        rf_kex_absorb(now ^ (rtc_read_32k() << 16));
+        if (rf_kex_samples < 0xFFFFu) {
+            rf_kex_samples++;
+        }
+    }
+    if (rf_kex_epoch != rfd_connected_promotes) {
+        /* A new connection. An exchange that has not got past the shared
+         * secret keeps its key pair and carries on (the keyboard drops the
+         * link whenever it rests, and redoing the key generation each time
+         * meant the exchange never finished); anything further along is
+         * abandoned and started afresh. */
+        rf_kex_epoch = rfd_connected_promotes;
+        rf_kex_polls = 0u;
+        if (rf_kex_active && kex_rewind(rf_kex) != 0) {
+            rf_kex_stop();
+        }
+        rf_kex_tried = rf_kex_active;
+    }
+    if (rf_kex_active) {
+        if (rf_kex_polls < 0xFFFFu) {
+            rf_kex_polls++;
+        }
+        return;
+    }
+    /* Start only for a peer that advertised encryption, on a persisted and
+     * confirmed bond that has no key, once per connection, with a full pool. */
+    if (!rf_bond_persisted) {
+        rf_kex_failures = 0u;         /* a new pairing gets its own attempts */
+    }
+    if (rf_kex_tried || rf_kex_failures >= RF_KEX_MAX_FAILURES
+        || !rf_crypt_peer_capable || rf_crypt_bond_enc
+        || !rf_bond_valid || !rf_bond_persisted || rf_bond_tombstone
+#if RF_CONFIRM_BEFORE_PERSIST
+        || rf_confirm_state != RF_CONFIRM_STATE_NONE
+#endif
+        || rf_kex_samples < RF_KEX_ENTROPY_SAMPLES) {
+        return;
+    }
+    {
+        uint8_t priv[32], prefix[KEX_T_PREFIX_BYTES];
+        uint8_t i;
+
+        rf_kex_tried = 1u;
+        rf_kex_mem = tmos_msg_allocate((uint16_t)(sizeof(kex_t) + 3u));
+        if (rf_kex_mem == 0) {
+            /* No heap for it now: not an exchange failure, just not this
+             * connection. Counted so a heap that can never spare it shows. */
+            rf_kex_stat_alloc_fail++;
+            return;
+        }
+        rf_kex = (kex_t *)(((uintptr_t)rf_kex_mem + 3u) & ~(uintptr_t)3u);
+        if (rf_kex_draw(priv) != 0) {
+            rf_kex_stat_last_fail = (uint8_t)KEX_FAIL_ENGINE;
+            rf_kex_stop();
+            return;
+        }
+        /* Transcript prefix. The minimal exchange binds the two identities
+         * and the suite label; the design's beacon and pair-ACK bytes are
+         * not included yet. MACs are in on-air byte order on both ends. */
+        for (i = 0; i < KEX_T_PREFIX_BYTES; i++) {
+            prefix[i] = 0u;
+        }
+        prefix[0] = 'O'; prefix[1] = 'K'; prefix[2] = 'X'; prefix[3] = '1';
+        prefix[4] = 0xA6u; prefix[5] = 2u;
+        for (i = 0; i < 6u; i++) {
+            prefix[6u + i] = rf_peer_mac[i];
+            prefix[12u + i] = rf_pair_ack15[9u + i];
+        }
+        kex_start(rf_kex, KEX_ROLE_DONGLE, priv, prefix, &rf_pair_ack15[9], rf_peer_mac);
+        tmos_memset(priv, 0, sizeof(priv));
+        rf_kex_polls = 0u;
+        rf_kex_aa = rf_bond_aa;
+        rf_kex_stat_starts++;
+        rf_kex_active = 1u;
+    }
+}
+
+/* The exchange finished: write the key to the bond and activate it, exactly
+ * as a host BondWrite does (save, read back, apply to the running task). */
+static void rf_kex_commit(void)
+{
+    bond_record_t rec __attribute__((aligned(4)));
+    bond_record_t back __attribute__((aligned(4)));
+    uint8_t ok = 0u;
+
+    if (kex_take_link_key(rf_kex, rec.link_key) == 0) {
+        uint8_t lk[16];
+
+        tmos_memcpy(lk, rec.link_key, 16);
+        /* The bond on flash must still be the one the exchange ran for: same
+         * keyboard, still keyless. A host BondWrite or a re-pair in between
+         * would otherwise get this key written into a different bond. */
+        if (bond_load(&rec) && !(rec.flags & BOND_FLAG_ENC_KEY)
+            && rec.session_aa == rf_kex_aa
+            && tmos_memcmp(rec.peer_mac, rf_kex->peer_mac, 6)) {
+            tmos_memcpy(rec.link_key, lk, 16);
+            rec.flags |= (uint8_t)(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+            rec.checksum = bond_checksum(&rec);
+            if (bond_key_flags_valid(&rec) && bond_save(&rec) == 0
+                && bond_load(&back) && bond_tuple_equal(&back, &rec)) {
+                (void)RF_ApplyBondRecord(&rec);
+                ok = 1u;
+            }
+        }
+        tmos_memset(lk, 0, sizeof(lk));
+    }
+    tmos_memset(&rec, 0, sizeof(rec));
+    tmos_memset(&back, 0, sizeof(back));
+    if (ok) {
+        rf_kex_stat_done++;
+        rf_kex_stat_last_fail = 0u;
+        rf_kex_failures = 0u;
+    } else {
+        rf_kex_stat_commit_fail++;
+        rf_kex_failures++;
+    }
+    rf_kex_stop();
+}
+
+/* The exchange's work latch (task context): a few steps of arithmetic, then
+ * act on the outcome. */
+static void rf_kex_service(void)
+{
+    kex_state_t st;
+
+    if (!rf_kex_active) {
+        return;
+    }
+    /* The bond changed under the exchange (a host BondWrite gave it a key,
+     * a clear tombstoned it): the exchange no longer applies, and its CMACs
+     * must not replace an AES key that is now in use. */
+    if (rf_crypt_bond_enc || !rf_bond_valid || rf_bond_tombstone
+        || rf_bond_aa != rf_kex_aa) {
+        rf_kex_stop();
+        return;
+    }
+    if (rf_state != RF_STATE_CONNECTED) {
+        return;                       /* resumes, rewound, on the next connection */
+    }
+    /* One step at a time until the slot's dead time is used up. */
+    {
+        uint32_t slot_ticks = (uint32_t)rf_conn_interval * 1875u;   /* 1/32000 s units at 60 MHz */
+        uint32_t rx_seen = rf_last_conn_rx_tsys;
+        uint8_t n;
+
+        st = kex_state(rf_kex);
+        for (n = 0; n < RF_KEX_STEPS_PER_POLL; n++) {
+            if (rf_last_conn_rx_tsys != rx_seen) {
+                break;                /* the reply arrived: let its handling run */
+            }
+            if ((uint32_t)(hal_now() - rf_kex_poll_tsys) + RF_KEX_POLL_MARGIN_TICKS >= slot_ticks) {
+                break;
+            }
+            st = kex_work(rf_kex, 1u);
+            if (st != KEX_KEYGEN && st != KEX_DH) {
+                break;                /* nothing left to compute right now */
+            }
+        }
+    }
+    if (st == KEX_DONE) {
+        rf_kex_commit();
+    } else if (st == KEX_FAILED) {
+        rf_kex_stat_last_fail = (uint8_t)kex_failure(rf_kex);
+        if (rf_kex->abort_tx == 0u) {     /* the peer has been told */
+            rf_kex_failures++;
+            rf_kex_stop();
+        }
+    } else if (rf_kex_polls >= RF_KEX_TIMEOUT_POLLS) {
+        kex_expire(rf_kex);
+    }
+}
+
+void RF_KexSeed(const uint8_t seed[32])
+{
+    uint8_t i;
+
+    rf_kex_seed_fresh = 0u;
+    for (i = 0; i < KEX_SEED_BYTES; i++) {
+        rf_kex_seed[i] = seed[i];
+    }
+    rf_kex_seed_fresh = 1u;
+    rf_kex_stat_seeds++;
+}
+
+uint8_t RF_KexDiag(uint8_t out[22])
+{
+    out[20] = rf_kex_stat_seeds;
+    out[21] = (uint8_t)(rf_kex_stat_seeded_draws | (rf_kex_seed_fresh ? 0x80u : 0u));
+    tmos_memcpy(&out[8], rf_kex_peer_status, 8);
+    out[16] = rf_kex_peer_status_n;
+    out[17] = (uint8_t)(rf_kex_failures | (rf_kex_stat_alloc_fail << 4));
+    out[18] = rf_kex_active ? rf_kex->x.phase : 0u;
+    out[19] = rf_kex_active ? (uint8_t)rf_kex->x.count : 0u;
+    out[0] = rf_kex_stat_starts;
+    out[1] = rf_kex_stat_done;
+    out[2] = rf_kex_stat_last_fail;
+    out[3] = rf_kex_active ? (uint8_t)kex_state(rf_kex) : 0u;
+    out[4] = (uint8_t)rf_kex_samples;
+    out[5] = (uint8_t)(rf_kex_samples >> 8);
+    out[6] = rf_kex_stat_commit_fail;
+    out[7] = rf_kex_tried;
+    return 22u;
+}
+#endif /* DONGLE_KEX */
+
+/* Control-byte feedback for a frame the CONNECTED handler admits (stock
+ * PROTOCOL.md formula, bit 1 = the keyboard's fresh-packet indicator; we flip
+ * bit 0 when it changes), plus the LED relay delivery accounting that rides
+ * the same answer (see rf_led_relay_phase): an answer to the relay poll
+ * retires it, one to the gap after an unanswered relay poll spends a try.
+ * Forced inline: it runs in the radio IRQ sink, and a flash-resident call
+ * there is the shape that degraded the link. */
+static inline __attribute__((always_inline)) void rf_connected_relay_answer(void)
+{
+    uint8_t phase = rf_led_relay_phase;
+    if (phase == RF_LED_RELAY_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
+        if (rf_app_tx_buf[1] == rf_led_relay_carried) {
+            rf_app_tx_pending = 0u;
+        }
+    } else if (phase == RF_LED_RELAY_GAP_ON_AIR) {
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
+        rf_led_relay_misses++;
+    }
+}
+
+static inline __attribute__((always_inline)) void rf_connected_admit_feedback(uint8_t rx_ctrl)
+{
+    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rx_ctrl);
+    rf_connected_relay_answer();
 }
 
 /* ---------- RF status callback (runs in interrupt context) ---------- */
@@ -1989,7 +2859,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     case HAL_RF_EV_TX_DONE:   sta = TX_MODE_TX_FINISH; rsr = 0; break;
     case HAL_RF_EV_TX_FAIL:   sta = TX_MODE_TX_FAIL;   rsr = 0; break;
     case HAL_RF_EV_RX_TIMEOUT:
-        /* The extractor maps unknown vendor sta here (codex P2.4 #1): give
+        /* The extractor maps unknown vendor sta here (P2.4 #1): give
          * the preserved body a sta no case matches so it falls into its
          * switch default -- the legacy defensive RX_RESTART. */
         sta = 0xFFu; rsr = 0; break;
@@ -2010,7 +2880,22 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     switch (sta) {
     case RX_MODE_RX_DATA:
         if (rsr != 0) {
-            /* CRC error or type mismatch - restart RX */
+            /* CRC error or type mismatch - restart RX.
+             *
+             * This exits BEFORE conn_rx and enc_shape are counted, so until
+             * now a frame that arrived corrupt was indistinguishable from one
+             * that never arrived at all -- the exact blind spot that made the
+             * keyed link's ~10% HID loss unattributable. A 22-byte encrypted
+             * frame has roughly 3x the airtime of a 1-byte poll ack, and one
+             * that starts late in the slot can still be in the air when this
+             * receiver shuts RX for its next poll; either way it lands here.
+             * Counted only while CONNECTED: pairing-channel noise is a
+             * different population and would swamp the signal. */
+#if RF_CRYPT_DIAG_PREV_SESSION
+            if (rf_state == RF_STATE_CONNECTED) {
+                rf_crypt_crc_err++;
+            }
+#endif
             hal_event_post(RF_EVT_RX_RESTART);
             break;
         }
@@ -2089,7 +2974,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * without a fresh confirmation.
                  *
                  * KNOWN LIMITATION -- N11 is PARTIAL for bond-replacing re-pairs
-                 * (Codex impl-review; OWNER-ACCEPTED WONTFIX 2026-07-13): such a
+                 * (impl-review; OWNER-ACCEPTED WONTFIX 2026-07-13): such a
                  * re-pair reuses the loaded session AA (advertised in the pair-ACK),
                  * which the OLD keyboard also knows. If the new keyboard misses every
                  * ACK yet the old keyboard is still powered and polling that AA, the
@@ -2123,6 +3008,54 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rfd_len10_accept_known++;
                     rfd_len10_last_disp = RFD_L10_ACCEPT_KNOWN;
                 }
+#endif
+#if DONGLE_RF_CRYPT
+                /* Peer-change / fresh-dongle accept ONLY (this runs before the
+                 * memcpy, so rf_peer_mac is still the OLD peer; tmos_memcmp is
+                 * true-when-equal). A DIFFERENT keyboard, or an unbonded dongle,
+                 * starts a keyless bond -> drop the encryption-required latch so it
+                 * cannot inherit the previous bond's key requirement. A SAME-peer
+                 * reconnect must NOT take this path: it keeps the loaded encryption
+                 * state (its key is still installed), so a reconnect can never
+                 * downgrade an encrypted bond to plaintext. (Byte writes, IRQ-safe;
+                 * the stale hal_aes key is unused while enc is off, zeroized at
+                 * next bond load/tombstone.)
+                 *
+                 * rf_crypt_peer_capable is deliberately NOT cleared here: the
+                 * capability advert precedes this first acceptable beacon (slots
+                 * 0-1 vs 2), so a clear at accept erased what the advert just
+                 * latched, 100% of the time -- see the latch's declaration for
+                 * the full scoping argument. The policy itself lives in
+                 * rf_crypt.h so the host suite pins it. */
+                rf_crypt_beacon_accept_latches(
+                    rf_bond_valid,
+                    (uint8_t)(tmos_memcmp(rf_peer_mac, &rxBuf[2], 6) != 0),
+                    &rf_crypt_bond_enc,
+                    &rf_crypt_peer_capable);
+#if DONGLE_KEX
+                /* A beacon from the stored keyboard that passes the gate a new
+                 * keyboard's must (the second disjunct of the accept condition
+                 * above, which on a bonded dongle is the open window, the
+                 * signal floor and a usable MAC) and came in on the pairing
+                 * address offers a re-pair; what the keyboard sends once
+                 * connected decides it (rf_crypt.h). Nothing changes here: the
+                 * requirement and the key stay. A different keyboard's accept
+                 * withdraws an offer made to the previous one.
+                 * rf_pair_window_open is still this beacon's value; it is
+                 * closed below. The address is the one the radio was armed
+                 * on (rf_rx_aa), not the one last requested. */
+                if (!rf_bond_valid || !tmos_memcmp(rf_peer_mac, &rxBuf[2], 6)) {
+                    rf_repair_pending = 0u;
+                    rf_repair_void_req = 0u;
+                } else if (rf_crypt_repair_offered(
+                               1u, 1u,
+                               (uint8_t)(rf_pair_window_open
+                                         && rf_rssi >= RF_PAIR_MIN_RSSI
+                                         && rf_accept_peer_mac(&rxBuf[2])),
+                               (uint8_t)(rf_rx_aa == rf_bond_aa))) {
+                    rf_repair_pending = 1u;
+                }
+#endif
 #endif
                 tmos_memcpy(rf_peer_mac, &rxBuf[2], 6);
                 /* A new pair is now in progress (this only runs for a fresh
@@ -2163,6 +3096,24 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                 break;
             }
 
+#if DONGLE_RF_CRYPT
+            /* Encryption-capability advertisement from a keyboard that supports
+             * link encryption (purely additive; a stock keyboard never sends it).
+             * Latch it so a completed pair persists BOND_FLAG_ENC_CAPABLE. The
+             * latch is scoped to this pairing (reset at the fresh-pair accept).
+             * The advert is UNAUTHENTICATED and unbound this phase, but that is
+             * inert: capability alone never enables encryption -- a key must also
+             * be provisioned (a host action) -- so a forged advert only marks a
+             * keyless bond "capable", which stays plaintext. The future
+             * establishment handshake binds and authenticates it. */
+            if (rxBuf[1] == RF_CRYPT_LEN_CAP && rxBuf[3] == RF_CRYPT_TAG_CAP
+                && rxBuf[4] == RF_CRYPT_CAP_VERSION) {
+                rf_crypt_peer_capable = 1u;
+                hal_event_post(RF_EVT_RX_RESTART);
+                break;
+            }
+#endif
+
             /* IAP 0x92: a LEN-10 that fell through the accept gate above. */
             if (rxBuf[1] == 10) {
                 rfd_len10_seen++;
@@ -2190,6 +3141,25 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
             rf_ch570_connected_rx_count++;
 #endif
 
+#if DONGLE_RF_CRYPT
+            /* Authenticated liveness is a DEADLINE now, not a reception count,
+             * so nothing is accumulated here: arriving frames no longer spend a
+             * budget, and only rf_crypt_rx() verifying one refreshes the stamp
+             * (see RF_CRYPT_SILENCE_MS). That also takes an increment off the
+             * radio IRQ path. */
+#if RF_CRYPT_DIAG_PREV_SESSION
+            if (rf_crypt_bond_enc) {
+                /* Record the shape BEFORE any classification, so a frame the
+                 * classifier rejects still leaves evidence of what arrived. */
+                rf_crypt_conn_rx++;
+                if (len > rf_crypt_len_max) {
+                    rf_crypt_len_max = len;
+                    rf_crypt_len_max_tag = (len >= 2u) ? rxBuf[3] : 0u;
+                }
+            }
+#endif
+#endif
+
             /* A LEN-10 from the known peer showing up in CONNECTED means our
              * previous session ended on the keyboard's side (it is
              * re-broadcasting). The supervision/EV10 machinery handles the
@@ -2205,6 +3175,75 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * relay at rxBuf[3]=0xA1, LEN=6 event-0x20 TXes, LEN=1 polls)
              * doesn't get misclassified as a keyboard report. */
             {
+#if DONGLE_RF_CRYPT
+                uint8_t enc_handled = 0u;
+                uint8_t queue = 0u;      /* hand this frame to the task */
+                if (rf_crypt_bond_enc) {
+                    if (rf_crypt_encrypted_body_len(rxBuf[3], len)) {
+                        /* Encrypted HID frame: copy out and defer verify+decrypt
+                         * to the executor (rf_crypt_post_rx). Nothing is forwarded
+                         * until the CCM tag verifies. */
+#if RF_CRYPT_DIAG_PREV_SESSION
+                        rf_crypt_enc_shape++;
+#endif
+                        /* NO control-byte feedback here. The ack that
+                         * retires the keyboard's report (and an LED relay) is
+                         * given by the drain, and only for a frame whose tag
+                         * and counter verified: acking at admission let a
+                         * replayed or forged frame of the right shape retire
+                         * a report the dongle never accepted. A frame the
+                         * FIFO refuses is not acked either, so the keyboard
+                         * retransmits it. */
+                        queue = 1u;
+                        enc_handled = 1u;
+                    } else if (rf_proto_hid_report_tag_for_peer(rxBuf, len,
+                                                                rf_peer_mac)) {
+                        /* Plaintext HID length on an ACTIVE encrypted bond: a
+                         * downgrade/forgery attempt. Drop it -- never forward,
+                         * never confirm. (Polls and other frames fall through so
+                         * poll-ack confirm + supervision are unchanged.) */
+                        rf_crypt_plain_drop++;
+                        enc_handled = 1u;
+#if DONGLE_KEX
+                        /* ...unless a re-pair was offered: then it is taken
+                         * as the keyboard having no key. Still dropped, still
+                         * unacknowledged (the keyboard sends it again); the
+                         * task drops the stored key (rf_repair_void).
+                         *
+                         * It also confirms the tentative pairing, as a bare
+                         * reply or a plaintext HID frame does on a keyless
+                         * bond (N11, below): a keyboard with a report already
+                         * queued answers its first poll with that report and
+                         * never sends the bare reply, so without this the
+                         * pairing is never persisted and the repair, which
+                         * waits for that, never runs. */
+                        if (rf_repair_pending) {
+                            rf_repair_void_req = 1u;
+#if RF_CONFIRM_BEFORE_PERSIST
+                            if (rf_confirm_state == RF_CONFIRM_STATE_WAIT_RX) {
+                                rf_confirm_state = RF_CONFIRM_STATE_WAIT_REARM;
+                            }
+#endif
+                        }
+#endif
+                    }
+                }
+#if DONGLE_KEX
+                /* A link-key exchange frame from the keyboard: queue it for
+                 * the task, like an encrypted frame. It is no HID report, so
+                 * the classifier below ignores it; it still refreshes
+                 * supervision as any connected reception does. */
+                else if (rf_kex_active && len == KEX_FRAME_LEN && rxBuf[3] == KEX_TAG_UP) {
+                    queue = 1u;
+                }
+#endif
+                /* One queueing site for both kinds of frame. */
+                if (queue && rf_crypt_fifo_push(&rxBuf[2], len)) {
+                    rf_crypt_post_rx();
+                }
+                if (!enc_handled)
+#endif
+                {
                 uint8_t hid_tag =
                     rf_proto_hid_report_tag_for_peer(rxBuf, len, rf_peer_mac);
 #if DONGLE_BENCH_DROP_FIRST_HID
@@ -2230,22 +3269,21 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * above swallowed, or one the classifier rejects, must not be
                  * acked. */
                 if (len == 1u || hid_tag != 0u) {
-                    rf_poll_buf[0] = rf_proto_ctrl_update(rf_poll_buf[0], rxBuf[2]);
-                    /* LED relay delivery (see rf_led_relay_phase): an answer
-                     * to the relay poll retires it, one to the gap after an
-                     * unanswered relay poll spends a try. */
-                    {
-                        uint8_t phase = rf_led_relay_phase;
-                        if (phase == RF_LED_RELAY_ON_AIR) {
-                            rf_led_relay_phase = RF_LED_RELAY_IDLE;
-                            if (rf_app_tx_buf[1] == rf_led_relay_carried) {
-                                rf_app_tx_pending = 0u;
-                            }
-                        } else if (phase == RF_LED_RELAY_GAP_ON_AIR) {
-                            rf_led_relay_phase = RF_LED_RELAY_IDLE;
-                            rf_led_relay_misses++;
-                        }
-                    }
+#if DONGLE_RF_CRYPT
+                    /* On an encryption-required bond the control bit is the
+                     * acknowledgement of a VERIFIED frame and nothing else
+                     * (the drain advances it). A bare reply here still counts
+                     * for supervision, confirmation and the LED relay, but it
+                     * must not advance the bit: the keyboard sends a bare
+                     * reply whenever no seal is ready, and letting that move
+                     * the bit made the next poll look like an ack for a
+                     * report that was lost or never verified. Only LEN-1 and
+                     * non-HID frames reach this branch on such a bond. */
+                    if (rf_crypt_bond_enc) {
+                        rf_connected_relay_answer();
+                    } else
+#endif
+                    rf_connected_admit_feedback(rxBuf[2]);
                 }
 #if DONGLE_DELIVERY_COUNTERS
                 if (hid_tag) {   /* pre-forward RF reception of a peer HID report */
@@ -2276,6 +3314,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rf_confirm_state = RF_CONFIRM_STATE_WAIT_REARM;
                 }
 #endif
+                }
             }
 
             /* Reset supervision timer on every valid connected packet. Default
@@ -2289,7 +3328,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * N11 shape) disabled the phase-lock -> deaf fresh pairs. Only
              * LIVENESS is un-gated: a non-confirming frame (LEN-3/6/other) may
              * refresh supervision but CANNOT extend the confirm deadline or cause
-             * a persist (that stays gated on WAIT_REARM). Codex-reviewed safe. */
+             * a persist (that stays gated on WAIT_REARM). Reviewed safe. */
             rf_refresh_connected_supervision();
 #else
             rf_refresh_connected_supervision();
@@ -2491,7 +3530,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * but bonded reconnect (keyboard anchors on the FIRST
                  * session-AA 15-byte, i.e. earlier) does not: it produces a
                  * fixed hop-phase offset -> deaf connected poll -> rx=0
-                 * (bench + codex 2026-07-07). CH570 keeps the burst#1 anchor. */
+                 * (bench + review 2026-07-07). CH570 keeps the burst#1 anchor. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
                 rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);   /* the poll grid starts here: edge anchor */
 #endif
@@ -2513,6 +3552,21 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
                 rf_start_rx();
                 rf_state = RF_STATE_CONNECTED;
+#if DONGLE_RF_CRYPT
+                /* On an encrypted bond, mint a fresh per-session nonce (in task
+                 * context via rf_crypt_post_session) and start announcing it. */
+                if (rf_crypt_bond_enc) {
+                    /* Arm the silence deadline HERE, not just in the mint
+                     * handler. The mint is an event: rf_send_poll runs every
+                     * 875 us and would otherwise evaluate the guard against the
+                     * PREVIOUS session's stamp -- seconds old after a reacquire
+                     * -- and force-release on the first poll of every
+                     * reconnect. The old reception counter hid this window
+                     * because it needed 64 arrivals to trip. */
+                    rf_crypt_arm_silence();
+                    rf_crypt_post_session();
+                }
+#endif
                 /* OQ7 Track 2f (2026-05-17): per stock event 0x40 disasm
                  * at runtime 0x20001174, TMR0 phase is anchored to the
                  * 15-byte pair-completion TX itself, NOT to a later
@@ -2570,7 +3624,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rfd_confirm_armed++;
                     hal_event_post_delayed(RF_EVT_CONFIRM_TIMEOUT,
                         RF_CONFIRM_TIMEOUT_TMOS * HAL_TMOS_UNIT_TICKS);
-                    /* N11 fix (bench-proven 2026-07-13, Codex-reviewed): a fresh
+                    /* N11 fix (bench-proven 2026-07-13, reviewed): a fresh
                      * promote MUST arm normal supervision so the EV10-rekey
                      * reacquire runs and LOCKS the connected-poll RX phase.
                      * Skipping it (the original N11 shape) left the fresh pair
@@ -2643,6 +3697,15 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
 #endif
             rf_start_rx();
             rf_state = RF_STATE_CONNECTED;
+#if DONGLE_RF_CRYPT
+            /* EV10 re-key: same peer/key, fresh per-session nonce. */
+            if (rf_crypt_bond_enc) {
+                /* Same reason as the fresh-pair promote: arm the deadline at
+                 * the state change, not when the mint event is dispatched. */
+                rf_crypt_arm_silence();
+                rf_crypt_post_session();
+            }
+#endif
 #if !RF_TASK_EXECUTOR_TMOS
 #endif
             rf_last_conn_rx_tsys = hal_now();
@@ -2720,7 +3783,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * re-arms a fresh burst. */
             rf_abort_pair_burst();
 #if RF_TASK_EXECUTOR_TMOS
-            /* Codex full-batch review (merge blocker): a burst-active TX_FAIL
+            /* Full-batch review (merge blocker): a burst-active TX_FAIL
              * (rf_inject_burst_active is set from the FIRST pair-AA TX through the
              * session-AA chain, so this covers a failure of EITHER) leaves the
              * keyboard possibly still on the pair AA — either it never got a
@@ -2777,7 +3840,42 @@ static void rf_arm_post_poll_rx(void)
     }
 }
 
+#if DONGLE_RF_CRYPT
+static uint16_t rf_process_event_body(uint8_t task_id, uint16_t events);
+
+/* Latched crypto work outstanding (and still wanted). */
+static inline uint8_t rf_crypt_work_pending(void)
+{
+#if DONGLE_KEX
+    return (uint8_t)(!rf_quiesced
+                     && (rf_crypt_work_rx | rf_crypt_work_session | rf_crypt_work_kex));
+#else
+    return (uint8_t)(!rf_quiesced && (rf_crypt_work_rx | rf_crypt_work_session));
+#endif
+}
+
+/* The executor entry. The body's own "keep RF_EVT_WAKE in the return value"
+ * is not enough on TMOS: tmos_msg_receive(), which the body must call for
+ * that bit, cancels the bit behind the handler's back when the queue is empty
+ * (it stops the task's 0x8000 timer, which masks the bit out of the returned
+ * word -- found in the bundled library's disassembly on review). So the wake
+ * is re-posted here, after the body and therefore after that cancel, whenever
+ * a latch is still set. One body pass takes at most one latch, so this also
+ * chains the second. */
 static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
+{
+    uint16_t left = rf_process_event_body(task_id, events);
+
+    if (rf_crypt_work_pending()) {
+        hal_event_post(RF_EVT_WAKE);
+    }
+    return left;
+}
+
+static uint16_t rf_process_event_body(uint8_t task_id, uint16_t events)
+#else
+static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
+#endif
 {
 #ifdef RF_PROCESS_EVENT_HOOK
     /* CH592 PM_IDLE: the "app task ran this iteration" latch, so leftover bits
@@ -2791,7 +3889,12 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         if ((pMsg = tmos_msg_receive(task_id)) != NULL) {
             tmos_msg_deallocate(pMsg);
         }
+#if !DONGLE_RF_CRYPT
         return events ^ SYS_EVENT_MSG;
+#endif
+        /* With link encryption this bit is also RF_EVT_WAKE (rf_task.h): it
+         * is NOT consumed here. It rides in `events` through every return
+         * below until the crypto latches are found clear. */
     }
 #else
     (void)task_id;   /* the pump passes 0; no TMOS message queue exists */
@@ -2815,7 +3918,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
      * bond write still reaches DataFlash before the radio dies (the update
      * flow promises the bond survives).
      *
-     * ORDER MATTERS (codex checkpoint-2 finding): the latch is set FIRST.
+     * ORDER MATTERS (checkpoint-2 finding): the latch is set FIRST.
      * These handlers run with IRQs on (hal_dispatch.h pump contract), so an
      * RF callback preempting between a shutdown and a later latch-write
      * could observe rf_quiesced == 0 and re-arm the shut radio. With the
@@ -2842,6 +3945,16 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         for (bit = RF_EVT_START; bit <= RF_EVT_PERSIST_BOND; bit <<= 1) {
             hal_event_cancel(bit);
         }
+#if DONGLE_RF_CRYPT
+        /* The crypto events sit above RF_EVT_PERSIST_BOND, outside the sweep. */
+        rf_crypt_work_rx = 0u;
+        rf_crypt_work_session = 0u;
+#if DONGLE_KEX
+        rf_crypt_work_kex = 0u;
+#endif
+        rf_crypt_announce_count = 0u;
+        rf_crypt_fifo_head = rf_crypt_fifo_tail;
+#endif
         hal_rf_shut();
         return 0;
     }
@@ -2930,7 +4043,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * the AA flip is clean (no deaf mid-flip gap). The initial ~300 ms
              * session-AA camp (before this first tick) already gives a bonded,
              * active keyboard reconnect priority: it re-broadcasts ~19 ms after
-             * link loss (conn_timeout/20), well inside that camp (Codex A-priority
+             * link loss (conn_timeout/20), well inside that camp (A-priority
              * analysis). This camp NARROWS but does not close B1 (a keyboard slow
              * to reconnect -- sleep/key-wake -- during a bond-replacing re-pair):
              * B1 is a documented OWNER-ACCEPTED WONTFIX (see the classifier note
@@ -2962,14 +4075,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          *     yet succeeded by the deadline): the pair IS accepted, so PROCEED --
          *     arm the durable write and hand off to normal supervision, which (unlike
          *     a fresh-pair teardown) owns the connected keys-up/reacquire path. This
-         *     both gives WAIT_REARM a deadline (Codex B3) and avoids stranding a
-         *     forwarded key-down without a keys-up (Codex fix re-review).
+         *     both gives WAIT_REARM a deadline (B3) and avoids stranding a
+         *     forwarded key-down without a keys-up (fix re-review).
          *   - NONE: the RX_RESTART handler already claimed and posted the persist. */
         uint32_t irq = __risc_v_disable_irq();
         uint8_t st = rf_confirm_state;
         rf_confirm_state = RF_CONFIRM_STATE_NONE;
         if (st == RF_CONFIRM_STATE_WAIT_RX) {
-            /* Codex fix re-review: atomically leave CONNECTED here, INSIDE the IRQ
+            /* Fix re-review: atomically leave CONNECTED here, INSIDE the IRQ
              * mask, before the teardown. Otherwise a HID packet arriving between the
              * claim and rf_return_to_fresh_pair's later rf_state write would still
              * see CONNECTED, be forwarded as a key-down, and then be torn down with
@@ -2977,7 +4090,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * mask holds, the sink's connected branch can't run after the claim, so
              * no key is forwarded on this teardown -> no keys-up is owed. */
             rf_state = RF_STATE_PAIRING;
-            /* Codex full-batch review: clear the EV10-active flag in the SAME
+            /* Full-batch review: clear the EV10-active flag in the SAME
              * masked claim as the rf_state flip. Otherwise a pending EV10
              * TX_FINISH between here and rf_return_to_fresh_pair's later clear
              * (~line 1640) still satisfies the EV10 promote predicate and
@@ -2987,13 +4100,27 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         (void)__risc_v_enable_irq(irq);
         if (st == RF_CONFIRM_STATE_WAIT_RX) {
+#if DONGLE_RF_CRYPT
+            /* "No key is forwarded on this teardown" holds for plaintext only:
+             * a plaintext HID frame moves the latch off WAIT_RX in the sink
+             * before it is forwarded. An encrypted frame is forwarded later,
+             * by the drain, and does not touch the latch -- so a same-peer
+             * re-pair on a keyed bond whose bare replies were all lost can
+             * reach here having delivered a key-down. Drop what is queued and
+             * release, now that CONNECTED is already left. */
+            rf_crypt_rx_flush();
+            rf_crypt_kbd_last_reset();
+            if (rf_crypt_bond_enc) {
+                rf_release_keys();
+            }
+#endif
             rfd_confirm_to_waitrx++;
             rf_bond_persisted = 0;   /* the tentative bond was never persisted */
             rf_return_to_fresh_pair();
         } else if (st == RF_CONFIRM_STATE_WAIT_REARM) {
             rfd_confirm_to_waitrearm++;
             rf_arm_bond_persist();            /* confirmed -> make it durable */
-            /* Codex fix re-review: only (re)arm the first-supervision timer if we
+            /* Fix re-review: only (re)arm the first-supervision timer if we
              * are still the CONNECTED owner of the radio. If a persistent post-
              * confirm RX-arm failure dropped us into EV10 reacquire (rf_state ==
              * PAIRING, rf_supervision_ev10_active) before this deadline fired,
@@ -3010,7 +4137,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if (events & RF_EVT_RX_RESTART) {
 #if RF_TASK_EXECUTOR_TMOS
-        /* Codex full-batch review (merge blocker): a burst-active async TX_FAIL
+        /* Full-batch review (merge blocker): a burst-active async TX_FAIL
          * asked (from the radio callback) for the dual-AA fresh-pair relisten
          * instead of a session-AA-only re-arm. Do it here in task context —
          * rf_return_to_fresh_pair re-camps the boot window alternating pair/
@@ -3040,7 +4167,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * rf_start_rx() directly -- connected poll via RF_EVT_POST_POLL_RX, EV10
          * and burst via explicit rf_start_rx. Removed.) */
 #if RF_CONFIRM_BEFORE_PERSIST
-        /* CODEREVIEW N11 (Codex impl-review): snapshot the confirm state at handler
+        /* CODEREVIEW N11 (impl-review): snapshot the confirm state at handler
          * ENTRY, BEFORE rf_rearm_rx. Persist only if we were ALREADY WAIT_REARM
          * here — that proves the rf_rearm_rx() below happens AFTER the confirm was
          * observed. Otherwise a confirm landing DURING rf_rearm_rx (entry was
@@ -3059,7 +4186,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         /* A restart that lands in a terminal camp without the liveness tick
          * (the bond-clear tombstone paths reach their camp this way, with no
          * timer left) starts it here, so no camp depends on its entry site
-         * remembering to (codex). One compare on the connected path. */
+         * remembering to. One compare on the connected path. */
         if (rf_state == RF_STATE_PAIRING && !rf_camp_wd_active && rf_camp_is_terminal()) {
             rf_camp_watchdog_arm();
         }
@@ -3090,7 +4217,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * used for empty-poll TX, sized here for the stock length-10
          * RX arm. */
 #if RF_CONFIRM_BEFORE_PERSIST
-        /* CODEREVIEW N11 (Codex impl-review; widened to CH570 per review): stale-
+        /* CODEREVIEW N11 (impl-review; widened to CH570 per review): stale-
          * event guard. A POST_POLL_RX co-dispatched with a confirm timeout that
          * fell back to PAIRING (via rf_return_to_fresh_pair, which camps a fresh
          * RX) must NOT re-prime the connected post-poll RX over that camp. Now
@@ -3101,8 +4228,184 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
 #endif
         rf_arm_post_poll_rx();
+#if DONGLE_KEX
+        /* The exchange's arithmetic runs HERE: after the receiver is armed
+         * for the keyboard's reply, in the few hundred microseconds spent
+         * waiting for it. The reply itself is taken by the radio IRQ, which
+         * preempts the arithmetic; rf_kex_service stops when it sees one, and
+         * in any case before the next poll is due. Two placements that did
+         * not work (bench 2026-11-14): straight after the poll transmit,
+         * which delayed THIS arm past the reply and lost it; and after the
+         * reply, where there is almost no time left in the slot. */
+        if (rf_kex_active && rf_state == RF_STATE_CONNECTED) {
+            rf_kex_post_work();
+        }
+#endif
         return events ^ RF_EVT_POST_POLL_RX;
     }
+
+#if DONGLE_RF_CRYPT
+    if (rf_crypt_work_session) {
+        rf_crypt_work_session = 0u;   /* clear BEFORE the work: a post that
+                                       * lands during it runs another pass */
+        /* Task context: mint a fresh 32-bit session nonce, reset the replay
+         * window and the silence guard, drop any stale queued frames, and
+         * pre-build the authenticated session-nonce frame so the next few polls
+         * announce it. On a build fault leave announce_count at 0 so no stale
+         * frame is ever transmitted. */
+        if (rf_crypt_bond_enc) {
+            rf_crypt_announce_count = 0u;
+            /* Discard stale frames. A frame the IRQ sink pushes concurrently with
+             * this reset can survive it, but it predates the just-minted session,
+             * so rf_crypt_rx computes the tag under the new session_id and drops it
+             * on the MAC check -- the reset is an optimization, the tag is the
+             * guarantee. (No new-session frame exists yet: the keyboard only learns
+             * session_id from the announce that follows.) */
+#if RF_CRYPT_DIAG_PREV_SESSION
+            {
+                /* Count what the flush destroys. Frames queued but never
+                 * verified are indistinguishable from frames never sent in
+                 * every other counter, and this path runs on EVERY mint. */
+                uint8_t fh = rf_crypt_fifo_head, ft = rf_crypt_fifo_tail;
+                rf_crypt_flush_drop +=
+                    (uint32_t)((ft + RF_CRYPT_FIFO_N - fh) % RF_CRYPT_FIFO_N);
+            }
+#endif
+            rf_crypt_fifo_head = rf_crypt_fifo_tail;
+            /* A fresh session is a fresh reference point: the keyboard cannot
+             * authenticate anything until it adopts this announce, so start the
+             * deadline here rather than penalising it for the handover. */
+            rf_crypt_silence_set_deadline();
+            rf_crypt_arm_silence();
+            rf_crypt_new_session(rf_crypt_gen_session_id());
+            if (rf_crypt_build_session_frame(rf_poll_buf[0], rf_crypt_session_tx)
+                    == RF_CRYPT_OK) {
+                rf_crypt_announce_count = RF_CRYPT_ANNOUNCE_POLLS;
+#if RF_CRYPT_AES_DOUBLE
+                rf_crypt_announce_retry_budget = RF_CRYPT_ANNOUNCE_RETRIES;
+            } else if (rf_crypt_announce_retry_budget != 0u) {
+                /* Engine fault inside the 3-block seal (stale-abort exhaustion
+                 * or a wedge). Nothing was announced, so re-minting is free --
+                 * and going quiet instead means a guaranteed dead epoch: the
+                 * announce is sent 8 times and never again until the next
+                 * connect/EV10. Bounded so a genuinely dead engine converges
+                 * to the old silent behavior, which the RX path's fail-closed
+                 * handling and the boot KAT telemetry already cover. */
+                rf_crypt_announce_retry_budget--;
+                rf_crypt_announce_retry++;
+                rf_crypt_post_session();
+#endif
+            }
+        }
+        return events;
+    }
+
+    if (rf_crypt_work_rx) {
+        rf_crypt_work_rx = 0u;   /* clear BEFORE the drain, as above */
+        /* Task context: drain the frame FIFO the IRQ sink filled, verifying and
+         * decrypting each. Nothing reaches USB without a verified CCM tag. */
+        while (rf_crypt_fifo_head != rf_crypt_fifo_tail) {
+            uint8_t h = rf_crypt_fifo_head;
+            uint8_t otag = 0u, obody[RF_CRYPT_MAX_BODY], on = 0u;
+            rf_crypt_status_t st;
+#if DONGLE_KEX
+            if (rf_crypt_fifo_len[h] == KEX_FRAME_LEN
+                && rf_crypt_fifo_buf[h][1] == KEX_TAG_UP) {
+                if ((rf_crypt_fifo_buf[h][2] >> 4) == 15u) {
+                    /* The keyboard's status frame (IAP 0x9A shows the last). */
+                    tmos_memcpy(rf_kex_peer_status, &rf_crypt_fifo_buf[h][3], 8);
+                    rf_kex_peer_status_n++;
+                } else if (rf_kex_active) {
+                    kex_rx(rf_kex, &rf_crypt_fifo_buf[h][2]);
+                }
+                rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
+                continue;
+            }
+#endif
+#if RF_CRYPT_DIAG_PREV_SESSION
+            /* Bench: mark the CCM window so the RF status callback can count
+             * BB/LLE interrupts that land mid-verify (they touch AES_STA). */
+            rf_crypt_in_aes = 1u;
+#endif
+            st = rf_crypt_rx(rf_crypt_fifo_buf[h],
+                             rf_crypt_fifo_len[h],
+                             &otag, obody, &on);
+#if RF_CRYPT_DIAG_PREV_SESSION
+            rf_crypt_in_aes = 0u;
+#endif
+            /* The slot's ctrl byte, read before the slot is released to the sink. */
+            uint8_t rx_ctrl = rf_crypt_fifo_buf[h][0];
+            rf_crypt_fifo_head = (uint8_t)((h + 1u) % RF_CRYPT_FIFO_N);
+
+            if (rf_state != RF_STATE_CONNECTED) {
+                /* The link ended between admission and this drain (the release
+                 * already sent all-keys-up). Forwarding now would put a key-down
+                 * AFTER that release with no keyboard left to lift it. */
+                rf_crypt_rx_flush();
+                break;
+            }
+            if (st == RF_CRYPT_OK) {
+                /* Authenticated and fresh: now, and only now, ack it. Masked
+                 * because the sink (and on CH570 the poll timer ISR) read and
+                 * write the same poll byte and relay phase. */
+                uint32_t fb_irq = __risc_v_disable_irq();
+                if (rf_state == RF_STATE_CONNECTED) {
+                    rf_connected_admit_feedback(rx_ctrl);
+#if RF_CONFIRM_BEFORE_PERSIST
+                    /* An authenticated frame from the peer confirms the
+                     * tentative fresh-pair session at least as well as a bare
+                     * reply does. Latch only, as the sink does; the persist is
+                     * armed by the next RX re-arm, which every reception posts. */
+                    if (rf_confirm_state == RF_CONFIRM_STATE_WAIT_RX) {
+                        rf_confirm_state = RF_CONFIRM_STATE_WAIT_REARM;
+                    }
+#endif
+                }
+#if DONGLE_KEX
+                /* The keyboard has the stored key: no re-pair to complete.
+                 * Under the mask, so a plaintext frame in the sink cannot set
+                 * the request between the two stores. */
+                rf_repair_pending = 0u;
+                rf_repair_void_req = 0u;
+#endif
+                (void)__risc_v_enable_irq(fb_irq);
+                rf_crypt_ok_count++;
+                rf_crypt_last_auth_tsys = hal_now();  /* authenticated liveness */
+                rf_crypt_announce_count = 0u;    /* keyboard has the session nonce */
+                if (rf_hid_callback && !rf_crypt_kbd_repeat(otag, obody, on)) {
+                    rf_hid_callback(otag, obody, on);
+                }
+            } else {
+#if RF_CRYPT_DIAG_PREV_SESSION
+                rf_crypt_drops++;
+#endif
+                if ((unsigned)st < 6u) {
+                    rf_crypt_drop_reason[(unsigned)st]++;
+                }
+                if (st == RF_CRYPT_FAULT_ENGINE) {
+                    /* hal_aes.h: an engine wedge is a fatal fault of the radio
+                     * path. NEVER revert to the plaintext dispatch (that would let
+                     * a forgery through) -- keep the bond encryption-required so
+                     * every frame stays fail-closed, release the keyboard so a
+                     * held key cannot stick, and let a reconnect re-mint and retry
+                     * (the key stays installed; polls stay clear). */
+                    rf_send_keys_up_on_link_loss();
+                }
+            }
+        }
+        return events;
+    }
+#if DONGLE_KEX
+    if (rf_crypt_work_kex) {
+        rf_crypt_work_kex = 0u;
+        rf_kex_service();
+        return events;
+    }
+#endif
+    /* Every latch clear: the wake is spent. A post that lands after this
+     * line sets the bit again in the executor's own pending word. */
+    events &= (uint16_t)~RF_EVT_WAKE;
+#endif /* DONGLE_RF_CRYPT */
 
     if (events & RF_EVT_PAIR_PREP) {
         rf_send_pair_prep();
@@ -3238,6 +4541,29 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_TIMEOUT) {
+#if DONGLE_RF_CRYPT
+        /* Authenticated-HID silence guard fired (rf_send_poll): an active
+         * encrypted bond saw a flood of unauthenticated frames, which keep
+         * supervision's RX stamp fresh so the normal lapse checks below would
+         * just re-arm and never release. FORCE the reacquire to tear the poisoned
+         * session down and emit keys-up. */
+        if (rf_crypt_force_release) {
+            rf_crypt_force_release = 0u;
+            /* Re-check the deadline here, not just in the ISR that posted it: a
+             * frame can finish verifying between the post and this dispatch,
+             * and tearing down a link that has just authenticated is exactly
+             * the false release this whole change exists to stop. An attacker
+             * cannot satisfy the re-check -- only a frame that authenticates
+             * moves the stamp. */
+            if (rf_state == RF_STATE_CONNECTED && !rf_supervision_ev10_active
+                && rf_crypt_silence_armed
+                && rf_crypt_silence_expired(hal_now(), rf_crypt_last_auth_tsys,
+                                            rf_crypt_silence_deadline_tsys)) {
+                rf_enter_stock_reacquire();
+                return events ^ RF_EVT_TIMEOUT;
+            }
+        }
+#endif
         if (rf_supervision_ev10_active) {
             rf_stock_reacquire_giveup();
             return events ^ RF_EVT_TIMEOUT;
@@ -3254,7 +4580,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 * HAL_TICKS_PER_PROTO_TICK;
             if (rf_stock_first_supervision_armed) {
                 rf_stock_first_supervision_armed = 0;
-                /* Snapshot the stamp BEFORE reading the clock (codex P3a
+                /* Snapshot the stamp BEFORE reading the clock (P3a
                  * #1): the radio IRQ-tail sink can preempt this task-context
                  * code and refresh the stamp between the two loads — with
                  * the clock read first that manufactures last > now and the
@@ -3321,6 +4647,9 @@ static void rf_start_rx(void)
      * persists across TX. Callers that change rf_access_addr rely on the
      * reconfigure here. */
     hal_rf_shut();
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    rf_rx_aa = rf_access_addr;      /* the old receive is down: see rf_rx_aa */
+#endif
     rf_configure(rf_access_addr);
     {
         uint8_t rx_status = hal_rf_start_rx(HAL_RF_CHANNEL_CURRENT, 0);
@@ -3551,6 +4880,44 @@ static void rf_send_poll(void)
         return;
     }
 
+#if DONGLE_RF_CRYPT
+    /* Authenticated-HID silence guard. rf_send_poll is the TMR ISR on CH570, so
+     * do only IRQ-safe work here: if an active encrypted bond has gone
+     * RF_CRYPT_SILENCE_MS with nothing verifying (a jammer keeping supervision
+     * alive with unauthenticated traffic), post RF_EVT_TIMEOUT -- the existing
+     * link-loss path releases the keyboard and re-enters reacquire in task
+     * context. Genuine silence (no frames) is already handled by supervision. */
+    /* Deliberately NOT gated on !rf_crypt_force_release. Suppressing the re-post
+     * while a release is in flight looks like an obvious optimisation and is a
+     * trap: RF_EVT_TIMEOUT shares its slot with EV10 and
+     * rf_arm_connected_supervision() cancels it, which on CH592 drains an
+     * already-posted event. Lose it once inside a connected epoch and the latch
+     * stays set with no arm site reachable to clear it -- unauthenticated
+     * traffic then holds the link open forever, the exact unbounded-stuck-key
+     * failure this guard exists to prevent. Re-posting every poll until the
+     * handler runs is idempotent (a set bit and a set byte) and self-limiting,
+     * because only a frame that authenticates moves the stamp. */
+    if (rf_crypt_bond_enc && rf_crypt_silence_armed) {
+        /* Load the stamp BEFORE the clock. The radio IRQ sink can preempt here
+         * and refresh the stamp between the two loads; clock-first would then
+         * manufacture stamp > now. rf_crypt_silence_expired() rejects that case
+         * outright, but loading in this order keeps it from arising at all --
+         * the same argument as the supervision lapse check in RF_ProcessEvent. */
+        uint32_t stamp = rf_crypt_last_auth_tsys;
+        uint32_t now = hal_now();
+        if (rf_crypt_silence_expired(now, stamp,
+                                     rf_crypt_silence_deadline_tsys)) {
+#if RF_CRYPT_DIAG_PREV_SESSION
+            uint32_t idle_ms = (now - stamp) / (1000u * HAL_TICKS_PER_US);
+            rf_crypt_guard_at_fire =
+                (idle_ms > 0xFFFFu) ? 0xFFFFu : (uint16_t)idle_ms;
+            rf_crypt_guard_fires++;
+#endif
+            rf_crypt_force_release = 1u; /* make the timeout handler force reacquire */
+            hal_event_post(RF_EVT_TIMEOUT);
+        }
+    }
+#endif
 
     {
         /* The shared connected hop model (rf_protocol.h: edge anchor,
@@ -3588,6 +4955,54 @@ static void rf_send_poll(void)
      * polls, and the tries are bounded by RF_LED_RELAY_MAX_MISSES. The radio
      * is shut above, so the sink has taken every answer to earlier polls. */
     uint8_t status;
+#if DONGLE_RF_CRYPT
+    if (rf_crypt_announce_count) {
+        /* Announce the fresh session nonce in this poll slot instead of a poll.
+         * The 14-byte frame is pre-built in task context (the session mint); an
+         * authenticated RX clears the count early. Sent on the session AA where
+         * the keyboard listens; the poll grid/cadence is otherwise untouched.
+         * Ahead of the LED relay on purpose: the announce is bounded (the mint
+         * arms a fixed count), the relay is not (a host that keeps changing
+         * the LED byte could hold every slot and starve the session until the
+         * authenticated-silence deadline ends the link). The relay's phase
+         * machine does not advance in an announce slot. */
+        rf_crypt_announce_count--;
+        /* An answer to this slot answers the announce, not a relay poll: end
+         * any relay exchange in progress so the answer can neither retire the
+         * relay nor spend one of its tries. rf_app_tx_pending is untouched, so
+         * the LED byte goes out again once the announces are done. */
+        rf_led_relay_phase = RF_LED_RELAY_IDLE;
+        status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
+                                 rf_crypt_session_tx, RF_CRYPT_LEN_SESSION);
+        (void)status;
+        return;
+    }
+#endif
+#if DONGLE_KEX && RF_TASK_EXECUTOR_TMOS
+    rf_kex_poll_tick();
+    if (rf_kex_active) {
+        /* static lifetime: the radio may read the payload after this returns. */
+        static uint8_t kxf[KEX_FRAME_LEN];
+
+        /* Every other slot stays an ordinary poll. A keyboard that does not
+         * implement the exchange ignores these frames without answering, and
+         * a link made only of them would lapse; half the slots keeps it up
+         * while the attempt times out. */
+        rf_kex_slot ^= 1u;
+        if (rf_kex_slot && kex_tx(rf_kex, &kxf[2])) {
+            /* An exchange frame takes this slot in place of the poll; the
+             * keyboard answers it as it answers a poll. Like an announce
+             * slot, it ends any LED relay exchange in progress. */
+            kxf[0] = rf_poll_buf[0];
+            kxf[1] = KEX_TAG_DOWN;
+            rf_led_relay_phase = RF_LED_RELAY_IDLE;
+            status = hal_rf_start_tx(HAL_RF_CHANNEL_CURRENT, rf_access_addr,
+                                     kxf, sizeof(kxf));
+            (void)status;
+            return;
+        }
+    }
+#endif
     uint8_t send_led = 0u;
     uint8_t phase    = rf_led_relay_phase;
     if (phase == RF_LED_RELAY_SENT || phase == RF_LED_RELAY_ON_AIR) {
@@ -3604,7 +5019,7 @@ static void rf_send_poll(void)
     }
     if (send_led) {
         /* static lifetime: RF_Tx() may read the payload after this function's
-         * stack frame returns (codex). rf_send_poll is never re-entered (TMOS
+         * stack frame returns. rf_send_poll is never re-entered (TMOS
          * task context on CH592, the poll timer's ISR on CH570), so a
          * function-static is safe and matches CH570's static
          * connected_app_payload[]. */
@@ -3627,6 +5042,24 @@ static void rf_send_poll(void)
      * Hz would flood UART1 at 115200 baud). */
     (void)status;
 }
+
+#if DONGLE_RF_CRYPT
+/* Foreground backstop for the crypto latches (call once per main-loop pass).
+ * A wake posted from the radio IRQ can be lost: this TMOS updates its event
+ * word with an unmasked load/OR/store, and its dispatcher has snapshot and
+ * merge windows of its own. The latch survives such a loss, so re-posting
+ * from the foreground until the work is taken makes the post loss-free, and
+ * because every post also sets the power-management latch the idle path
+ * cannot sleep past outstanding work. Returns nonzero while work is pending. */
+uint8_t RF_CryptWorkKick(void)
+{
+    if (!rf_crypt_work_pending()) {
+        return 0u;
+    }
+    hal_event_post(RF_EVT_WAKE);
+    return 1u;
+}
+#endif
 
 /* ---------- DataFlash bond persistence ---------- */
 
@@ -3669,6 +5102,27 @@ static uint16_t rf_aa_rng16(void)
     rf_aa_rng_state = x;
     return (uint16_t)x;
 }
+
+#if DONGLE_RF_CRYPT
+/* Fresh 32-bit per-session nonce for the CCM construction. Not secret and not a
+ * key -- it only needs to differ each connect so a captured transcript cannot be
+ * replayed after a reconnect/reboot. Two draws of the same xorshift RNG that
+ * seeds the session AA (chip UID ^ RTC ^ cold-boot SRAM entropy).
+ *
+ * RESIDUAL (documented, deferred with key establishment): 32 bits is a birthday
+ * space -- a collision (repeated session_id with reset counters -> reused CCM
+ * nonces) is ~1% after ~9,300 sessions under one long-lived key. This phase uses
+ * a static host-provisioned key, so it is a real but slow-onset limit; the future
+ * key-establishment handshake makes keys per-session and voids it. Widening the
+ * session_id would change the wire nonce layout (and ccm_ref/tests), so it is a
+ * deliberate follow-up, not a quiet change here. */
+static uint32_t rf_crypt_gen_session_id(void)
+{
+    uint32_t hi = rf_aa_rng16();
+    uint32_t lo = rf_aa_rng16();
+    return (hi << 16) | lo;
+}
+#endif /* DONGLE_RF_CRYPT */
 
 /* Generate a fresh BLE-valid session access address. Faithful port of the stock
  * dongle generator at firmware 0x8212: random 0x6A____E6 / 0xAC____CE with the
@@ -3733,7 +5187,12 @@ static void rf_load_persistent_bond(void)
         rf_pair_ack15[1] = (uint8_t)((rf_bond_aa >> 16) & 0xFF);
         rf_pair_ack15[2] = (uint8_t)((rf_bond_aa >>  8) & 0xFF);
         rf_pair_ack15[3] = (uint8_t)( rf_bond_aa        & 0xFF);
-        
+
+#if DONGLE_RF_CRYPT
+        rf_crypt_peer_capable = 0u;
+        rf_crypt_bond_enc = 0u;
+        rf_crypt_clear();
+#endif
         return;
     }
 
@@ -3809,7 +5268,41 @@ static void rf_load_persistent_bond(void)
         rf_pair_ack15[8] = (uint8_t)((rec.conn_timeout >> 8) & 0xFF);
     }
 
-    
+#if DONGLE_RF_CRYPT
+    /* Install the link key ONCE at boot (the expensive CH570 schedule runs here,
+     * off the poll grid). Encryption goes ACTIVE only for a negotiated+keyed bond;
+     * the per-session nonce is minted later, at connect. */
+    rf_crypt_peer_capable = (rec.flags & BOND_FLAG_ENC_CAPABLE) ? 1u : 0u;
+    if (bond_enc_active(&rec)) {
+        rf_crypt_install_key(rec.link_key);
+        rf_crypt_bond_enc = 1u;
+    } else {
+        rf_crypt_clear();
+        rf_crypt_bond_enc = 0u;
+    }
+#if DONGLE_CRYPT_BENCH_FORCE_KEY && !DONGLE_BENCH_PROFILE
+    /* The tripwire behind the profile split: the force key is a shared,
+     * in-the-source throwaway -- an image carrying it accepts forged
+     * keystrokes from anyone who has read the repo. Only the bench profile
+     * (PROFILE=bench, which defines DONGLE_BENCH_PROFILE=1) may compile it;
+     * any other route to this block is a build-system regression, and the
+     * release target's byte-scan backstops even that. */
+#error "DONGLE_CRYPT_BENCH_FORCE_KEY outside the bench profile -- this must never ship (build with PROFILE=bench)"
+#endif
+#if DONGLE_CRYPT_BENCH_FORCE_KEY
+    /* BENCH ONLY (this bench has no dongle USB, so provision_link_key.py
+     * cannot reach the bond record): force link decryption ACTIVE for any
+     * valid loaded bond, with the compiled-in throwaway key. RAM state only;
+     * the DataFlash record is untouched. A fresh pair activates on the next
+     * boot, when this load path runs again. The keyboard gets the same key
+     * over its 0xAE bench command. Must never ship enabled. */
+    if (!rf_crypt_bond_enc) {
+        static const uint8_t bench_key[16] = DONGLE_CRYPT_BENCH_KEY_BYTES;
+        rf_crypt_install_key(bench_key);
+        rf_crypt_bond_enc = 1u;
+    }
+#endif
+#endif
 }
 
 /* On a completed pair (burst-promote -> CONNECTED), persist the learned keyboard
@@ -3863,6 +5356,14 @@ static void rf_commit_bond_ram(void)
         return;
     }
     tmos_memset(&rf_bond_pending_rec, 0, sizeof(rf_bond_pending_rec));
+#if DONGLE_RF_CRYPT
+    /* Persist the negotiated capability so a later host key-provision activates
+     * encryption. A fresh pair never carries a key (establishment is deferred),
+     * so link_key stays zero and encryption stays off until provisioned. */
+    if (rf_crypt_peer_capable) {
+        rf_bond_pending_rec.flags |= BOND_FLAG_ENC_CAPABLE;
+    }
+#endif
     rf_bond_pending_rec.session_aa    = rf_bond_aa;
     rf_bond_pending_rec.conn_interval = rf_conn_interval;
     rf_bond_pending_rec.conn_timeout  = rf_protocol_pair_ack_timeout(rf_pair_ack15);
@@ -3915,21 +5416,72 @@ static void rf_persist_bond_task(void)
 
     /* Copy the IRQ-published snapshot under a brief IRQ-masked critical section
      * so a concurrent rf_request_bond_persist() (radio IRQ) cannot tear the
-     * 32-byte record mid-read; clear the pending flag atomically with the copy.
+     * bond record mid-read; clear the pending flag atomically with the copy.
      * (Brief, post-pair, well clear of boot -- no USB-enum interaction.) */
     bond_record_t want __attribute__((aligned(4)));
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    uint8_t key_void;
+#endif
     uint32_t irq = __risc_v_disable_irq();
     tmos_memcpy(&want, &rf_bond_pending_rec, sizeof(want));
     rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    key_void = rf_bond_key_void;
+#endif
     (void)__risc_v_enable_irq(irq);
 
     bond_record_t cur __attribute__((aligned(4)));
-    if (bond_load(&cur) && bond_tuple_equal(&cur, &want)) {
-        /* stored record already matches the full tuple (incl. the N09
-         * dongle identity); no write */
-        rf_bond_persisted = 1;
-        rfd_persist_last_reason = RFD_PERSIST_ALREADY;
-        return;
+    if (bond_load(&cur)) {
+        /* A same-peer fresh pair rebuilds the candidate from RAM, which cannot
+         * carry link_key (rf_commit_bond_ram runs in the radio-IRQ sink and the
+         * AES engine has no key readback), so without this the keyless
+         * candidate would be written over a provisioned key -- and precisely
+         * because bond_tuple_equal() compares link_key, the skip below would
+         * NOT have caught it. Task context, on the IRQ-snapshot-isolated local:
+         * the only place both records are in scope.
+         *
+         * Not after rf_repair_void: the stored key has been dropped, and
+         * the keyless candidate is what must be written. */
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        if (!key_void)
+#endif
+        {
+            bond_carry_link_key(&cur, &want);
+        }
+        if (want.flags & BOND_FLAG_ENC_KEY) {
+            /* Keep the published RAM snapshot consistent with what is (or
+             * already was) in flash: without this rf_bond_persisted would latch
+             * while rf_bond_pending_rec still held the keyless candidate,
+             * falsifying that flag's documented meaning -- harmless today
+             * because nothing else consumes the pending record, but a trap for
+             * the rekey/KX work that will.
+             *
+             * bond_load() above ran with interrupts ENABLED, so the radio IRQ
+             * may have published a newer candidate for a DIFFERENT peer in the
+             * meantime. Re-check the peer under the mask before stamping, or
+             * this write-back would copy the old peer's key onto the new peer's
+             * record -- the exact inversion of what the carry is for
+             * (CodeRabbit review). A mismatch means our `want` is already stale;
+             * leave the newer candidate alone and let its own persist run. */
+            uint32_t irq2 = __risc_v_disable_irq();
+            if (bond_peer_mac_equal(&rf_bond_pending_rec, &want)) {
+                tmos_memcpy(rf_bond_pending_rec.link_key, want.link_key, 16);
+                rf_bond_pending_rec.flags = want.flags;
+            }
+            (void)__risc_v_enable_irq(irq2);
+        }
+        if (bond_tuple_equal(&cur, &want)) {
+            /* stored record already matches the full tuple (incl. the N09
+             * dongle identity); no write */
+            rf_bond_persisted = 1;
+            rfd_persist_last_reason = RFD_PERSIST_ALREADY;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+            if (key_void) {
+                rf_bond_key_void = 0u;  /* flash already holds the keyless record */
+            }
+#endif
+            return;
+        }
     }
 
     /* N08 defense-in-depth: never durably persist a tuple the next boot's
@@ -3949,7 +5501,7 @@ static void rf_persist_bond_task(void)
      * shut radio and cancelled timers were never restored (TODO defect,
      * latent: the producer cannot build a record the check rejects today). */
 #if !RF_TASK_EXECUTOR_TMOS
-    /* CX4 (codex, hardware-forced CH570 delta), root-cause-revised 2026-07-07.
+    /* CX4 (hardware-forced CH570 delta), root-cause-revised 2026-07-07.
      * This runs ONCE per session — the first promote of a fresh pair, before
      * the bond is persisted. The ONLY safe shape when we are already CONNECTED
      * is the CH592's: write the bond WITHOUT disturbing the radio and stay
@@ -3983,7 +5535,7 @@ static void rf_persist_bond_task(void)
         rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
         rf_start_rx();
         rf_arm_retry_if_failed();   /* P4: this recamp arms no timer */
-        rf_camp_watchdog_arm();     /* a terminal camp too (codex: it was the one without the tick) */
+        rf_camp_watchdog_arm();     /* a terminal camp too (it was the one without the tick) */
     }
 #endif
     if (save_rc != 0) {
@@ -3996,6 +5548,11 @@ static void rf_persist_bond_task(void)
         rf_bond_persisted = 1;
         rfd_persist_ok++;
         rfd_persist_last_reason = RFD_PERSIST_OK;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        if (key_void) {
+            rf_bond_key_void = 0u;      /* the keyless record is on flash */
+        }
+#endif
     } else {
         rfd_persist_last_reason = RFD_PERSIST_READBACK;
     }
@@ -4024,7 +5581,7 @@ void RF_TaskInit(void)
     tmos_memset(rf_peer_mac, 0, sizeof(rf_peer_mac));
     rf_state = RF_STATE_IDLE;
     rf_hid_callback = NULL;
-    /* Pre-register the fixed TMR0-pair work callbacks (codex ii-d): events can
+    /* Pre-register the fixed TMR0-pair work callbacks (ii-d): events can
      * reach dispatch without a prior hal_timer_arm on their slot and must
      * never find a null cb. (The inherited-promote/pair-retry producers were
      * deleted at R1b ii; kept for the EV10 arms and defense in depth.) */
@@ -4054,6 +5611,12 @@ void RF_TaskInit(void)
         tmos_memcpy(rf_factory_mac, chip_uid, 6);
     }
 
+#if DONGLE_RF_CRYPT
+    /* Bring the AES backend up before the bond load can install a key. hal_rf_init
+     * has already run in main() (the CH592 engine needs BLE_IPCoreInit), so this
+     * is safe here. */
+    rf_crypt_init();
+#endif
     rf_load_persistent_bond();
     /* Runtime latch bits must not survive reset. */
     rf_supervision_ev10_active = 0;
@@ -4096,8 +5659,212 @@ void RF_TombstoneBond(void)
     rf_bond_valid = 0;
     rf_bond_persisted = 0;
     rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    rf_repair_pending = 0u;
+    rf_repair_void_req = 0u;
+    rf_bond_key_void = 0u;
+#endif
     (void)__risc_v_enable_irq(irq);
     hal_event_cancel(RF_EVT_PERSIST_BOND);
+#if DONGLE_RF_CRYPT
+    /* Zeroize the key schedule and drop the encrypted-path state (outside the
+     * IRQ-masked section: rf_crypt_clear runs the CH570 zero-key schedule).
+     * Deliberately DO NOT clear rf_crypt_bond_enc: BondClear can run while the
+     * encrypted link is still live (iap.c keeps it forwarding until it drops), so
+     * the "this bond is encryption-required" latch must stay set or the still-live
+     * connection would revert to the plaintext dispatch and accept forged HID.
+     * With the key gone every frame now fails closed (encrypted -> no key ->
+     * dropped; plaintext -> dropped), so the cleared link goes dead, not open. */
+    rf_crypt_peer_capable = 0u;
+    rf_crypt_announce_count = 0u;
+    rf_crypt_fifo_head = rf_crypt_fifo_tail;
+    /* Stay ARMED. bond_enc deliberately stays set here (see above) while the
+     * key is destroyed, so every frame now fails closed -- which means nothing
+     * can ever refresh the stamp again and the guard is what ends the link.
+     * Standing it down instead would let an attacker keep supervision fresh on
+     * a dead link indefinitely. */
+    rf_crypt_arm_silence();
+    rf_crypt_force_release = 0u;
+    rf_crypt_clear();
+#endif
+}
+
+/* Install a host-written, flash-verified bond record into the RUNNING task --
+ * the review's finding-2 P0: BondWrite used to persist and report success
+ * while the live crypto state kept running the OLD key/latches until a reset,
+ * so the freshly provisioned peer required encryption the dongle would not
+ * speak. This is the reboot's bond-load semantics applied in place.
+ *
+ * Contract: iap.c calls this AFTER bond_save + a bond_load/bond_tuple_equal
+ * readback, from the foreground main loop -- the same execution context as
+ * the RF executor (they cannot interleave; only the radio IRQ preempts, and
+ * it touches exactly the state the masked section below writes; same
+ * discipline as RF_TombstoneBond above).
+ *
+ * The tombstone is LIFTED here, deliberately: it exists so the stale in-RAM
+ * bond cannot resurrect a record the host erased. A verified host WRITE is
+ * the same authority explicitly provisioning anew, so blocking it would turn
+ * every clear-then-provision cycle into a clear-provision-reboot one.
+ *
+ * Radio: not connected -> RF_EVT_START re-runs the boot camp against the new
+ * record (identical to a power cycle's radio phase; a pairing attempt in
+ * flight is abandoned, as it would be by the reboot this replaces).
+ * CONNECTED -> the live link keeps its tuple; the new identity is the
+ * reconnect target after the link drops (again: exactly what reboot-now
+ * would do, minus dropping the link).
+ *
+ * Returns 0 = applied live; 1 = applied-deferred: a key REMOVAL landed while
+ * the encrypted link is live, and the tombstone fail-closed rule holds --
+ * rf_crypt_bond_enc must not drop mid-link (the plaintext dispatch would
+ * accept forged HID). The key is zeroized NOW, so the link goes dead, not
+ * open; rf_return_to_fresh_pair applies the plaintext downgrade when the
+ * link ends. */
+uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
+{
+    uint8_t deferred = 0u;
+    uint8_t enc_now = bond_enc_active(rec) ? 1u : 0u;
+    /* Sampled LATE and under the same IRQ mask that writes the crypto latches
+     * -- never here, with interrupts enabled. The radio IRQ promotes to
+     * RF_STATE_CONNECTED inside rf_phy_event_sink, so a promote landing between
+     * an early sample and the decision below leaves `connected` stale for the
+     * whole crypto half. On a key-removal record that is exactly the failure
+     * the deferred path exists to prevent: the else branch would clear
+     * rf_crypt_bond_enc on a now-live encrypted link, reverting it to the
+     * plaintext dispatch and accepting forged HID. The same stale sample also
+     * drives the re-camp tail, which would post RF_EVT_START over a live link. */
+    uint8_t connected = 0u;
+
+    /* Identity half, masked against the radio IRQ (it reads rf_bond_valid,
+     * the MACs and the LEN-15 template; multi-byte writes must be atomic
+     * against it). Mirrors rf_load_persistent_bond. */
+    {
+        uint32_t irq = __risc_v_disable_irq();
+        rf_bond_tombstone = 0;
+        rf_bond_aa = rec->session_aa;
+        rf_bond_valid = 1;
+        rf_bond_persisted = 1;        /* the record IS the verified flash content */
+        rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        /* A verified record's key is the bond's key: no re-pair is open. */
+        rf_repair_pending = 0u;
+        rf_repair_void_req = 0u;
+        rf_bond_key_void = 0u;
+#endif
+        rf_bond_default_aa = rec->session_aa;
+        if (rec->conn_interval) rf_conn_interval = rec->conn_interval;
+        if (rec->conn_timeout)  rf_conn_timeout  = rec->conn_timeout;
+        {
+            int have_dmac = 0, i;
+            for (i = 0; i < 6; i++) {
+                if (rec->dongle_mac[i]) have_dmac = 1;
+            }
+            if (have_dmac) {
+                tmos_memcpy(rf_bond_dongle_mac, rec->dongle_mac, 6);
+                rf_dongle_mac_overridden = 1;
+            } else {
+                /* A zero MAC in the record means chip identity: a record that
+                 * REPLACES an override must restore it (boot would). */
+                tmos_memcpy(rf_bond_dongle_mac, rf_factory_mac, 6);
+                rf_dongle_mac_overridden = 0;
+            }
+            tmos_memcpy(&rf_pair_ack15[9], rf_bond_dongle_mac, 6);
+        }
+        {
+            int have_peer = 0, i;
+            for (i = 0; i < 6; i++) {
+                if (rec->peer_mac[i]) have_peer = 1;
+            }
+            if (have_peer) tmos_memcpy(rf_peer_mac, rec->peer_mac, 6);
+        }
+        rf_pair_ack15[0] = (uint8_t)((rec->session_aa >> 24) & 0xFF);
+        rf_pair_ack15[1] = (uint8_t)((rec->session_aa >> 16) & 0xFF);
+        rf_pair_ack15[2] = (uint8_t)((rec->session_aa >>  8) & 0xFF);
+        rf_pair_ack15[3] = (uint8_t)( rec->session_aa        & 0xFF);
+        if (rec->conn_interval) {
+            rf_pair_ack15[5] = (uint8_t)( rec->conn_interval       & 0xFF);
+            rf_pair_ack15[6] = (uint8_t)((rec->conn_interval >> 8) & 0xFF);
+        }
+        if (rec->conn_timeout) {
+            rf_pair_ack15[7] = (uint8_t)( rec->conn_timeout       & 0xFF);
+            rf_pair_ack15[8] = (uint8_t)((rec->conn_timeout >> 8) & 0xFF);
+        }
+        (void)__risc_v_enable_irq(irq);
+    }
+    hal_event_cancel(RF_EVT_PERSIST_BOND);
+
+#if DONGLE_RF_CRYPT
+    rf_crypt_peer_capable = (rec->flags & BOND_FLAG_ENC_CAPABLE) ? 1u : 0u;
+    if (enc_now) {
+        /* The expensive CH570 key schedule runs here, foreground, off the
+         * poll grid -- same placement argument as the boot install. Only
+         * after the key is whole does the routing byte flip. */
+        rf_crypt_install_key(rec->link_key);
+        {
+            uint32_t irq = __risc_v_disable_irq();
+            /* After install_key, so a promote during that expensive call is
+             * still seen; inside the mask, so it cannot change before the
+             * latches below are written. */
+            connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+            rf_crypt_bond_enc = 1u;
+            rf_crypt_pending_plain = 0u;
+            rf_crypt_fifo_head = rf_crypt_fifo_tail;
+            rf_crypt_arm_silence();
+            rf_crypt_announce_count = 0u;
+            rf_crypt_force_release = 0u;
+            (void)__risc_v_enable_irq(irq);
+        }
+        if (connected) {
+            /* Fresh session under the new key: flush + mint + announce, the
+             * existing session-mint machinery. Without this the peer
+             * would keep sealing under a session the new key cannot verify. */
+            rf_crypt_post_session();
+        }
+    } else {
+        /* Key removal. The live-link test and the latch writes must be one
+         * indivisible step: deciding "not connected" and then clearing
+         * rf_crypt_bond_enc is what would open a live link to forged plaintext.
+         * rf_crypt_clear() stays OUTSIDE the mask -- it runs the CH570 zero-key
+         * schedule, the same reason RF_TombstoneBond keeps it out. */
+        uint32_t irq = __risc_v_disable_irq();
+        connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+        if (rf_crypt_bond_enc && connected) {
+            /* Live encrypted link: fail closed (see contract). Leave
+             * rf_crypt_bond_enc SET so the still-live connection cannot revert
+             * to the plaintext dispatch; the key goes away below, so every
+             * frame now fails closed and the link goes dead, not open. */
+            rf_crypt_pending_plain = 1u;
+            deferred = 1u;
+            /* Same argument as RF_TombstoneBond: bond_enc stays set with the
+             * key gone, so nothing can refresh the stamp and the guard is the
+             * only thing that ends this link. Re-arm from NOW so the deadline
+             * is measured from the downgrade, not from whenever the last frame
+             * happened to verify. */
+            rf_crypt_arm_silence();
+        } else {
+            rf_crypt_bond_enc = 0u;
+            rf_crypt_pending_plain = 0u;
+        }
+        (void)__risc_v_enable_irq(irq);
+        rf_crypt_clear();
+    }
+#else
+    {
+        /* Plaintext build: the re-camp tail below still must not act on a
+         * sample the radio IRQ can invalidate underneath it. */
+        uint32_t irq = __risc_v_disable_irq();
+        connected = (rf_state == RF_STATE_CONNECTED) ? 1u : 0u;
+        (void)__risc_v_enable_irq(irq);
+    }
+#endif
+
+    if (!connected) {
+        /* Re-camp per the new record -- the boot path's radio phase. Runs in
+         * the RF executor's own context, where the radio library demands to
+         * be driven from. */
+        rf_access_addr = rf_bond_default_aa;
+        hal_event_post(RF_EVT_START);
+    }
+    return deferred;
 }
 
 void RF_SetLEDState(uint8_t led)
@@ -4119,7 +5886,7 @@ void RF_SetLEDState(uint8_t led)
      * ISR) was not just unnecessary but HARMFUL: its csrrc/csrrs on CSR 0x800
      * (mask 0x88 = MIE|MPIE), executed in the boot loop right after CH59x_BLEInit
      * / USB_DevInit, could leave USB_IRQn masked and break USB enumeration (see
-     * the CSR-0x800 warning near main.c:177). Bench-confirmed + codex-reviewed
+     * the CSR-0x800 warning near main.c:177). Bench-confirmed + reviewed
      * 2026-06-14. */
     rf_led_state = (uint8_t)(led & 0x07u);
     if (rf_state == RF_STATE_CONNECTED) {
@@ -4445,7 +6212,7 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         return 0xE3u;
     }
 #endif
-    /* Snapshot the predicate AND act under one IRQ mask (codex final review):
+    /* Snapshot the predicate AND act under one IRQ mask:
      * between an unmasked check and the mask a radio IRQ can accept a beacon
      * and start a pair-ACK burst, which the intervention would then tear
      * through while reporting success. Only the exact terminal camp qualifies:
@@ -4471,7 +6238,7 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         /* Fault injection: shut the radio and leave it deaf. The camp
          * watchdog must bring it back at its next tick: reset its baseline
          * here, or an event that landed between the last tick and this shut
-         * would make that tick read "alive" and cost a second one (codex). */
+         * would make that tick read "alive" and cost a second one. */
         hal_rf_shut();
         rf_camp_wd_seen   = rf_camp_wd_events();
         rf_camp_wd_silent = 0u;

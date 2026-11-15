@@ -11,12 +11,20 @@
 #include "dongle_chip.h"        /* __risc_v_disable_irq (same intrinsic as usb_device.c) */
 #include "dongle_platform.h"
 #include "dongle_target.h"      /* HAL_TICKS_PER_US (IAP_Service deadlines) */
+#include "stack_watermark.h"    /* measurement builds only (0x96) */
+#include "heap_watermark.h"     /* measurement builds only (0x9B) */
 #include "hal_timing.h"         /* hal_now (IAP_Service deadlines) */
 #include "dongle_image_id.h"
 #include "openboot_app.h"       /* openboot_request_update (noreturn) */
 #include "usb_device.h"
 #if DONGLE_HAS_RF
 #include "rf_task.h"            /* RF_TombstoneBond (N06), RF_Quiesce* (0x85) */
+#if DONGLE_RF_CRYPT
+#include "rf_crypt.h"           /* RF_CRYPT_DIAG_PREV_SESSION + its counters */
+#if DONGLE_KEX
+#include "kex_proto.h"          /* KEX_SEED_* (0x9C) */
+#endif
+#endif
 #endif
 
 #include <string.h>
@@ -36,6 +44,18 @@
 #define CMD_RF_DIAG     0x92
 #define CMD_RF_POKE     0x94
 #define CMD_FAULT       0x93
+#define CMD_CRYPT_DIAG  0x98    /* read-only link-encryption counters (was 0x94 on the pre-merge branches; 0x94 is RfPoke) */
+#define ACK_CRYPT_DIAG  0x98
+#define CMD_KEX_DIAG    0x9A    /* read-only link-key exchange counters */
+#define CMD_KEX_SEED    0x9C    /* a 32-byte entropy seed for the next exchange (kex_proto.h) */
+#define CMD_KEX_BENCH   0x99    /* bench builds only: time one X25519 */
+#define CMD_CRYPT_LAST_FAIL 0x95 /* read-only latched first-DROP_MAC fingerprint */
+#define CMD_STACK_WATERMARK 0x96 /* read-only; measurement builds only
+                                  * (DONGLE_STACK_WATERMARK) */
+#define CMD_HEAP_WATERMARK 0x9B  /* read-only; measurement builds only
+                                  * (DONGLE_HEAP_WATERMARK) */
+#define CMD_RX_SHAPE    0x97    /* read-only; bench builds only -- receptions
+                                 * rejected before any other counter sees them */
 
 #define ACK_OK          0x0F
 #define ACK_HANDSHAKE   0xA5
@@ -53,6 +73,96 @@ static uint8_t iap_err_count;
  * drives the actual reboot into OpenBoot from the main loop (never inline
  * in the packet handler, so the status reply can still go out). */
 static uint8_t iap_reboot_pending;
+
+/* Set once IAP_Service has LEFT IDLE, i.e. the reboot can no longer be
+ * cancelled (RF quiesce has been requested and is one-way). IAP_Reset
+ * deliberately does NOT clear this.
+ *
+ * Why a second flag: the dispatcher gate below used iap_reboot_pending as its
+ * only guard, but IAP_Service reads that flag only in IAP_SVC_IDLE. Once it has
+ * advanced, a bus reset landing in that window ran IAP_Reset, cleared the flag,
+ * and re-opened the dispatcher while RF was already quiescing. iap_armed is 0
+ * by then so only read-only commands answer -- but every reply arms EP6 IN and
+ * can disturb the USB_EP6InIdle() test that IAP_SVC_USB_DRAIN waits on. */
+static uint8_t iap_reboot_committed;
+
+/* Bus-reset cancellation (USB_SetBusResetCallback; 2026-08-16 review,
+ * finding 13): a reset tears down the host session, so an armed mutation
+ * window, the error tally, and a NOT-yet-started EnterBootloader must not
+ * survive into the next one -- with live BondWrite activation, a stale
+ * deferred command now rewires running crypto state, not just flash. A
+ * reboot IAP_Service has already begun stays begun, deliberately: its RF
+ * quiesce is one-way, so completing the reboot is the only sane exit (the
+ * service state machine latched past the flag it consumed). ISR context:
+ * byte writes only. */
+void IAP_Reset(void)
+{
+    iap_armed = 0;
+    iap_err_count = 0;
+    iap_reboot_pending = 0;
+}
+
+/* A command the main loop has taken still runs to its end when a bus reset
+ * arrives (USB_PollEP6), and IAP_Reset above runs from that reset's
+ * interrupt. A handler that had already made its decision would then write
+ * the session state straight back: GetDevInfo arming a session nobody in the
+ * new one asked for, EnterBootloader latching a reboot the reset had just
+ * cancelled, any handler counting an error into the tally the reset had
+ * zeroed. The three below decide and write under one interrupt mask, so the
+ * reset is either before the pair (and refuses it) or after it (and undoes
+ * it). The first two return 0 when refused. Replies are covered separately:
+ * USB_SendEP6 arms none for a command whose session has been reset.
+ *
+ * What a reset does not stop is the work of a command already admitted: a
+ * bond write, a bond clear or an RF poke that passed its armed check runs to
+ * its end (stopping half-way would leave flash and RAM disagreeing). */
+static uint8_t iap_arm_session(void)
+{
+    uint8_t live;
+    uint32_t irq = __risc_v_disable_irq();
+
+    live = (uint8_t)!USB_EP6CommandReset();
+    if (live) {
+        iap_armed = 1;
+        iap_err_count = 0;
+    }
+    (void)__risc_v_enable_irq(irq);
+    return live;
+}
+
+static uint8_t iap_latch_reboot(void)
+{
+    uint8_t live;
+    uint32_t irq = __risc_v_disable_irq();
+
+    /* Armed is itself cleared by the reset, so it is the test. */
+    live = iap_armed;
+    if (live) {
+        iap_reboot_pending = 1;
+    }
+    (void)__risc_v_enable_irq(irq);
+    return live;
+}
+
+static void iap_count_error(void)
+{
+    uint32_t irq = __risc_v_disable_irq();
+
+    if (!USB_EP6CommandReset()) {
+        iap_err_count++;
+    }
+    (void)__risc_v_enable_irq(irq);
+}
+
+/* For a link key held in a local: stores the compiler may not drop. */
+static void iap_wipe(void *p, uint8_t len)
+{
+    volatile uint8_t *w = (volatile uint8_t *)p;
+
+    while (len--) {
+        *w++ = 0u;
+    }
+}
 
 static void send_reject(void)
 {
@@ -120,8 +230,9 @@ static void handle_getdevinfo(const uint8_t *data, uint8_t data_len)
     if (arg == 1) {
         uint8_t resp[12];
 
-        iap_armed = 1;
-        iap_err_count = 0;
+        if (!iap_arm_session()) {
+            return;     /* the session ended under this command: no reply */
+        }
 
         resp[0] = ACK_DEVINFO;
         resp[1] = 0x08;
@@ -156,7 +267,7 @@ static void handle_retired(uint8_t status)
         send_reject();
         return;
     }
-    iap_err_count++;
+    iap_count_error();
     send_status4(status);
 }
 
@@ -182,12 +293,17 @@ static void handle_enter_bootloader(const uint8_t *data, uint8_t data_len)
         return;
     }
     if (data_len != sizeof(magic) || memcmp(data, magic, sizeof(magic)) != 0) {
-        iap_err_count++;
+        iap_count_error();
         send_status4(DONGLE_IAP_STATUS_UNSUPPORTED);
         return;
     }
+    /* A bus reset anywhere from the armed check above to the latch cancels
+     * both halves: the reply is not armed (USB_SendEP6) or is taken back by
+     * the reset, and the latch finds the session disarmed. Only a reply the
+     * host had already read before it reset the bus stands, with no reboot
+     * behind it. */
     send_status4(0x00);
-    iap_reboot_pending = 1;
+    (void)iap_latch_reboot();
 }
 
 static void handle_bond_write(const uint8_t *data, uint8_t data_len)
@@ -198,46 +314,179 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
     }
 
     if (data_len != sizeof(bond_record_t)) {
-        iap_err_count++;
+        iap_count_error();
         send_status4(0xB0);
         return;
     }
 
+    /* Both records can hold a link key. Every path from here leaves through
+     * the wipes at the end; the two locals are this handler's only copies
+     * (the packet itself is the poll's, and the poll wipes it). */
     bond_record_t rec;
+    bond_record_t back __attribute__((aligned(4)));
+    uint8_t status;
+    uint8_t failed = 1u;    /* every status but 0x00 and 0xB5 counts as an error */
+
     for (uint8_t i = 0; i < sizeof(rec); i++) {
         ((uint8_t *)&rec)[i] = data[i];
     }
 
     if (rec.magic != BOND_MAGIC || rec.version != BOND_VERSION
         || bond_checksum(&rec) != rec.checksum || rec.session_aa == 0) {
-        iap_err_count++;
-        send_status4(0xB1);
-        return;
+        status = 0xB1;
     }
-
     /* CODEREVIEW N08: semantic validation (bounds, relational
      * interval/timeout, MAC hygiene, peer != effective dongle identity).
      * 0xB2 = semantically-rejected (0xB1 stays structural). The identity leg
      * uses the FACTORY MAC (not a live override — a record replacing an
      * override is judged against the chip identity). */
-    if (!bond_record_semantic_valid(&rec,
+    else if (!bond_record_semantic_valid(&rec,
 #if DONGLE_HAS_RF
-                                    RF_FactoryMac()
+                                         RF_FactoryMac()
 #else
-                                    0
+                                         0
 #endif
-                                    )) {
-        iap_err_count++;
-        send_status4(0xB2);
-        return;
+                                         )) {
+        status = 0xB2;
+    }
+    /* V2: key/flag canonical form. 0xB3 = a provisioned key that is blank/erased,
+     * or a key left in the record without BOND_FLAG_ENC_KEY set. Also rejects a
+     * redacted BondRead view written straight back (ENC_KEY set, key zeroed). */
+    else if (!bond_key_flags_valid(&rec)) {
+        status = 0xB3;
+    }
+    /* 0x01 erase / 0x02 write NV failure */
+    else if ((status = (uint8_t)bond_save(&rec)) != 0u) {
+    }
+    /* Read-back verification -- the same discipline the RF task applies to
+     * its own persists (rf_persist_bond_task) and BondClear applies to the
+     * erase. bond_save returning 0 only says the flash driver reported
+     * success; the record the NEXT BOOT will load is what must match. 0xB4 =
+     * written-but-verify-failed: nothing is applied to the running task, so
+     * RAM keeps the previous coherent state. */
+    else if (!bond_load(&back) || !bond_tuple_equal(&back, &rec)) {
+        status = 0xB4;
+    } else {
+        failed = 0u;
+#if DONGLE_HAS_RF
+        /* Install into the RUNNING task (finding-2 P0: BondWrite used to
+         * persist and report success while the live crypto state ran the old
+         * key until a reset -- the freshly provisioned peer then required
+         * encryption the dongle would not speak, and "reboot the dongle" was
+         * an undocumented required step). 0xB5 = saved+verified but apply
+         * DEFERRED: a key removal landed while the encrypted link is live; it
+         * takes effect when the link drops (fail-closed until then). */
+        if (RF_ApplyBondRecord(&rec)) {
+            status = 0xB5;
+        }
+#endif
     }
 
-    uint8_t status = (uint8_t)bond_save(&rec);
-    if (status) {
-        iap_err_count++;
+    iap_wipe(&rec, (uint8_t)sizeof(rec));
+    iap_wipe(&back, (uint8_t)sizeof(back));
+    if (failed) {
+        iap_count_error();
     }
     send_status4(status);
 }
+
+#if DONGLE_KEX_BENCH
+#include "x25519.h"
+#include "hal_timing.h"
+/* CMD 0x99 (KEX_BENCH builds only): run one X25519 scalar multiplication and
+ * report what it cost in HCLK cycles. Each step is timed with interrupts
+ * masked, so the figures are the arithmetic alone; the radio is starved for
+ * the duration, which is the point of measuring before integrating.
+ * Reply: [0x99][32][total][max step][min step][steps][out 0..7][begin][finish],
+ * u32 LE; begin and finish are the costs of those two calls. */
+static void handle_kex_bench(void)
+{
+    x25519_ctx_t ctx;   /* on the stack: the bench image has no static RAM to spare */
+    uint8_t k[32], out[32], resp[2u + 32u] = {0};
+    uint32_t total = 0u, max = 0u, min = 0xFFFFFFFFu, n = 0u, t_begin, t_finish;
+    int more;
+    uint8_t i;
+
+    for (i = 0; i < 32u; i++) {
+        k[i] = (uint8_t)(i + 1u);
+    }
+    t_begin = hal_now();
+    x25519_begin(&ctx, k, x25519_base_point);
+    t_begin = hal_now() - t_begin;
+    do {
+        uint32_t irq = __risc_v_disable_irq();
+        uint32_t t0 = hal_now();
+        uint32_t dt;
+        more = x25519_step(&ctx);
+        dt = hal_now() - t0;
+        (void)__risc_v_enable_irq(irq);
+        total += dt;
+        if (dt > max) { max = dt; }
+        if (dt < min) { min = dt; }
+        n++;
+    } while (more);
+    t_finish = hal_now();
+    (void)x25519_finish(&ctx, out);
+    t_finish = hal_now() - t_finish;
+    resp[0] = CMD_KEX_BENCH;
+    resp[1] = 32u;
+    put_le32(&resp[2], total);
+    put_le32(&resp[6], max);
+    put_le32(&resp[10], min);
+    put_le32(&resp[14], n);
+    for (i = 0; i < 8u; i++) {
+        resp[18u + i] = out[i];
+    }
+    put_le32(&resp[26], t_begin);
+    put_le32(&resp[30], t_finish);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
+#if DONGLE_KEX
+/* CMD 0x9A: link-key exchange counters (RF_KexDiag). Read-only, unarmed. */
+static void handle_kex_diag(void)
+{
+    uint8_t resp[2u + 22u] = {0};
+
+    resp[0] = CMD_KEX_DIAG;
+    resp[1] = RF_KexDiag(&resp[2]);
+    USB_SendEP6(resp, sizeof(resp));
+}
+
+/* CMD 0x9C: an entropy seed from the host, [0x9C][32][seed][sum] -- the same
+ * packet the keyboard's module takes from its MCU (kex_proto.h). Answers
+ * [0x9C][1][status]: 0 taken, 1 wrong length, 2 refused (every byte the same,
+ * which is a host generator that is not working). Unarmed: a seed is only
+ * ever XORed into the pool, so one from a hostile host cannot make the key
+ * easier to guess, and nothing persistent changes. */
+_Static_assert(CMD_KEX_SEED == KEX_SEED_CMD, "seed command byte is shared with the keyboard UART");
+static void handle_kex_seed(const uint8_t *data, uint8_t len)
+{
+    uint8_t resp[3] = { CMD_KEX_SEED, 1u, 0u };
+
+    if (len != KEX_SEED_BYTES) {
+        resp[2] = 1u;
+    } else {
+        /* `data` is the poll's private copy of the packet (USB_PollEP6), not
+         * the endpoint buffer a bus reset zeroes: what is checked here is
+         * what is used, and the poll wipes it when this returns. */
+        uint8_t i, same = 1u;
+
+        for (i = 1u; i < KEX_SEED_BYTES; i++) {
+            if (data[i] != data[0]) {
+                same = 0u;
+            }
+        }
+        if (same) {
+            resp[2] = 2u;
+        } else {
+            RF_KexSeed(data);
+        }
+    }
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
 
 static void handle_bond_clear(void)
 {
@@ -249,9 +498,12 @@ static void handle_bond_clear(void)
     /* Firmware-side erase + readback verification (the only trustworthy
      * clear: host-side DataFlash writes around the running RF firmware
      * corrupt the page). On success, RF_TombstoneBond() (below) invalidates the
-     * in-RAM bond and blocks re-persist + new accept/promote until reset so the
-     * clear survives; a currently-live link keeps forwarding until it drops (it
-     * cannot reacquire or re-persist), and is gone at the next reset. */
+     * in-RAM bond and blocks re-persist + new accept/promote until a chip reset
+     * or a verified BondWrite so the clear survives. A currently-live plaintext
+     * link keeps forwarding until it
+     * drops (it cannot reacquire or re-persist) and is gone at the next reset;
+     * an encrypted one stops at once, because the tombstone also destroys the
+     * key and every frame then fails closed. */
     uint8_t status = (uint8_t)bond_clear();
     if (status == 0) {
 #if DONGLE_HAS_RF
@@ -263,7 +515,7 @@ static void handle_bond_clear(void)
         RF_TombstoneBond();
 #endif
     } else {
-        iap_err_count++;
+        iap_count_error();
     }
     send_status4(status);
 }
@@ -280,16 +532,192 @@ static void handle_bond_read(void)
      * -- without this, a failed read would leak uninitialized stack over USB. */
     bond_record_t rec = {0};
     int valid = bond_load(&rec);
+    uint8_t redacted = 0u;
+
+    /* Never expose the link key over USB: BondRead is reachable by any host
+     * process that can open the vendor HID, so a readable key would be a
+     * disclosure oracle. Zero it, recompute the checksum so the view stays
+     * self-consistent for display, and flag it in status bit 1. The resulting
+     * ENC_KEY-set / zero-key combination is also non-importable -- BondWrite
+     * rejects it with 0xB3 -- so a redacted view cannot be written back. */
+    if (valid && (rec.flags & BOND_FLAG_ENC_KEY)) {
+        for (uint8_t i = 0; i < sizeof(rec.link_key); i++) {
+            rec.link_key[i] = 0u;
+        }
+        rec.checksum = bond_checksum(&rec);
+        redacted = 0x02u;
+    } else if (!valid) {
+        /* An INVALID record is redacted too, unconditionally. A keyed record
+         * whose header or checksum is damaged fails validation with its key
+         * bytes intact, and returning it verbatim handed the key to any host
+         * that could corrupt -- or merely find corrupted -- the page. Nothing
+         * is recomputed: the view is already marked invalid. */
+        for (uint8_t i = 0; i < sizeof(rec.link_key); i++) {
+            rec.link_key[i] = 0u;
+        }
+    }
 
     uint8_t resp[3 + sizeof(bond_record_t)];
     resp[0] = ACK_BOND_READ;
     resp[1] = (uint8_t)sizeof(bond_record_t);
-    resp[2] = valid ? 0x00 : 0x01;
+    resp[2] = (uint8_t)((valid ? 0x00u : 0x01u) | redacted);
     for (uint8_t i = 0; i < sizeof(rec); i++) {
         resp[3 + i] = ((const uint8_t *)&rec)[i];
     }
     USB_SendEP6(resp, sizeof(resp));
 }
+
+#if DONGLE_RF_CRYPT
+/* Read-only: verified-frame count then the per-reason drop tally, in
+ * rf_crypt_status_t order (OK, SHAPE, INACTIVE, MAC, REPLAY, ENGINE). A single
+ * drop total cannot tell a failed tag from a replayed counter from a malformed
+ * frame, and those point at completely different bugs on the transmitting end.
+ * Exposed unarmed because it reveals nothing secret -- counts only, no key or
+ * session material. */
+extern uint32_t rf_crypt_drop_reason[6];
+extern uint32_t rf_crypt_ok_count;
+#if RF_CRYPT_AES_DOUBLE
+extern uint32_t rf_crypt_aes_redo;        /* rf_crypt.c: double-compute catches */
+extern uint32_t rf_crypt_announce_retry;  /* rf_task.c: announce-seal rebuilds  */
+#endif
+#if RF_CRYPT_BOOT_KAT
+extern uint8_t  rf_crypt_boot_kat_run;
+extern uint8_t  rf_crypt_boot_kat_fail;
+#endif
+extern uint32_t rf_crypt_plain_drop;   /* both profiles: see rf_task.c */
+#if RF_CRYPT_DIAG_PREV_SESSION
+extern uint32_t rf_crypt_conn_rx;
+extern uint32_t rf_crypt_enc_shape;
+extern uint32_t rf_crypt_fifo_full;
+extern uint32_t rf_crypt_flush_drop;
+extern uint8_t  rf_crypt_len_max;
+extern uint8_t  rf_crypt_len_max_tag;
+#endif
+
+static void handle_crypt_diag(void)
+{
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Bench layout, v4: ok(4) + reason[6](24) + pre-verify sink counters(20) +
+     * len_max(1) + len_max_tag(1) + prev-session diagnostic(12) = 62 B, which
+     * with the 2 B header is exactly the 64 B EP6 report -- no room left, so
+     * anything further needs a selector rather than another append. Purely
+     * additive: a v1/v2 reader that stops early still parses. */
+    uint8_t resp[2u + 4u + 24u + 20u + 2u + 12u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u + 20u + 2u + 12u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+    put_le32(&resp[30], rf_crypt_conn_rx);
+    put_le32(&resp[34], rf_crypt_enc_shape);
+    put_le32(&resp[38], rf_crypt_fifo_full);
+    put_le32(&resp[42], rf_crypt_flush_drop);
+    put_le32(&resp[46], rf_crypt_plain_drop);
+    resp[50] = rf_crypt_len_max;
+    resp[51] = rf_crypt_len_max_tag;
+    put_le32(&resp[52], rf_crypt_session_mint_count);
+    /* v4: offset 56 now carries the same-session re-verify count. mac_prev_ok
+     * answered its question (0/34) and still counts internally; reporting it
+     * here would let a prev-session rescue masquerade as a same-session one,
+     * inverting the experiment's conclusion. (The re-verify experiment is
+     * written up in OpenController firmware/docs/TODO.md section 4.) */
+    put_le32(&resp[56], rf_crypt_mac_same_ok);
+    put_le32(&resp[60], rf_crypt_last_mac_ctr);
+    USB_SendEP6(resp, sizeof(resp));
+#else
+    /* Product layout: the health signal -- verified frames, the per-reason
+     * drops, and the stale-abort hardening's own telemetry: ok(4) reason[6](24)
+     * aes_redo(4) announce_retry(4) boot_kat_run(1) boot_kat_fail(1) = 38 B
+     * payload. The hardening fields read zero on a chip without the hardware
+     * engine (CH570); the pre-verify sink forensics are bench-profile
+     * scaffolding (rf_task.c). The two layouts are told apart by their length
+     * and by the status profile byte. Additive appends only. */
+    uint8_t resp[2u + 4u + 24u + 4u + 4u + 1u + 1u + 4u] = {0};
+    uint8_t i;
+
+    resp[0] = ACK_CRYPT_DIAG;
+    resp[1] = 4u + 24u + 4u + 4u + 1u + 1u + 4u;
+    put_le32(&resp[2], rf_crypt_ok_count);
+    for (i = 0; i < 6u; i++) {
+        put_le32(&resp[6 + 4u * i], rf_crypt_drop_reason[i]);
+    }
+#if RF_CRYPT_AES_DOUBLE
+    put_le32(&resp[30], rf_crypt_aes_redo);
+    put_le32(&resp[34], rf_crypt_announce_retry);
+#endif
+#if RF_CRYPT_BOOT_KAT
+    resp[38] = rf_crypt_boot_kat_run;
+    resp[39] = rf_crypt_boot_kat_fail;
+#endif
+    /* Appended 2026-08-22: a refused plaintext downgrade on an active encrypted
+     * bond. The slot is UNCONDITIONAL (like the two above, which read zero on a
+     * chip without the hardware engine) so the payload length stays a reliable
+     * layout discriminator on every chip and profile. 42 B payload; the 62 B
+     * ceiling leaves room for five more u32 before a selector is needed. */
+    put_le32(&resp[40], rf_crypt_plain_drop);
+    USB_SendEP6(resp, sizeof(resp));
+#endif
+}
+
+#if RF_CRYPT_DIAG_PREV_SESSION
+/* CMD 0x95: the latched first-failure fingerprint plus the secondary
+ * diagnostic counters that no longer fit in the full 0x98 report. Read-only,
+ * served unarmed (counts and already-public frame bytes; the tag proves
+ * nothing without the key, which never leaves the device). */
+/* CMD 0x97: receptions the sink discards BEFORE conn_rx/enc_shape are counted.
+ *
+ * Everything else in 0x98 describes frames that survived CRC and type checks.
+ * A frame that arrives corrupt -- or that is still on air when this receiver
+ * shuts RX for its next poll -- exits at the rsr!=0 branch and appears in NO
+ * counter at all, so it is indistinguishable from a frame the keyboard never
+ * sent. That blind spot is why the keyed link's ~10% HID loss could not be
+ * attributed. Read-only, served unarmed (a single counter). */
+static void handle_rx_shape(void)
+{
+    uint8_t resp[2u + 4u] = {0};
+
+    resp[0] = CMD_RX_SHAPE;
+    resp[1] = 4u;
+    put_le32(&resp[2], rf_crypt_crc_err);
+    USB_SendEP6(resp, sizeof(resp));
+}
+
+static void handle_crypt_last_fail(void)
+{
+    /* [ack][len] latched(1) fail_len(1) session(4) counter(4) expect1(8)
+     * expect2(8) frame(22) same_differs(4) bb_during_aes(4) kat_run(1)
+     * kat_fail(1) guard_fires(2) guard_at_fire(2) = 62-byte payload, 64 on the
+     * wire -- the full EP6 report, so nothing more fits here. */
+    uint8_t resp[2u + 1u + 1u + 4u + 4u + 8u + 8u + 22u + 4u + 4u + 1u + 1u
+                 + 2u + 2u] = {0};
+    uint8_t i;
+
+    resp[0] = 0x95u;
+    resp[1] = (uint8_t)(sizeof(resp) - 2u);
+    resp[2] = rf_crypt_fail_latched;
+    resp[3] = rf_crypt_fail_len;
+    put_le32(&resp[4], rf_crypt_fail_session);
+    put_le32(&resp[8], rf_crypt_fail_counter);
+    for (i = 0; i < 8u; i++) {
+        resp[12 + i] = rf_crypt_fail_expect1[i];
+        resp[20 + i] = rf_crypt_fail_expect2[i];
+    }
+    for (i = 0; i < 22u; i++) {
+        resp[28 + i] = rf_crypt_fail_frame[i];
+    }
+    put_le32(&resp[50], rf_crypt_same_differs);
+    put_le32(&resp[54], rf_crypt_bb_during_aes);
+    resp[58] = rf_crypt_kat_run;
+    resp[59] = rf_crypt_kat_fail;
+    put_le16(&resp[60], rf_crypt_guard_fires);
+    put_le16(&resp[62], rf_crypt_guard_at_fire);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+#endif
 
 static void handle_version(void)
 {
@@ -352,6 +780,38 @@ static void handle_fault(void)
     USB_SendEP6(resp, sizeof(resp));
 }
 
+#if DONGLE_STACK_WATERMARK
+/* CMD 0x96: the stack low-water mark since boot (stack_watermark.h). Payload:
+ * low_water(4) end(4) eusrstack(4), LE -- the host computes depth
+ * (eusrstack - low_water) and slack (low_water - end). Read-only, unarmed
+ * (addresses only, and never in a product build). */
+static void handle_stack_watermark(void)
+{
+    uint8_t resp[2u + 12u] = {0};
+
+    resp[0] = CMD_STACK_WATERMARK;
+    resp[1] = 12u;
+    put_le32(&resp[2], stack_watermark_low());
+    put_le32(&resp[6], stack_watermark_floor());   /* true stack floor per chip */
+    put_le32(&resp[10], (uint32_t)(uintptr_t)&_eusrstack);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
+#if DONGLE_HEAP_WATERMARK
+/* CMD 0x9B: how much of the BLE library heap has been touched since boot
+ * (heap_watermark.h has the layout). Read-only, unarmed (sizes and offsets
+ * only, and never in a product build). */
+static void handle_heap_watermark(void)
+{
+    uint8_t resp[2u + HEAP_WATERMARK_BYTES] = {0};
+
+    resp[0] = CMD_HEAP_WATERMARK;
+    resp[1] = heap_watermark_fill(&resp[2]);
+    USB_SendEP6(resp, sizeof(resp));
+}
+#endif
+
 /* Read-only RF diagnostics page (command 0x92, optional 1-byte page selector,
  * default page 0). Unarmed like the fault page: it is the readout for a unit
  * whose runtime state is the thing under investigation, and arming is a
@@ -391,7 +851,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
      * reply: USB_SendEP6 has no busy check, so answering would overwrite
      * the pending status-0 reply the host has not taken yet, and nothing
      * may cancel the reboot anyway (disarm clears only the session flag). */
-    if (iap_reboot_pending) {
+    if (iap_reboot_pending || iap_reboot_committed) {
         return;
     }
     if (rx_len < 3) {
@@ -425,11 +885,31 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
     case CMD_BOND_WRITE:  handle_bond_write(data, len); break;
     case CMD_BOND_READ:   handle_bond_read(); break;
     case CMD_BOND_CLEAR:  handle_bond_clear(); break;
+#if DONGLE_KEX
+    case CMD_KEX_DIAG:    handle_kex_diag(); break;
+    case CMD_KEX_SEED:    handle_kex_seed(data, len); break;
+#endif
+#if DONGLE_KEX_BENCH
+    case CMD_KEX_BENCH:   handle_kex_bench(); break;
+#endif
     case CMD_VERSION:     handle_version(); break;
     case CMD_STATUS:      handle_status(); break;
     case CMD_RF_DIAG:     handle_rf_diag(data, len); break;
     case CMD_RF_POKE:     handle_rf_poke(data, len); break;
     case CMD_FAULT:       handle_fault(); break;
+#if DONGLE_RF_CRYPT
+    case CMD_CRYPT_DIAG:  handle_crypt_diag(); break;
+#if RF_CRYPT_DIAG_PREV_SESSION
+    case CMD_CRYPT_LAST_FAIL: handle_crypt_last_fail(); break;
+    case CMD_RX_SHAPE:    handle_rx_shape(); break;
+#endif
+#endif
+#if DONGLE_STACK_WATERMARK
+    case CMD_STACK_WATERMARK: handle_stack_watermark(); break;
+#endif
+#if DONGLE_HEAP_WATERMARK
+    case CMD_HEAP_WATERMARK: handle_heap_watermark(); break;
+#endif
     default:              break;
     }
 }
@@ -450,7 +930,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
  *
  * Deadlines are WALL time via hal_now() (Tsys ticks), not pass counts: the
  * main loops run hundreds of passes per millisecond, so a pass bound could
- * expire before the host's next 1 ms EP6 IN token ever arrived (codex
+ * expire before the host's next 1 ms EP6 IN token ever arrived (a
  * checkpoint-2 finding). u32 tick arithmetic is modular, so the deltas
  * survive hal_now() wrap. */
 #define IAP_SVC_RF_QUIESCE_TICKS (500000u * HAL_TICKS_PER_US) /* 500 ms */
@@ -466,10 +946,31 @@ void IAP_Service(void)
     static uint32_t svc_start;
 
     switch (svc_state) {
-    case IAP_SVC_IDLE:
+    case IAP_SVC_IDLE: {
+        /* Past this point the reboot is committed: RF quiesce is one-way, so
+         * completing it is the only sane exit. Latch that separately from
+         * iap_reboot_pending, which a bus reset may still clear -- and read
+         * and latch under one mask, or a reset between the two would cancel
+         * a reboot that then went ahead.
+         *
+         * The unmasked test first is not an optimisation: this runs on every
+         * pass of the main loop, and masking interrupts on every pass is the
+         * pattern that broke enumeration on the CH592 (USB_ServiceRemoteWake
+         * has the history). A reset after it is caught by the masked re-read. */
         if (!iap_reboot_pending) {
             return;
         }
+        uint32_t irq = __risc_v_disable_irq();
+        uint8_t go = iap_reboot_pending;
+
+        if (go) {
+            iap_reboot_committed = 1;
+        }
+        (void)__risc_v_enable_irq(irq);
+        if (!go) {
+            return;
+        }
+    }
 #if DONGLE_HAS_RF
         RF_QuiesceRequest();
 #endif

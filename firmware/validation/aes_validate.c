@@ -23,6 +23,7 @@
  */
 #include "aes_log_format.h"
 #include "hal_aes.h"
+#include "rf_crypt.h"   /* the CCM MODE built on the seam -- validated per arm too */
 
 #if DONGLE_VALIDATE_HAS_CORECFGR
 #include "ch570_corecfgr.h"
@@ -414,6 +415,71 @@ static uint32_t check_twice(void)
     return log_vector(AES_LOG_VEC_TWICE, second, c_fips, st);
 }
 
+/* ------------------------------------------------------------------ CCM mode */
+
+/*
+ * The encrypted link is AES-128-CCM built on this seam (rf_crypt). Its output is
+ * deterministic given the block cipher, and the cipher is already proven
+ * byte-identical across every arm above -- so CCM must be too. This runs the
+ * REAL rf_crypt decrypt path on each backend against one known-good frame
+ * (produced by tests/ccm_ref.py, itself anchored to RFC 3610), plus a tamper and
+ * a replay that must be rejected, and folds the result into the KAT pass/fail.
+ * A backend that mis-computed CCM -- or a compiler that broke rf_crypt on one
+ * arm's toolchain -- fails here without any new log record or reader change.
+ *
+ * Key {01..10}, session_id 0x11223344, counter 1, ctrl 0x5A, tag 0xA3 (consumer),
+ * plaintext body {E9 00}. Frame = ctrl|tag|counter(LE)|CT|tag8 (16 bytes).
+ */
+static const uint8_t ccm_key[16] = {
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+    0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10
+};
+static const uint8_t ccm_frame_good[16] = {
+    0x5a, 0xa3, 0x01, 0x00, 0x00, 0x00, 0xf5, 0x92,
+    0x61, 0xbf, 0x78, 0xf0, 0xe6, 0x60, 0xf6, 0x68
+};
+#define CCM_VALIDATE_SID 0x11223344u
+
+static uint32_t check_ccm(void)
+{
+    uint8_t frame[16];
+    uint8_t otag, obody[RF_CRYPT_MAX_BODY], on;
+    uint32_t ok = 1u;
+    int i;
+
+    rf_crypt_install_key(ccm_key);
+
+    /* Good frame -> {E9 00} on report tag 0xA3. */
+    rf_crypt_new_session(CCM_VALIDATE_SID);
+    for (i = 0; i < 16; i++) frame[i] = ccm_frame_good[i];
+    if (rf_crypt_rx(frame, 16u, &otag, obody, &on) != RF_CRYPT_OK
+        || otag != 0xA3u || on != 2u || obody[0] != 0xE9u || obody[1] != 0x00u) {
+        ok = 0u;
+    }
+
+    /* Tampered ciphertext must fail the tag (fresh session resets the window). */
+    rf_crypt_new_session(CCM_VALIDATE_SID);
+    for (i = 0; i < 16; i++) frame[i] = ccm_frame_good[i];
+    frame[6] ^= 0x01u;
+    if (rf_crypt_rx(frame, 16u, &otag, obody, &on) == RF_CRYPT_OK) {
+        ok = 0u;
+    }
+
+    /* Replay: the same counter twice -> second is rejected. */
+    rf_crypt_new_session(CCM_VALIDATE_SID);
+    for (i = 0; i < 16; i++) frame[i] = ccm_frame_good[i];
+    if (rf_crypt_rx(frame, 16u, &otag, obody, &on) != RF_CRYPT_OK) {
+        ok = 0u;
+    }
+    for (i = 0; i < 16; i++) frame[i] = ccm_frame_good[i];
+    if (rf_crypt_rx(frame, 16u, &otag, obody, &on) != RF_CRYPT_DROP_REPLAY) {
+        ok = 0u;
+    }
+
+    rf_crypt_clear();
+    return ok;
+}
+
 /* ------------------------------------------------------------- differential */
 
 /*
@@ -665,6 +731,7 @@ int main(void)
     all &= check_set_key_twice();
     all &= check_key_change();
     all &= check_twice();
+    all &= check_ccm();   /* the CCM mode on this arm's backend (rf_crypt) */
 
     put(AES_LOG_KAT_END);
     put(all);

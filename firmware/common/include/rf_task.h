@@ -35,6 +35,9 @@
 #define RF_EVT_PERSIST_BOND      0x0800  /* deferred DataFlash bond write (task ctx, out of the radio ISR) */
 #define RF_EVT_QUIESCE           0x1000  /* pre-reboot: shut the radio in executor context, stop re-arming */
 #define RF_EVT_RX_WIN_CLOSE      0x2000  /* Tier 2: close a receiver window (shut) unless a beacon was accepted */
+#define RF_EVT_WAKE              0x8000  /* link encryption only: run the executor for latched crypto work
+                                          * (rf_task.c rf_crypt_work_*). The same bit as TMOS's SYS_EVENT_MSG,
+                                          * which this task otherwise only drains; no handler of its own */
 #define RF_EVT_RX_WIN_PHASE      0x4000  /* Tier 2: the once-per-second phase-locked window open */
 
 /* Connection states */
@@ -50,6 +53,29 @@ typedef rf_hid_callback_t rf_hid_cb_t;
 
 /* Initialize the RF 2.4G receiver TMOS task */
 void RF_TaskInit(void);
+#if DONGLE_RF_CRYPT
+/* Re-post the executor wake while latched crypto work is outstanding; call
+ * once per main-loop pass ahead of any idle decision. See rf_task.c. */
+uint8_t RF_CryptWorkKick(void);
+#endif
+#if DONGLE_KEX
+/* IAP 0x9A: link-key exchange counters. Fills 22 bytes: starts, completed,
+ * last failure (kex_fail_t), current state (kex_state_t, 0 when idle),
+ * entropy samples (u16 LE), commit failures, tried-this-connection; the
+ * keyboard's last status frame (8) and how many arrived (wraps); failures
+ * (low nibble) and heap refusals (high nibble); the X25519 phase and count;
+ * host seeds received (wraps); draws that folded one (bits 0-6, saturating)
+ * with bit 7 set while a seed is waiting. */
+uint8_t RF_KexDiag(uint8_t out[22]);
+
+/* IAP 0x9C: a 32-byte entropy seed from the host (kex_proto.h, KEX_SEED_*).
+ * Held until the next private-key draw folds it into the pool, then wiped;
+ * a later seed replaces one still waiting. RAM only: it is lost when the
+ * chip resets or loses power (a USB bus reset leaves it).
+ * Main-loop context only (the IAP handler): the draw that consumes the seed
+ * runs there too, and neither is protected against the other. */
+void RF_KexSeed(const uint8_t seed[32]);
+#endif
 
 /* Register a callback for received HID reports */
 void RF_SetHIDCallback(rf_hid_cb_t cb);
@@ -57,8 +83,22 @@ void RF_SetHIDCallback(rf_hid_cb_t cb);
 /* CODEREVIEW N06: the IAP BondClear handler calls this right after erasing the
  * DataFlash bond, so the running RF task can't re-persist its still-live in-RAM
  * bond over the cleared record. Invalidates the in-RAM bond, cancels any pending
- * persist, and blocks further persists until the next reset. */
+ * persist, and blocks further persists until the next reset or a verified
+ * BondWrite (RF_ApplyBondRecord), whichever comes first. */
 void RF_TombstoneBond(void);
+
+/* The IAP BondWrite handler calls this AFTER bond_save plus a
+ * bond_load/bond_tuple_equal readback: install the just-verified record into
+ * the running task -- bond identity, key, and encryption latch -- with the
+ * reboot's bond-load semantics, so provisioning takes effect without a reset
+ * (it used to require one, undocumented). Also lifts a BondClear tombstone:
+ * a verified host write is the tombstoning authority provisioning anew.
+ * Foreground main-loop context only (the same loop that pumps the RF
+ * executor). Returns 0 = applied live; 1 = applied-deferred (a key REMOVAL
+ * while the encrypted link is live keeps the link fail-closed-dead and
+ * downgrades to plaintext when it drops -- same rule as the tombstone). */
+#include "bond.h"
+uint8_t RF_ApplyBondRecord(const bond_record_t *rec);
 
 /* CODEREVIEW N08: the chip's factory MAC (pre-override), for the IAP
  * BondWrite semantic validator's own-identity leg. */

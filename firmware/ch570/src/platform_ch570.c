@@ -134,7 +134,7 @@ static void ch570_fault_boot(uint8_t reset_status)
 #define CH570_ENTROPY_SKIP 64u     /* margin over any early heap word above _end */
 #define CH570_ENTROPY_LEN  1536u   /* bytes of power-on RAM to hash */
 /* The read window [_end+SKIP, _end+SKIP+LEN) must stay within the RAM the linker
- * guarantees free above _end. The 0x800 floor keeps this window below RAM top.
+ * guarantees free above _end. The 0x700 floor keeps this window below RAM top.
  * Keep both assertions in sync if the window changes. */
 _Static_assert(CH570_ENTROPY_SKIP + CH570_ENTROPY_LEN <= 0x640u,
     "boot-entropy read must fit the minimum linker-guaranteed stack-floor gap");
@@ -426,7 +426,10 @@ uint8_t dongle_nv_read(uint32_t off, void *out, uint32_t len)
 
 uint8_t dongle_nv_is_erased(uint32_t off, uint32_t len)
 {
-    uint32_t erased_buf[8];
+    /* Sized to a whole bond record (BOND_RECORD_MAX_NV) so bond_clear()/
+     * bond_save() verification, which pass sizeof(bond_record_t), are not
+     * rejected as "over the buffer". */
+    uint32_t erased_buf[BOND_RECORD_MAX_NV / 4u];
     uint8_t erased;
 
     if (!nv_range_ok(off, len) ||

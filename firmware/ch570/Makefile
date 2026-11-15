@@ -66,7 +66,7 @@ SDK_REVISION := 1e34c9450cd6df390153952c097cd09dd8a91aed
 # is what finally puts the bootloader's identity into the build id - previously
 # CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
 # composed into a factory image with every gate green.
-OPENBOOT_REVISION := 19fe429d3fbac8ef8b0bfc83b3660eb23b9f908d
+OPENBOOT_REVISION := 46b2590e99b8a0bdc773aa62cc53fef1a5675adc
 PROFILE_ID := ch570-product
 TARGET := opendongle-ch570-product
 
@@ -144,12 +144,16 @@ CFLAGS += -DOPENBOOT_CHIP_CH57X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 # Select the CH570 AES backend: DONGLE_AES_CH570_IMPL_{ASM_A,ASM_F,C}.
-# Default (ASM_A) is set in src/hal_aes_ch570_impl.h; override here, e.g.
-#   make AES_IMPL=DONGLE_AES_CH570_IMPL_ASM_F
-# ASM_F additionally REQUIRES CORECFGR bit 3 -- see that header.
-ifdef AES_IMPL
+# The SEAM default (src/hal_aes_ch570_impl.h) is ASM_A, but the PRODUCTION CH570
+# build ships ASM_F (flash-resident kernel): with optional link encryption
+# (DONGLE_RF_CRYPT) enabled, ASM_A's SRAM-resident S-box + round-key schedule
+# pushes the image past the 1.75 KB stack floor (link fails), whereas the dongle
+# only DECRYPTS, in task context, where ASM_F's higher per-block cost is off the
+# phase-critical poll path. ASM_F REQUIRES CORECFGR bit 3 (0x2D) -- set in
+# production, see src/ch570_corecfgr.h. Override with e.g.
+#   make AES_IMPL=DONGLE_AES_CH570_IMPL_ASM_A
+AES_IMPL ?= DONGLE_AES_CH570_IMPL_ASM_F
 CFLAGS += -DDONGLE_AES_CH570_IMPL=$(AES_IMPL)
-endif
 # Pair-acceptance RSSI floor in dBm, for bench profiles that need a different
 # one without editing source. The negative value needs no quoting - it is an
 # ordinary command-line variable assignment:
@@ -161,6 +165,12 @@ endif
 ifdef PAIR_MIN_RSSI
 CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
+
+# One-off experiment/measurement hook (e.g. the stack-watermark build:
+# EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1). Consumed before the build-id
+# computation, so an instrumented image gets its own identity and can never
+# pass for the standard bytes. Same pattern as validation/Makefile.
+CFLAGS += $(EXTRA_CFLAGS)
 
 LDFLAGS := $(ARCH) -T link.ld -nostartfiles
 LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
@@ -180,6 +190,7 @@ APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/rf_task.c src/hal_dispatch_ch570.c
 APP_SRC += src/hal_rf_ch570.c src/hal_timing_ch570.c
 APP_SRC += $(COMMON)/src/iap.c $(COMMON)/src/usb_descriptors.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch570.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. hal_aes_ch570.c supplies
@@ -260,9 +271,9 @@ $(error cannot read the compiler "$(CC)" to record its digest: set MRS_TOOLCHAIN
 endif
 endif
 
-CONFIG_TEXT := schema=8||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x800||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
+CONFIG_TEXT := schema=8||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x700||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
 # $(ASM_SRC) belongs here too: without it, editing either AES kernel changes
-# the firmware without changing its build identity (CodeRabbit/Codex review).
+# the firmware without changing its build identity (review).
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(ASM_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h

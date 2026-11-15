@@ -68,9 +68,27 @@ SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 # is what finally puts the bootloader's identity into the build id - previously
 # CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
 # composed into a factory image with every gate green.
-OPENBOOT_REVISION := 19fe429d3fbac8ef8b0bfc83b3660eb23b9f908d
-PROFILE_ID := ch592-product
-TARGET := opendongle-ch592-product
+OPENBOOT_REVISION := 46b2590e99b8a0bdc773aa62cc53fef1a5675adc
+
+# Build profile. `product` is the shipping configuration. `bench` compiles the
+# UART-only campaign scaffolding -- the compiled-in force key, UART1/PA9
+# telemetry, and the prev-session CCM diagnostics (dongle_target.h's
+# DONGLE_BENCH_PROFILE block). The two are separate object trees, separate
+# artifact names, separate build ids (PROFILE_ID is in CONFIG_TEXT and the
+# -D below is in the hashed CFLAGS), and a bench image self-identifies at
+# runtime through the IAP status profile byte. rf_task.c #errors if the force
+# key ever compiles outside this profile, and the top-level release target
+# byte-scans the packaged artifacts for it -- belt and braces.
+PROFILE ?= product
+ifeq ($(PROFILE),product)
+BUILD_PROFILE_NUM := 1u
+else ifeq ($(PROFILE),bench)
+BUILD_PROFILE_NUM := 2u
+else
+$(error PROFILE must be product or bench, got '$(PROFILE)')
+endif
+PROFILE_ID := ch592-$(PROFILE)
+TARGET := opendongle-ch592-$(PROFILE)
 
 # OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
 # copied here. openboot_app.c derives its boot-record address as
@@ -132,6 +150,9 @@ CFLAGS += -ffunction-sections -fdata-sections -fno-common
 CFLAGS += --param=highcode-gen-section-name=1
 CFLAGS += -DCLK_OSC32K=1
 CFLAGS += -DDONGLE_IMAGE_HAS_IAP=1
+ifeq ($(PROFILE),bench)
+CFLAGS += -DDONGLE_BENCH_PROFILE=1
+endif
 # The extra delivery counters are bench-only and CH592's .bss has no room for them
 # alongside the EP1 queue: add -DDONGLE_DELIVERY_COUNTERS=1 to CFLAGS here, on a
 # build that drops another optional feature to make room. There is deliberately no
@@ -191,6 +212,12 @@ CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 ifdef PAIR_MIN_RSSI
 CFLAGS += -DRF_PAIR_MIN_RSSI=$(PAIR_MIN_RSSI)
 endif
+
+# One-off experiment/measurement hook (e.g. the stack-watermark build:
+# EXTRA_CFLAGS=-DDONGLE_STACK_WATERMARK=1). Consumed before the build-id
+# computation, so an instrumented image gets its own identity and can never
+# pass for the standard bytes. Same pattern as validation/Makefile.
+CFLAGS += $(EXTRA_CFLAGS)
 
 # Tier-1 power management knobs (src/pm_ch592.c). Every one is a -D CFLAG
 # (hashed into the build id) AND a CONFIG_TEXT token (schema=12). "All off" is
@@ -337,6 +364,7 @@ LDFLAGS += -Wl,--gc-sections -Wl,--print-memory-usage
 LDFLAGS += -Wl,-Map=$(BUILD)/$(TARGET).map
 LDFLAGS += --specs=nano.specs --specs=nosys.specs
 LDFLAGS += -L $(BUILD)          # so link.ld's `INCLUDE memory.ld` resolves
+LDFLAGS += $(EXTRA_LDFLAGS)
 
 INCLUDES := -I src -I $(COMMON)/include -I $(BLE_LIB_DIR)
 INCLUDES += -I $(SDK)/BLE/HAL/include
@@ -348,6 +376,33 @@ APP_SRC += src/hal_timing_ch592.c src/hal_rf_ch592.c src/platform_ch592.c
 APP_SRC += $(COMMON)/src/bond.c $(COMMON)/src/dongle_id.c
 APP_SRC += $(COMMON)/src/usb_device.c src/hal_usb_ch592.c
 APP_SRC += $(COMMON)/src/usb_descriptors.c $(COMMON)/src/iap.c
+APP_SRC += $(COMMON)/src/rf_crypt.c
+# Link-key exchange (DONGLE_KEX in dongle_target.h): X25519 + AES-CMAC,
+# docs/key-establishment.md. X25519_RAM selects X25519_ARITH_IN_RAM (x25519.c):
+# 0 everything in flash, 1 multiply/add/subtract in SRAM, 2 plus the constant
+# multiply and the swap, 3 plus the step dispatcher. Timings are in the
+# commit that last changed x25519.c's arithmetic; 2 is 110 ms per scalar
+# multiplication for 618 bytes of SRAM.
+X25519_RAM ?= 2
+APP_SRC += $(COMMON)/src/x25519.c $(COMMON)/src/kex_kdf.c $(COMMON)/src/kex_proto.c
+CFLAGS += -DX25519_ARITH_IN_RAM=$(X25519_RAM)
+# The BLE library's heap (MEM_BUF in src/main.c; the SDK's CONFIG.h defaults
+# it to 6144). Measured on the bench with the heap watermark
+# (EXTRA_CFLAGS=-DDONGLE_HEAP_WATERMARK=1, common/include/heap_watermark.h,
+# 2026-11-14): 1804 bytes touched after start-up and a bonded reconnect, 2368
+# at the peak of a fresh pairing, which is when the key exchange's context
+# (544 bytes) is allocated. Nothing beyond 2368 was ever written. 4096 leaves
+# 1728 bytes above that peak and gives 2048 back to .data/.bss. The library
+# checks only that the size is not zero. Measure again before lowering it or
+# after anything new allocates from the heap.
+BLE_MEMHEAP ?= 4096
+CFLAGS += -DBLE_MEMHEAP_SIZE=$(BLE_MEMHEAP)
+# BENCH ONLY: KEX_BENCH=1 adds IAP 0x99, which times one X25519 scalar
+# multiplication on the chip (`opendongle --kex-bench`).
+KEX_BENCH ?= 0
+ifneq ($(KEX_BENCH),0)
+CFLAGS += -DDONGLE_KEX_BENCH=$(KEX_BENCH)
+endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # AES-128 forward cipher behind hal_aes.h. CH592 has a hardware engine, so this
 # is the whole backend -- no software cipher is linked here, unlike CH570.
@@ -358,6 +413,13 @@ APP_SRC += src/hal_aes_ch592.c
 # Tier-1 power management. Always compiled (so it is always hashed); every
 # function in it sits under its PM_* knob, so the all-off object is empty.
 APP_SRC += src/pm_ch592.c
+
+# BENCH ONLY: UART1-PA9 telemetry mirror of CMD_CRYPT_DIAG, for the USB-less
+# bench (see dongle_target.h DONGLE_UART_DIAG). Compiled -- and hashed into
+# the build id via BUILD_ID_INPUTS -- only in the bench profile.
+ifeq ($(PROFILE),bench)
+APP_SRC += src/uart_diag.c
+endif
 
 HAL_SRC := $(SDK)/BLE/HAL/MCU.c $(SDK)/BLE/HAL/RTC.c
 DRV_SRC := $(SDK)/SRC/StdPeriphDriver/CH59x_clk.c
@@ -476,11 +538,27 @@ endif
 else
 BUILD_ID := 00000000
 endif
-CFLAGS += -DDONGLE_BUILD_PROFILE=1u -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
+CFLAGS += -DDONGLE_BUILD_PROFILE=$(BUILD_PROFILE_NUM) -DDONGLE_BUILD_ID=0x$(BUILD_ID)u
 
 .DEFAULT_GOAL := all
 .PHONY: all openboot-image factory flash-factory bundle check-deps FORCE \
-	check-openboot-toolchain size size-check clean
+	check-openboot-toolchain check-profile size size-check clean
+
+# Packaging refuses the bench profile. The bench campaign DOES flash bench
+# factory images (over SWD, on the USB-less bench), so that one path has an
+# explicit, greppable override; the .obb bundle is a release artifact with no
+# bench use, so it has none.
+check-profile:
+#	The opt-out tests for the EXACT value 1, not merely a non-empty string:
+#	ALLOW_BENCH_FACTORY=0 arriving from a script or a stale environment reads
+#	as "no" to a human and would otherwise satisfy `test -n`, silently
+#	packaging a bench image that carries the compiled-in key. Same rule as the
+#	ALLOW_BONDED_FLASH guard below.
+	@test "$(PROFILE)" = product || test "$(strip $(ALLOW_BENCH_FACTORY))" = "1" || { \
+	  echo "refusing to package the '$(PROFILE)' profile: it carries the" >&2; \
+	  echo "compiled-in bench key and UART telemetry (dongle_target.h)." >&2; \
+	  echo "For the bench rig only: make PROFILE=bench ALLOW_BENCH_FACTORY=1 factory" >&2; \
+	  exit 1; }
 
 all: check-factory-slot check-deps $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin \
     $(FACTORY_BIN) size size-check
@@ -499,7 +577,7 @@ $(OPENBOOT_BIN): openboot-image | $(BUILD)
 	@if ! cmp -s "$(OPENBOOT_SRC_BIN)" "$@"; then \
 	  cp "$(OPENBOOT_SRC_BIN)" "$@"; echo "openboot image updated: $@"; fi
 
-factory: check-factory-slot check-deps $(FACTORY_BIN) size-check
+factory: check-profile check-factory-slot check-deps $(FACTORY_BIN) size-check
 	@echo "factory image: $(abspath $(FACTORY_BIN))"
 
 flash-factory: factory
@@ -776,7 +854,12 @@ size-check: $(BUILD)/$(TARGET).bin
 
 # Both slots plus the bundle. Recursive because SLOT selects the object tree,
 # the link base and the -D values, so the two builds cannot share a pass.
+# No bench override here: an .obb is an update artifact for fielded devices,
+# and there is no bench workflow that updates over USB.
 bundle:
+	@test "$(PROFILE)" = product || { \
+	  echo "refusing a '$(PROFILE)'-profile bundle: .obb is a release artifact" >&2; \
+	  exit 1; }
 	+$(MAKE) SLOT=A $(SLOT_A_BIN)
 	+$(MAKE) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \

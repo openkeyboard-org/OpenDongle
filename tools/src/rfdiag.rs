@@ -71,7 +71,10 @@ impl Page {
             );
         }
         if raw[1] != expected_page {
-            bail!("RfDiag: asked for page {expected_page}, got page {}", raw[1]);
+            bail!(
+                "RfDiag: asked for page {expected_page}, got page {}",
+                raw[1]
+            );
         }
         Ok(Self { id: raw[1], raw })
     }
@@ -489,8 +492,15 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
             }
             2 | 3 => {
-                let names: &[&str] = if p.id == 2 { &PAGE2_NAMES } else { &PAGE3_NAMES };
-                out.push(format!("protocol counters {}:", if p.id == 2 { "A" } else { "B" }));
+                let names: &[&str] = if p.id == 2 {
+                    &PAGE2_NAMES
+                } else {
+                    &PAGE3_NAMES
+                };
+                out.push(format!(
+                    "protocol counters {}:",
+                    if p.id == 2 { "A" } else { "B" }
+                ));
                 let mut line = String::from("                 ");
                 for (i, n) in names.iter().enumerate() {
                     let v = le32(r, 2 + 4 * i);
@@ -499,7 +509,12 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                     } else if n.ends_with("_ticks") {
                         // Core-clock ticks; the page carries no clock, so the
                         // conversion assumes CH570's 100 MHz (CH592: 60 MHz).
-                        line.push_str(&format!(" {}={} ({:.1} us @100MHz)", n, v, f64::from(v) / 100.0));
+                        line.push_str(&format!(
+                            " {}={} ({:.1} us @100MHz)",
+                            n,
+                            v,
+                            f64::from(v) / 100.0
+                        ));
                     } else {
                         line.push_str(&format!(" {}={}", n, v));
                     }
@@ -516,7 +531,11 @@ pub fn render(pages: &[Page]) -> Vec<String> {
             4 => {
                 let now = le32(r, 14);
                 let age = |t: u32| -> String {
-                    if t == 0 { "never".to_string() } else { format!("{:.3}s ago", f64::from(now.wrapping_sub(t)) / 1.0e8) }
+                    if t == 0 {
+                        "never".to_string()
+                    } else {
+                        format!("{:.3}s ago", f64::from(now.wrapping_sub(t)) / 1.0e8)
+                    }
                 };
                 out.push("radio internals:".to_string());
                 out.push(format!(
@@ -555,11 +574,19 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                 ));
                 out.push(format!(
                     "  wakes           tmr3={} radio={} both={} tmr0={} usb={} other={}",
-                    le32(r, 18), le32(r, 22), le32(r, 26), le32(r, 30), le32(r, 34), le32(r, 38)
+                    le32(r, 18),
+                    le32(r, 22),
+                    le32(r, 26),
+                    le32(r, 30),
+                    le32(r, 34),
+                    le32(r, 38)
                 ));
                 out.push(format!(
                     "  vetoes          work={} pending={} usb={} state={}",
-                    le32(r, 42), le32(r, 46), le32(r, 50), le32(r, 54)
+                    le32(r, 42),
+                    le32(r, 46),
+                    le32(r, 50),
+                    le32(r, 54)
                 ));
                 out.push(format!(
                     "  flags           tmr0_counting={} tmr3_counting={} usb_configured={} usb_suspended={} idle_in_suspend={} debug_en={} remote_wake_armed={} exact_deadline={}",
@@ -587,7 +614,11 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                         "  halt            halts={} halted={:.1} s (avg {:.0} ms) abandoned={}",
                         halts,
                         le32(r, 56) as f64 / 32000.0,
-                        if halts > 0 { le32(r, 56) as f64 / 32.0 / halts as f64 } else { 0.0 },
+                        if halts > 0 {
+                            le32(r, 56) as f64 / 32.0 / halts as f64
+                        } else {
+                            0.0
+                        },
                         le16(r, 60)
                     ));
                 }
@@ -618,7 +649,11 @@ pub fn render(pages: &[Page]) -> Vec<String> {
                 ));
                 out.push(format!(
                     "  pb15 at boot    pu={} pd={} dir={} debug_en={}; remote-wake arms={}",
-                    pb & 0x01 != 0, pb & 0x02 != 0, pb & 0x04 != 0, pb & 0x08 != 0, le16(r, 44)
+                    pb & 0x01 != 0,
+                    pb & 0x02 != 0,
+                    pb & 0x04 != 0,
+                    pb & 0x08 != 0,
+                    le16(r, 44)
                 ));
                 out.push(format!("  raw             {}", hexsp(r, PAGE_LEN)));
             }
@@ -638,7 +673,11 @@ pub fn read_all(dev: &IapDevice) -> Result<Vec<Page>> {
     for id in 0..PAGE_COUNT {
         let response = op_rf_diag(dev, id)?
             .ok_or_else(|| anyhow::anyhow!("RfDiag page {id}: no response (timeout)"))?;
-        if id >= REQUIRED_PAGES && response.len() >= 2 && response[0] == ACK_RF_DIAG && response[1] == 0 {
+        if id >= REQUIRED_PAGES
+            && response.len() >= 2
+            && response[0] == ACK_RF_DIAG
+            && response[1] == 0
+        {
             continue; // firmware predates this page
         }
         pages.push(Page::decode(id, &response)?);
@@ -722,7 +761,11 @@ fn power_derived(prev: &[Page], cur: &[Page], dt: f64) -> Option<String> {
             "n/a (sample {dt:.1}s > {DUTY_MAX_DT_S:.0}s; idle_tsys wraps every {TSYS_WRAP_S:.1}s)"
         )
     } else {
-        let elapsed = if d(14) != 0 { f64::from(d(14)) } else { dt * TSYS_HZ };
+        let elapsed = if d(14) != 0 {
+            f64::from(d(14))
+        } else {
+            dt * TSYS_HZ
+        };
         format!("{:.1}%", 100.0 * f64::from(d(6)) / elapsed)
     };
     let radio = u64::from(d(22));
@@ -840,11 +883,19 @@ mod tests {
         let pa = Page::decode(5, &sample(1000, 0, 0, 10, 0)).unwrap();
         let pb = Page::decode(5, &sample(2000, 54_000_000, 60_000_000, 29, 1)).unwrap();
         let text = render(std::slice::from_ref(&pb)).join("\n");
-        assert!(text.contains("level=3 heartbeat_us=1000 hb_stale_drop=0"), "{text}");
+        assert!(
+            text.contains("level=3 heartbeat_us=1000 hb_stale_drop=0"),
+            "{text}"
+        );
         assert!(text.contains("tmr3_counting=true"), "{text}");
         assert!(text.contains("remote_wake_armed=true"), "{text}");
-        assert!(text.contains("wakes           tmr3=0 radio=29 both=1"), "{text}");
-        assert!(counters(std::slice::from_ref(&pb)).iter().all(|(n, _)| *n != "hal_now"));
+        assert!(
+            text.contains("wakes           tmr3=0 radio=29 both=1"),
+            "{text}"
+        );
+        assert!(counters(std::slice::from_ref(&pb))
+            .iter()
+            .all(|(n, _)| *n != "hal_now"));
         let r = rates(std::slice::from_ref(&pa), std::slice::from_ref(&pb), 1.0).join("\n");
         assert!(r.contains("wfe_count=1000.0"), "{r}");
         assert!(r.contains("idle_duty=90.0%"), "{r}");
@@ -853,20 +904,37 @@ mod tests {
         // would read ~30 %; the tool must say so instead of printing it.
         let pc = Page::decode(5, &sample(121_000, 6_480_000_000u64 as u32, 0, 29, 1)).unwrap();
         let r = rates(&[pa], &[pc], 120.0).join("\n");
-        assert!(r.contains("idle_duty=n/a (sample 120.0s > 60s; idle_tsys wraps every 71.6s)"), "{r}");
+        assert!(
+            r.contains("idle_duty=n/a (sample 120.0s > 60s; idle_tsys wraps every 71.6s)"),
+            "{r}"
+        );
         // Under the bound the firmware clock is the denominator even when the
         // host interval disagrees (USB latency), and a stalled clock falls
         // back to host time rather than dividing by zero.
-        let r = rates(std::slice::from_ref(&pb), &[Page::decode(5, &sample(3000, 84_000_000, 90_000_000, 29, 1)).unwrap()], 2.0).join("\n");
+        let r = rates(
+            std::slice::from_ref(&pb),
+            &[Page::decode(5, &sample(3000, 84_000_000, 90_000_000, 29, 1)).unwrap()],
+            2.0,
+        )
+        .join("\n");
         assert!(r.contains("idle_duty=100.0%"), "{r}");
-        let r = rates(std::slice::from_ref(&pb), &[Page::decode(5, &sample(3000, 114_000_000, 60_000_000, 29, 1)).unwrap()], 1.0).join("\n");
+        let r = rates(
+            std::slice::from_ref(&pb),
+            &[Page::decode(5, &sample(3000, 114_000_000, 60_000_000, 29, 1)).unwrap()],
+            1.0,
+        )
+        .join("\n");
         assert!(r.contains("idle_duty=100.0%"), "{r}");
     }
 
     #[test]
     fn remote_wake_arm_count_deltas_as_u16() {
         let with = |arms: u16| {
-            Page::decode(6, &page(6, |raw| raw[44..46].copy_from_slice(&arms.to_le_bytes()))).unwrap()
+            Page::decode(
+                6,
+                &page(6, |raw| raw[44..46].copy_from_slice(&arms.to_le_bytes())),
+            )
+            .unwrap()
         };
         assert_eq!(counter_delta("rw_arms", 65535, 0), 1);
         assert_eq!(counter_delta("rw_arms", 3, 5), 2);
@@ -886,7 +954,10 @@ mod tests {
         let text = render(&[Page::decode(6, &with(0x0020_0000)).unwrap()]).join("\n");
         assert!(text.contains("gates off"), "{text}");
         let text = render(&[Page::decode(6, &with(0x0020_0006)).unwrap()]).join("\n");
-        assert!(text.contains("gates=0x0006 (permitted subset of 0x4DF6"), "{text}");
+        assert!(
+            text.contains("gates=0x0006 (permitted subset of 0x4DF6"),
+            "{text}"
+        );
         let text = render(&[Page::decode(6, &with(0x0020_0200)).unwrap()]).join("\n");
         assert!(text.contains("RESERVED BIT GATED (mask 0x0200"), "{text}");
         let p = Page::decode(
@@ -903,16 +974,29 @@ mod tests {
         )
         .unwrap();
         let text = render(std::slice::from_ref(&p)).join("\n");
-        assert!(text.contains("heartbeat arms  deadline=11 cap=900"), "{text}");
-        assert!(text.contains("tmr0_cyc=true tmr3_cyc=true usb_transfer=false"), "{text}");
-        assert!(text.contains("pu=false pd=false dir=false debug_en=true; remote-wake arms=3"), "{text}");
+        assert!(
+            text.contains("heartbeat arms  deadline=11 cap=900"),
+            "{text}"
+        );
+        assert!(
+            text.contains("tmr0_cyc=true tmr3_cyc=true usb_transfer=false"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pu=false pd=false dir=false debug_en=true; remote-wake arms=3"),
+            "{text}"
+        );
         let c = counters(&[p]);
         assert!(c.contains(&("quiet_passes", 7)), "{c:?}");
         assert!(c.contains(&("wake_none", 2)), "{c:?}");
         assert!(c.contains(&("rw_arms", 3)), "{c:?}");
         assert!(c.contains(&("hb_arm_deadline", 11)), "{c:?}");
         assert!(c.contains(&("hb_arm_cap", 900)), "{c:?}");
-        assert!(c.iter().all(|(n, _)| !n.contains("ipr") && *n != "sleep_control"), "{c:?}");
+        assert!(
+            c.iter()
+                .all(|(n, _)| !n.contains("ipr") && *n != "sleep_control"),
+            "{c:?}"
+        );
     }
 
     #[test]

@@ -10,9 +10,9 @@
 /* N23 retained-fault contract. The first four bytes remain owned by the
  * phased startup sentinel; the versioned record begins immediately after it.
  * Keep these offsets synchronized with fault_handler.S and link.ld. */
-#define CH592_FAULT_KEEP_BASE              0x20005800
-#define CH592_FAULT_RECORD_BASE            0x20005804
-#define CH592_FAULT_KEEP_END               0x20005830
+#define CH592_FAULT_KEEP_BASE              0x20005FC0
+#define CH592_FAULT_RECORD_BASE            0x20005FC4
+#define CH592_FAULT_KEEP_END               0x20005FF0
 
 #define CH592_FAULT_MAGIC                  0x3332464E
 #define CH592_FAULT_MAGIC_INVERSE          0xCCCDB9B1

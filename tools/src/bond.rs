@@ -6,13 +6,21 @@
 use anyhow::{bail, Result};
 
 use crate::iap::{
-    check, hexsp, op_arm, op_bond_read, op_disarm, IapDevice, ACK_GETDEVINFO, ACK_OK,
+    check, hexsp, op_arm, op_bond_clear, op_bond_read, op_bond_write, op_disarm, IapDevice,
+    ACK_GETDEVINFO, ACK_OK,
 };
 
 const BOND_MAGIC: u32 = 0x444E_4F42;
-const BOND_VERSION: u8 = 1;
-const BOND_RECORD_LEN: usize = 32;
+const BOND_VERSION: u8 = 2;
+const BOND_RECORD_LEN: usize = 48;
 const ACK_BOND_READ: u8 = 0x88;
+
+const BOND_FLAG_ENC_CAPABLE: u8 = 0x01;
+const BOND_FLAG_ENC_KEY: u8 = 0x02;
+
+// BondRead validity byte (response[2]) bits.
+const BOND_READ_INVALID: u8 = 0x01;
+const BOND_READ_REDACTED: u8 = 0x02;
 
 #[derive(Debug, PartialEq, Eq)]
 struct BondRecord {
@@ -27,6 +35,10 @@ struct BondRecord {
     dongle_mac: [u8; 6],
     peer_mac: [u8; 6],
     checksum: u32,
+    // The firmware zeroes link_key in the BondRead response and sets the
+    // redacted bit; the key is never transported. This records that the device
+    // held one, for display only.
+    redacted: bool,
     raw: [u8; BOND_RECORD_LEN],
 }
 
@@ -39,8 +51,8 @@ enum BondRead {
 }
 
 impl BondRecord {
-    /// Split the 32 bytes into fields with no validation at all.
-    fn parse(raw: &[u8; BOND_RECORD_LEN]) -> Self {
+    /// Split the 48 bytes into fields with no validation at all.
+    fn parse(raw: &[u8; BOND_RECORD_LEN], redacted: bool) -> Self {
         Self {
             magic: u32::from_le_bytes(raw[0..4].try_into().unwrap()),
             version: raw[4],
@@ -51,14 +63,16 @@ impl BondRecord {
             reserved0: u16::from_le_bytes(raw[14..16].try_into().unwrap()),
             dongle_mac: raw[16..22].try_into().unwrap(),
             peer_mac: raw[22..28].try_into().unwrap(),
-            checksum: u32::from_le_bytes(raw[28..32].try_into().unwrap()),
+            checksum: u32::from_le_bytes(raw[44..48].try_into().unwrap()),
+            redacted,
             raw: *raw,
         }
     }
 
-    /// The firmware's checksum: a plain byte sum over the first 28 bytes.
+    /// The firmware's checksum: a plain byte sum over the first 44 bytes
+    /// (everything, link key included, ahead of the checksum word).
     fn computed_checksum(&self) -> u32 {
-        self.raw[..28].iter().map(|&byte| u32::from(byte)).sum()
+        self.raw[..44].iter().map(|&byte| u32::from(byte)).sum()
     }
 
     /// Cross-check a record the firmware marked valid. A failure here means
@@ -91,8 +105,8 @@ impl BondRecord {
     }
 
     /// Decode and frame-check a response; errors name the offending byte.
-    fn decode(raw: &[u8; BOND_RECORD_LEN]) -> Result<Self> {
-        let record = Self::parse(raw);
+    fn decode(raw: &[u8; BOND_RECORD_LEN], redacted: bool) -> Result<Self> {
+        let record = Self::parse(raw, redacted);
         record.validate()?;
         Ok(record)
     }
@@ -123,11 +137,15 @@ fn decode_response(response: &[u8]) -> Result<BondRead> {
     }
 
     let raw: [u8; BOND_RECORD_LEN] = response[3..3 + BOND_RECORD_LEN].try_into().unwrap();
-    match response[2] {
-        0 => Ok(BondRead::Valid(BondRecord::decode(&raw)?)),
-        1 => Ok(BondRead::Invalid(BondRecord::parse(&raw))),
-        status => bail!("BondRead: unknown validity status 0x{status:02X}"),
+    let status = response[2];
+    if status & !(BOND_READ_INVALID | BOND_READ_REDACTED) != 0 {
+        bail!("BondRead: unknown validity status 0x{status:02X}");
     }
+    let redacted = status & BOND_READ_REDACTED != 0;
+    if status & BOND_READ_INVALID != 0 {
+        return Ok(BondRead::Invalid(BondRecord::parse(&raw, redacted)));
+    }
+    Ok(BondRead::Valid(BondRecord::decode(&raw, redacted)?))
 }
 
 /// Colon-separated upper-case hex for a 6-byte MAC.
@@ -136,6 +154,18 @@ fn format_mac(mac: &[u8; 6]) -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// The record's bytes for display, with the link-key field masked. The
+/// firmware already zeroes it; this is so a key can never reach a terminal
+/// or a log through this tool even if a device does not.
+fn raw_without_key(raw: &[u8; BOND_RECORD_LEN]) -> String {
+    let mut shown = *raw;
+    shown[28..44].fill(0);
+    format!(
+        "{} (link key bytes 28..43 masked)",
+        hexsp(&shown, shown.len())
+    )
 }
 
 /// `line`: see the call sites; part of the diagnostics readout.
@@ -207,13 +237,34 @@ fn render_bond(read: &BondRead) -> Vec<String> {
                     }
                 ),
             ));
-            lines.push(line("raw", hexsp(&record.raw, record.raw.len())));
+            lines.push(line("raw", raw_without_key(&record.raw)));
         }
         BondRead::Valid(record) => {
             lines.push(line("valid", "yes"));
             lines.push(line("magic", format!("0x{:08X}", record.magic)));
             lines.push(line("format", record.version));
             lines.push(line("flags", format!("0x{:02X}", record.flags)));
+            let capable = record.flags & BOND_FLAG_ENC_CAPABLE != 0;
+            let has_key = record.flags & BOND_FLAG_ENC_KEY != 0;
+            lines.push(line(
+                "encryption",
+                match (capable, has_key) {
+                    (true, true) => "active (capable + key)",
+                    (true, false) => "off (capable, no key)",
+                    (false, true) => "off (key, peer not capable)",
+                    (false, false) => "off (plaintext)",
+                },
+            ));
+            if has_key {
+                lines.push(line(
+                    "link key",
+                    if record.redacted {
+                        "present (redacted)"
+                    } else {
+                        "present"
+                    },
+                ));
+            }
             lines.push(line("session AA", format!("0x{:08X}", record.session_aa)));
             lines.push(ticks_line("interval", record.conn_interval));
             lines.push(ticks_line("timeout", record.conn_timeout));
@@ -231,7 +282,7 @@ fn render_bond(read: &BondRead) -> Vec<String> {
                 "checksum",
                 format!("0x{:08X} (valid)", record.checksum),
             ));
-            lines.push(line("raw", hexsp(&record.raw, record.raw.len())));
+            lines.push(line("raw", raw_without_key(&record.raw)));
         }
     }
     lines
@@ -265,23 +316,142 @@ pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
     Ok(())
 }
 
+/// Erase the stored bond. The firmware verifies the erase and then refuses to
+/// accept a new pair until it is reset, so the operator must replug the dongle;
+/// after that it stays in pairing until a keyboard pairs.
+pub fn clear_bond(dev: &IapDevice) -> Result<()> {
+    // From the moment ARM is sent the session may be armed, even if its reply
+    // is lost: every exit below goes through the disarm.
+    let armed = op_arm(dev).and_then(|arm| check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None));
+    let reply = match armed {
+        Ok(()) => op_bond_clear(dev),
+        Err(e) => Err(e),
+    };
+    // The disarm reply after a clear has been seen as a status frame rather
+    // than the usual ack, so only a transport failure is reported.
+    if op_disarm(dev).is_err() {
+        eprintln!(
+            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
+        );
+    }
+    let reply = reply?.ok_or_else(|| anyhow::anyhow!("BondClear: no response (timeout)"))?;
+    if reply.len() < 3 || reply[0] != ACK_OK {
+        bail!("BondClear: unexpected reply; raw={}", hexsp(&reply, 8));
+    }
+    if reply[2] != 0 {
+        bail!("BondClear failed: status 0x{:02X}", reply[2]);
+    }
+    println!("bond erased and verified; replug the dongle, then pair (it stays in pairing until a keyboard pairs)");
+    Ok(())
+}
+
+/// Parse a 16-byte link key from 32 hex characters, refusing the two
+/// erased-flash patterns the firmware also refuses.
+pub fn parse_link_key(text: &str) -> Result<[u8; 16]> {
+    let text = text.trim();
+    if text.len() != 32 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("link key must be exactly 32 hex characters (16 bytes)");
+    }
+    let mut key = [0u8; 16];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap();
+    }
+    if key.iter().all(|&b| b == 0x00) || key.iter().all(|&b| b == 0xFF) {
+        bail!("all-zero and all-0xFF keys are erased-flash patterns; refused");
+    }
+    Ok(key)
+}
+
+/// The record to write back: the record as read, with the key installed, the
+/// key flag set and the checksum recomputed. Refuses a bond whose keyboard
+/// never advertised encryption: a key there would stay inert, and the
+/// firmware keeps such a bond plaintext by design.
+fn record_with_link_key(
+    raw: &[u8; BOND_RECORD_LEN],
+    key: &[u8; 16],
+) -> Result<[u8; BOND_RECORD_LEN]> {
+    if raw[5] & BOND_FLAG_ENC_CAPABLE == 0 {
+        bail!(
+            "this bond's keyboard did not advertise link encryption at pairing (flags 0x{:02X}); \
+             pair an encryption-capable keyboard first",
+            raw[5]
+        );
+    }
+    let mut out = *raw;
+    out[5] |= BOND_FLAG_ENC_KEY;
+    out[28..44].copy_from_slice(key);
+    let checksum: u32 = out[..44].iter().map(|&byte| u32::from(byte)).sum();
+    out[44..48].copy_from_slice(&checksum.to_le_bytes());
+    Ok(out)
+}
+
+/// BENCH: install a link key on the stored bond over USB. There is no on-air
+/// key establishment yet, so both ends are handed the same key out of band;
+/// this is the receiver half. The device activates it live.
+pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
+    // From the moment ARM is sent the session may be armed, even if its reply
+    // is lost: every exit below goes through the disarm.
+    let outcome = (|| -> Result<u8> {
+        let arm = op_arm(dev)?;
+        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
+        let response =
+            op_bond_read(dev)?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
+        let record = match decode_response(&response)? {
+            BondRead::Valid(record) => record,
+            BondRead::Invalid(_) => bail!("no valid bond: pair the keyboard before provisioning"),
+        };
+        let wanted = record_with_link_key(&record.raw, key)?;
+        let reply = op_bond_write(dev, &wanted)?
+            .ok_or_else(|| anyhow::anyhow!("BondWrite: no response (timeout)"))?;
+        if reply.len() < 3 || reply[0] != ACK_OK {
+            bail!("BondWrite: unexpected reply; raw={}", hexsp(&reply, 8));
+        }
+        Ok(reply[2])
+    })();
+    if op_disarm(dev).is_err() {
+        eprintln!(
+            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
+        );
+    }
+
+    match outcome? {
+        0x00 => {
+            println!("link key written, verified and active");
+            Ok(())
+        }
+        0xB5 => {
+            println!("link key written and verified; activation deferred (reconnect or replug the dongle)");
+            Ok(())
+        }
+        0xB2 => bail!("BondWrite refused: record semantically invalid (0xB2)"),
+        0xB3 => bail!("BondWrite refused: key/flag form (0xB3)"),
+        0xB4 => bail!("BondWrite failed: stored record did not verify (0xB4)"),
+        status => bail!("BondWrite failed: status 0x{status:02X}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn valid_record() -> [u8; BOND_RECORD_LEN] {
+    fn record_with_flags(flags: u8) -> [u8; BOND_RECORD_LEN] {
         let mut raw = [0u8; BOND_RECORD_LEN];
         raw[0..4].copy_from_slice(&BOND_MAGIC.to_le_bytes());
         raw[4] = BOND_VERSION;
-        raw[5] = 0x02;
+        raw[5] = flags;
         raw[6..8].copy_from_slice(&28u16.to_le_bytes());
         raw[8..12].copy_from_slice(&0xAC12_34CEu32.to_le_bytes());
         raw[12..14].copy_from_slice(&600u16.to_le_bytes());
         raw[16..22].copy_from_slice(&[0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]);
         raw[22..28].copy_from_slice(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
-        let checksum: u32 = raw[..28].iter().map(|&byte| u32::from(byte)).sum();
-        raw[28..32].copy_from_slice(&checksum.to_le_bytes());
+        // link_key (raw[28..44]) left zero: matches a redacted-view checksum.
+        let checksum: u32 = raw[..44].iter().map(|&byte| u32::from(byte)).sum();
+        raw[44..48].copy_from_slice(&checksum.to_le_bytes());
         raw
+    }
+
+    fn valid_record() -> [u8; BOND_RECORD_LEN] {
+        record_with_flags(0x00)
     }
 
     fn response(status: u8, raw: &[u8; BOND_RECORD_LEN]) -> Vec<u8> {
@@ -300,6 +470,7 @@ mod tests {
         let BondRead::Valid(record) = decode_response(&response(0, &raw)).unwrap() else {
             panic!("expected valid record");
         };
+        assert_eq!(record.version, 2);
         assert_eq!(record.magic, BOND_MAGIC);
         assert_eq!(record.session_aa, 0xAC12_34CE);
         assert_eq!(record.conn_interval, 28);
@@ -307,7 +478,32 @@ mod tests {
         assert_eq!(record.peer_mac, [0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
         assert_eq!(record.dongle_mac, [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5]);
         assert_eq!(format_mac(&record.peer_mac), "10:20:30:40:50:60");
+        assert!(!record.redacted);
         assert_eq!(record.raw, raw);
+    }
+
+    #[test]
+    fn decodes_redacted_encrypted_response() {
+        // ENC_CAPABLE | ENC_KEY, key zeroed by the firmware, redacted bit set.
+        let raw = record_with_flags(BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+        let reply = response(BOND_READ_REDACTED, &raw);
+        let BondRead::Valid(record) = decode_response(&reply).unwrap() else {
+            panic!("expected valid record");
+        };
+        assert!(record.redacted);
+        assert_eq!(record.flags, BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+        let text = render_bond(&decode_response(&reply).unwrap()).join(
+            "
+",
+        );
+        assert!(
+            text.contains("encryption      active (capable + key)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("link key        present (redacted)"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -328,7 +524,7 @@ mod tests {
         assert!(decode_response(&bad).is_err());
 
         let mut unknown_status = response(0, &valid_record());
-        unknown_status[2] = 2;
+        unknown_status[2] = 4;
         assert!(decode_response(&unknown_status).is_err());
     }
 
@@ -337,8 +533,8 @@ mod tests {
         let text = rendered(&response(0, &valid_record()));
         assert!(text.contains("valid           yes"), "{text}");
         assert!(text.contains("magic           0x444E4F42"), "{text}");
-        assert!(text.contains("format          1"), "{text}");
-        assert!(text.contains("flags           0x02"), "{text}");
+        assert!(text.contains("format          2"), "{text}");
+        assert!(text.contains("flags           0x00"), "{text}");
         assert!(text.contains("session AA      0xAC1234CE"), "{text}");
         assert!(
             text.contains("interval        28 ticks (0.875 ms)"),
@@ -366,8 +562,8 @@ mod tests {
     fn zero_dongle_mac_means_factory_mac() {
         let mut raw = valid_record();
         raw[16..22].fill(0);
-        let checksum: u32 = raw[..28].iter().map(|&byte| u32::from(byte)).sum();
-        raw[28..32].copy_from_slice(&checksum.to_le_bytes());
+        let checksum: u32 = raw[..44].iter().map(|&byte| u32::from(byte)).sum();
+        raw[44..48].copy_from_slice(&checksum.to_le_bytes());
         let text = rendered(&response(0, &raw));
         assert!(
             text.contains("dongle MAC      (none: factory MAC in use)"),
@@ -382,7 +578,7 @@ mod tests {
     fn invalid_record_renders_best_effort_fields() {
         let mut raw = valid_record();
         raw[0] = 0x41; // magic corrupted: "AOND"
-        raw[28..32].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        raw[44..48].copy_from_slice(&0x1234_5678u32.to_le_bytes());
         let text = rendered(&response(1, &raw));
         assert!(
             text.contains("valid           no (not present, invalid, or NV read failed)"),
@@ -393,14 +589,14 @@ mod tests {
             text.contains("magic           0x444E4F41 (expected 0x444E4F42)"),
             "{text}"
         );
-        assert!(text.contains("format          1 (expected 1)"), "{text}");
-        assert!(text.contains("flags           0x02"), "{text}");
+        assert!(text.contains("format          2 (expected 2)"), "{text}");
+        assert!(text.contains("flags           0x00"), "{text}");
         assert!(text.contains("interval        28 ticks"), "{text}");
         assert!(text.contains("session AA      0xAC1234CE"), "{text}");
         assert!(text.contains("timeout         600 ticks"), "{text}");
         assert!(text.contains("dongle MAC      A0:A1:A2:A3:A4:A5"), "{text}");
         assert!(text.contains("keyboard MAC    10:20:30:40:50:60"), "{text}");
-        let computed: u32 = raw[..28].iter().map(|&byte| u32::from(byte)).sum();
+        let computed: u32 = raw[..44].iter().map(|&byte| u32::from(byte)).sum();
         assert!(
             text.contains(&format!(
                 "checksum        stored 0x12345678 computed 0x{computed:08X} (mismatch)"
@@ -435,9 +631,30 @@ mod tests {
             text.contains("checksum        stored 0x00000000 computed 0x00000000 (match)"),
             "{text}"
         );
-        assert!(text.ends_with(&format!("  raw             {}", hexsp(&raw, raw.len()))));
+        assert!(text.ends_with(&format!(
+            "  raw             {} (link key bytes 28..43 masked)",
+            hexsp(&raw, raw.len())
+        )));
 
         let erased = rendered(&response(1, &[0xFF; BOND_RECORD_LEN]));
         assert!(!erased.contains("may indicate"), "{erased}");
+    }
+
+    #[test]
+    fn link_key_parsing_and_record_update() {
+        assert!(parse_link_key("00").is_err());
+        assert!(parse_link_key(&"0".repeat(32)).is_err());
+        assert!(parse_link_key(&"f".repeat(32)).is_err());
+        let key = parse_link_key("000102030405060708090a0b0c0d0e0f").unwrap();
+        assert_eq!(key[15], 0x0F);
+
+        // Not capable: refused.
+        assert!(record_with_link_key(&record_with_flags(0x00), &key).is_err());
+
+        let out = record_with_link_key(&record_with_flags(BOND_FLAG_ENC_CAPABLE), &key).unwrap();
+        assert_eq!(out[5], BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
+        assert_eq!(&out[28..44], &key);
+        let checksum: u32 = out[..44].iter().map(|&byte| u32::from(byte)).sum();
+        assert_eq!(&out[44..48], &checksum.to_le_bytes());
     }
 }

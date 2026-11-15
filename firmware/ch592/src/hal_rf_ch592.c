@@ -27,6 +27,8 @@
  */
 #include "CONFIG.h"
 #include "hal_rf_ch592.h"
+#include "dongle_target.h"   /* RF_CRYPT_DIAG_PREV_SESSION (before rf_crypt.h) */
+#include "rf_crypt.h"        /* rf_crypt_in_aes / rf_crypt_bb_during_aes */
 
 /* Mirrors the rf_task.c values exactly (PROTOCOL.md RF PHY parameters). */
 #define HAL_RF_CH592_CRC_INIT  0x555555
@@ -50,7 +52,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf);
  * written by the callback only (one context); the arm and shut counters are
  * reached from the task AND from the IRQ-tail sink, so those increments are
  * single-instruction AMOs (amoadd.w) rather than load/add/store, which the
- * tail could split (codex review). */
+ * tail could split. */
 #define RF_DIAG_INC(field)  ((void)__atomic_fetch_add(&rf_diag.field, 1u, __ATOMIC_RELAXED))
 static hal_rf_diag_t rf_diag = { .last_rx_rc = 0xFFu, .last_tx_rc = 0xFFu, .last_shut_rc = 0xFFu };
 
@@ -155,6 +157,14 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     hal_rf_event_t ev;
     uint8_t len = 0u;
 
+#if RF_CRYPT_DIAG_PREV_SESSION
+    /* Bench: this callback preempts the TMOS task, so it can land inside
+     * rf_crypt_rx()'s CCM window (the executor sets the flag around the
+     * call). The vendor's IRQ path reads/clears AES_STA; correlate. */
+    if (rf_crypt_in_aes) {
+        rf_crypt_bb_during_aes++;
+    }
+#endif
     if (rxBuf) {
         rf_last_rx_frame = rxBuf;
     }

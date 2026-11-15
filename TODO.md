@@ -6,6 +6,31 @@ validation. Anything here that touches a firmware source, a linker script, or
 `dongle_image_id.py` / `finalize_image.py` changes the compiled build id, so it
 should land together with a re-run of the hardware matrix and re-pinned digests.
 
+## Fixed in source, awaiting the next hardware matrix
+
+The five defect entries this file used to carry in full are fixed on the
+`em-m2-robustness` / `em-ccm-bench-verify` branches (their analyses live in
+the fixing commits and in `docs/reviews/2026-08-16-review.md`):
+
+- **EP6 OUT permanent NAK** — the ISR now re-ACKs when nothing was latched
+  and evaluates the toggle from the already-taken status sample.
+- **CH570 26-bit one-shot truncation** — `st_rearm()` clamps to
+  `ST_MAX_DELTA` and re-arms to the absolute deadline; the invariant is
+  `st_armed_delta` == the value written to `R32_TMR_CNT_END`.
+- **Suspend replay of mouse/consumer** — the suspend gate NAKs EP2/EP3 with
+  the same T_RES-only mask as EP1.
+- **CLEAR_FEATURE(ENDPOINT_HALT) direction** — wIndex bit 7 is decoded; EP6
+  OUT resets its own half; nonexistent pairs STALL.
+- **CH570 bond-persist teardown-before-validate** — the semantic check is
+  hoisted above the radio teardown, so an invalid record returns before any
+  radio state changes.
+
+Also fixed en route (the M1 batch): the single-slot CH570 HID buffer became
+per-type slots with mouse-delta accumulation, the pre-verify sink counters
+moved behind the bench profile, and BondWrite gained readback verification
+plus live activation. All of it still needs the hardware matrix re-run and
+digest re-pin the preamble demands before any of these branches ship.
+
 ## Fixed 2026-09-09: EP6 OUT could be left NAKed, wedging the vendor HID interface
 
 `USB_IRQHandler`'s EP6 OUT case latched an IAP packet only on `TOG_OK` with nothing
@@ -90,7 +115,7 @@ completes both stages long before either bound.
 the main-loop rate measured by the diag page (~44 k passes/s), and say so in
 the comment.
 
-*Found by codex during the review of the IAP `0x92` RF diagnostics page,
+*Found during the review of the IAP `0x92` RF diagnostics page,
 confirmed by the page's own readout.*
 
 ## Defect: CH570 one-shot arms wider than 26 bits are silently truncated
@@ -150,7 +175,7 @@ current code breaks.
 hardware matrix and re-pin the digests. Worth adding a bench case that forces a
 link loss on CH570 and measures the reacquire watchdog against a wall clock.
 
-*Found by codex during the import review; confirmed by reading the SDK register
+*Found during the import review; confirmed by reading the SDK register
 definition, the tick constants, and the cancel-then-arm ordering in
 `rf_send_keys_up_on_link_loss()`.*
 ## Hazard: the IN handlers fight the hardware toggle, and the obvious fix is not safe
@@ -189,24 +214,6 @@ carry the manual XOR, but their bus-reset handler re-arms the endpoints
 *without* `AUTO_TOG`, so in vendor code the two disciplines never coexist. This
 firmware re-applies `AUTO_TOG` on every bus reset, so here they do.
 
-## Defect: CLEAR_FEATURE(ENDPOINT_HALT) ignores the direction bit
-
-**Where:** `firmware/common/src/usb_device.c`, the `CLEAR_FEATURE` handler —
-`wIndex` is masked with `0x0F`, discarding bit 7.
-
-The switch therefore always clears the **IN** half of the named endpoint. EP6 is
-bidirectional — `R8_UEP567_MOD` enables both TX and RX and the descriptor
-declares OUT endpoint `0x06` — so a host clearing a halt on EP6 **OUT** resets
-the IN half instead: wrong endpoint direction reset, and the OUT half left as it
-was.
-
-**Reachability is low.** No in-box HID class driver issues this request against
-this device, and the maintenance path reaches EP6 through hidraw rather than a
-class driver. It needs a host that deliberately halts and clears an endpoint.
-
-**Fix:** decode bit 7 of `wIndex` and act on the matching half. Changes firmware
-bytes, so it lands with a re-validation.
-
 ## Hygiene: EP0 accepts malformed control transfers instead of stalling
 
 **Where:** `firmware/common/src/usb_device.c`, the standard-request switch.
@@ -238,6 +245,65 @@ opportunistic rather than systematic — `GET_DESCRIPTOR`, `GET_REPORT`,
 `GET_IDLE` and `GET_PROTOCOL` omit it too — so the tidy fix is a single
 direction check at the dispatch point rather than four scattered ones.
 
+## Defect: the hop repeat-correction can forward-date its own anchor and then overflow 32 bits
+
+**Where:** `firmware/common/include/rf_protocol.h`, `rf_proto_hop_step()` — the
+`sum = h->last + elapsed` computation inside the repeat-correction branch, and
+the anchor write below it.
+
+**Not the finding as filed.** CodeRabbit asked for `h->last` to be reduced
+modulo `RF_PROTO_HOP_WRAP` before the addition. That is a no-op: `h->last` was
+overwritten with `now` a few lines earlier and `rf_hop_read()` already reduces
+`now` mod WRAP, so it is always in range. The overflow is real, but it arrives
+by a route the finding does not describe.
+
+**The actual mechanism.** The branch fires whenever `step = elapsed / interval`
+is *any* multiple of 5, not only zero. For `step == 0` it back-dates the anchor,
+which is the documented intent. For `step >= 5` the same expression *forward*-
+dates it: `h->last` lands `elapsed - interval` ticks **ahead** of the hop clock.
+`rf_proto_hop_delta()` cannot tell a future-dated anchor from a genuine wrap, so
+the next poll takes the wrap arm and returns an `elapsed` near WRAP (~2.83e9).
+If that poll's `step` is also a multiple of 5, the branch is re-entered with
+`sum = now + elapsed` ~5.3e9, which truncates: the single `if (sum >= WRAP)`
+reduction is skipped because the truncated value is already below WRAP, and the
+anchor lands low by exactly `2^32 - WRAP` = 1,463,812,096 ticks.
+
+**Reachability: ordinary operation, no attacker.** Reproduced by transcribing
+the function and driving it with realistic poll schedules. A brute-force sweep
+over gap pairs at the live interval of 28 ticks found 2996 overflowing
+schedules. The smallest trigger is a **5-slot coalesced poll gap — 140 ticks,
+4.38 ms** — followed by a normal-cadence poll. Poll-event coalescing is
+explicitly designed for and documented as benign elsewhere in `rf_task.c`, so
+this is not an exotic input. The one real precondition is that the hop clock be
+past `2^32 - WRAP`, i.e. more than 12.7 hours into its 24.576-hour cycle, which
+is true roughly 48% of the time.
+
+Note this is *not* the "12.7 hours between two consecutive polls" route, which
+is genuinely unreachable — supervision tears the link down and re-anchors long
+before that. Checking only that route is what made this look like a false
+positive on the first pass.
+
+**Impact.** Bounded. The overflowing poll itself still transmits on a
+well-defined channel (`idx` is computed before the sum arithmetic) and the
+anchor stays within range, so nothing is corrupted and the device does not
+brick. What follows is a mis-anchored hop clock: channel selection diverges from
+the keyboard's until supervision notices the dead link and re-seeds the anchor.
+The observable symptom is a brief deaf patch, not a failure needing a replug.
+
+**Worth knowing before "fixing" it.** The forward-dating comes from faithfully
+reproducing the stock dongle's formula, and stock is 32-bit with the same wrap
+constant, so the stock firmware has the same overflow. Any change here diverges
+from the recovered behaviour that the pairing and connected paths were validated
+against. Correcting the arithmetic to 64-bit — or reducing `sum` mod WRAP
+properly instead of subtracting once — should be a deliberate decision to
+deviate, taken with a bench campaign, not a quiet cleanup.
+
+**Before merging a fix:** it changes firmware bytes on both chips, so re-run the
+hardware matrix and re-pin the digests.
+
+*Filed by CodeRabbit with the wrong mechanism and the wrong remedy; the real
+route was found by adversarial review and then reproduced independently.*
+
 ## Fixed 2026-09-09: the connected hop lost the keyboard after a coalesced gap of 5k poll slots
 
 **Where:** `firmware/common/include/rf_protocol.h`, `rf_proto_hop_step()`; the seed
@@ -256,7 +322,7 @@ takes the wrap arm and hops two slots, and supervision tears the link down.
 Masking the dongle's interrupts for a whole number of poll slots on a live link
 (`opendongle --rf-poke 40+N`) dropped the link every time at 5 and 10 slots and
 never at 1-4, 6-8 or 12. Restricting the correction to step 0 only moved the
-failure into the remainder band after a 5k gap (codex counterexample: 5 slots +
+failure into the remainder band after a 5k gap (counterexample: 5 slots +
 15..27 ticks).
 
 **The fix is a model, not a patch.** The dongle now keeps the keyboard's model: an
@@ -289,7 +355,7 @@ slots, `hal_rf_shut()`) ran before `bond_record_semantic_valid()`, whose early r
 then left the radio shut with no timer and no re-arm driver, deaf until a reset. Latent
 (the producer cannot build a record the check rejects today), CH570 only. The check is
 now hoisted above the teardown, as the entry's fix sketch said, so an invalid record
-returns before any radio state changes; found again by the codex pass on the camp
+returns before any radio state changes; found again by the review pass on the camp
 watchdog, which the teardown also cancelled.
 
 ## Follow-up: bench case for the mouse/consumer suspend replay fix (needs a controller harness)
@@ -297,7 +363,7 @@ watchdog, which the teardown also cancelled.
 **What was fixed without it:** `USB_SuspendResume` now NAKs EP2/EP3 at suspend
 and `USB_PollEP6` reconciles them on resume (mouse all-up, consumer no-key,
 coordinated with fresh reports through `usb_reconcile_ep2/ep3`). The change was
-reviewed (three codex passes to Merge) and regression-tested on the keyboard
+reviewed (three review passes to Merge) and regression-tested on the keyboard
 path (host asleep 60 s, link intact, 0 lapses, the resume flush executed against
 a real host), but the defect scenario itself, a mouse or consumer press armed
 when SOF stops, has not been reproduced or shown fixed on hardware.
@@ -377,6 +443,19 @@ the build id for no functional gain, or expands scope beyond the import:
   guarantee is explicit and matches CH570, or widen the early-out to cover it.
   Worth settling because as written it invites exactly the review finding it
   received.
+- **The hop formula is described as "host-tested" and this tree has no such
+  test.** The wording appears twice — in `rf_task.c` at the call site and again
+  in `rf_protocol.h` — and it was true where the code came from: the covering
+  test lives in the private reverse-engineering tree and was not part of this
+  import. The host suite has since grown to fifteen-plus modules (including
+  `test_rf_crypt.py` and `test_rf_negotiation.py`), but a whole-tree grep for
+  `hop_step` still finds only the definition and its single call site. Two options, and the second is better:
+  drop the clause, or port a host test for `rf_proto_hop_step()`. Porting it is
+  worth real effort — the adversarial review above turned up a reachable
+  overflow in exactly this function, and a table-driven test pinning the stock
+  vectors would have caught the regression that a "fix" here could introduce.
+  The comments are in build-id-bearing files; a new test file is not, so the
+  test can land first and independently.
 - **Done 2026-09-09: the hop formula's "host-tested" clause is true again.**
   `firmware/tests/test_hop_model.py` compiles `rf_proto_hop_step()` with the host
   compiler behind a stdin driver and pins the seed contract, the steady grid, every
@@ -398,15 +477,6 @@ the build id for no functional gain, or expands scope beyond the import:
   safe — the gate simply fails closed — but the reasoning written down is not
   the reasoning the code relies on. (`USB_ClearPendingKeyboard()` is a second
   clearer of the stash, called on RF link loss; worth naming in the same edit.)
-- **`platform_ch592.c` — two small hardenings around `dongle_nv_is_erased()`.**
-  The reported failure (that the 32-byte cap makes every bond clear report
-  failure) does not occur: `bond_record_t` does not exceed the cap. But nothing
-  *pins* that relationship, so a future field added to the record would break
-  bond-clear verification silently — a `_Static_assert` tying
-  `sizeof(bond_record_t)` to the capacity both chips assume is cheap insurance.
-  Separately, the local buffer would be better with an explicit
-  `__attribute__((aligned(4)))`: it happens to be aligned today, which is not
-  the same as being guaranteed.
 - **`usb_descriptors.c` — record the IF1 mouse descriptor's provenance.** The
   button usage range declares three usages against a report count of five, which
   is genuinely non-conformant and will be re-reported by every future reviewer.
@@ -440,7 +510,7 @@ the build id for no functional gain, or expands scope beyond the import:
     addresses that no longer match the link: the stack starts at `0x20005FF0`
     (not `0x20006000`), `_susrstack` is `0x200060D0`, and `_ebss` is
     `0x20004360` (not `0x20003718`). The claim the comment is making — that the
-    `0x20005800` sentinel sits above `.bss` and survives the clear — is still
+    `0x20005FC0` sentinel sits above `.bss` and survives the clear — is still
     true, and `.fault_keep` is its own `NOLOAD` section, so this is an accuracy
     fix rather than a defect.
 - **The OpenBoot checkout is the one pinned input nothing validates.** Its bytes
@@ -471,6 +541,32 @@ the build id for no functional gain, or expands scope beyond the import:
   the link fail outright. CH570 has no equivalent.
   **Do not "simplify" by substituting `_vector_base` for the `mtvec` literal** —
   `0x20000003` carries the mode bits, and a bare symbol would drop them.
+
+## Tools
+
+- **`opendongle` cannot clear a bond.** The firmware implements IAP `0x89`
+  BondClear (armed session only; a firmware-side erase with readback, then
+  `RF_TombstoneBond()`), and `firmware/BOOT.md` names it as the way back into
+  pairing for a bonded dongle, but `tools/opendongle` has no flag that sends it.
+  Without it, re-pairing a bonded dongle means hitting the ~3 s boot window or
+  hand-framing IAP reports. Add `--clear-bond`: handshake, arm (GetDevInfo arg
+  1), `0x89`, require `ACK_OK` with status 0, then disarm. The tombstone blocks
+  accepting a new pair until reset, so the flag should also reset the dongle,
+  or tell the operator to replug it, and confirm `connection pairing` with
+  `--info`. Two things seen on 2026-10-04 with a hand-framed sequence against a
+  `main` build (0.96.16, CH592): BondClear answered `0f 01 00` (success), but
+  the GetDevInfo(arg 0) disarm that followed answered `0f 01 f3` rather than
+  the `04` ack the tool's disarm check expects. Settle which reply is correct
+  before the flag relies on it.
+- **`opendongle --info` fails on a bond v1 dongle.** `tools/src/bond.rs`
+  hard-codes `BOND_RECORD_LEN` (32 on `main`, 48 on `em-m2-robustness`, where
+  bond v2 appends `link_key[16]` before the checksum), so a v2-built tool
+  pointed at a `main` dongle stops with `BondRead: record length 32 (expected
+  48)`. Seen on 2026-10-04 against a `main` build (0.96.16, CH592). The v2
+  firmware keeps every v1 offset and migrates a v1 record in place, so mixed
+  versions are expected in the field. Decode by the reply's length and version
+  byte (v1 = 32, v2 = 48) and report the bond rather than failing the whole
+  status read.
 
 ## Project
 

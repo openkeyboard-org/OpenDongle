@@ -72,6 +72,77 @@
  * CH570 build can share it. rf_task.c #errors if this is undefined. */
 #define RF_CONFIRM_BEFORE_PERSIST 1
 
+/* Optional AES-128-CCM link decryption (rf_crypt). Negotiated per bond and inert
+ * until a key is provisioned, so it does not change plaintext behaviour. */
+#define DONGLE_RF_CRYPT 1
+
+/* Negotiate the link key over the air after pairing (X25519, rf_task.c
+ * "link-key exchange"), instead of having a host provision it. Needs
+ * DONGLE_RF_CRYPT. */
+#ifndef DONGLE_KEX
+#define DONGLE_KEX 1
+#endif
+
+/* PRODUCT-path stale-output-abort hardening (rf_crypt.h has the full story):
+ * the CH592 AES engine shares the BLE baseband's register cluster and
+ * silently returns the previous block's output when a BLEB interrupt aborts
+ * a block -- the mechanism behind the 2026-08 12.3% CCM MAC-failure
+ * campaign. Both profiles carry it: the RX verify and the announce seal run
+ * in TMOS task context, squarely preemptible by the radio. */
+#define RF_CRYPT_AES_DOUBLE 1
+#define RF_CRYPT_BOOT_KAT   1
+
+/* Build profile, injected by the Makefile: PROFILE=bench passes
+ * -DDONGLE_BENCH_PROFILE=1; the product profile leaves it unset. Everything
+ * bench-only in this target lives under the #if below, so a product build
+ * cannot carry any of it by accident -- and rf_task.c #errors if the force
+ * key is ever seen outside this profile. */
+#ifndef DONGLE_BENCH_PROFILE
+#define DONGLE_BENCH_PROFILE 0
+#endif
+
+#if DONGLE_BENCH_PROFILE
+
+/* Bench diagnostic: on a MAC failure, retry the CCM under the session id the
+ * last mint displaced (see rf_crypt.h). CH592 only -- it adds a scratch buffer
+ * and a second decrypt to rf_crypt_rx(), and the CH570 build has ~20 bytes of
+ * stack-floor margin. Diagnostic only; it cannot rescue a frame.
+ * Also gates (rf_crypt.h): the same-session re-verify (mac_same_ok /
+ * same_differs), the first-failure frame latch, the one-shot engine KAT, and
+ * the BB-interrupt-during-CCM correlator. */
+#define RF_CRYPT_DIAG_PREV_SESSION 1
+
+/* BENCH ONLY -- neither can ship, which is why they sit under the profile
+ * gate. This bench has no dongle USB (UART + SWD only), so:
+ *  - DONGLE_UART_DIAG: periodic telemetry frame on UART1 PA9 (uart_diag.c),
+ *    replacing the unreachable CMD_CRYPT_DIAG path;
+ *  - DONGLE_CRYPT_BENCH_FORCE_KEY: force link decryption ACTIVE for any valid
+ *    loaded bond with the compiled-in throwaway key below, replacing the
+ *    unreachable provision_link_key.py. The keyboard is keyed with the SAME
+ *    bytes over its 0xAE bench command:
+ *      4f70656e4b626421a55ac33c69960ff0 */
+/* Overridable: the periodic frame is 124 bytes busy-waited out of the same
+ * cooperative main loop that arms this receiver's post-poll RX. On a bench
+ * measuring RESPONSE TIMING that is not a passive observer -- with it on, an
+ * otherwise-healthy keyed link delivered ~0% of HID transitions while the same
+ * keyboard against a product-profile dongle delivered ~50%. Build with
+ * EXTRA_CFLAGS=-DDONGLE_UART_DIAG=0 for any timing measurement. */
+#ifndef DONGLE_UART_DIAG
+#define DONGLE_UART_DIAG 1
+#endif
+#define DONGLE_CRYPT_BENCH_FORCE_KEY 1
+#define DONGLE_CRYPT_BENCH_KEY_BYTES \
+    { 0x4F,0x70,0x65,0x6E,0x4B,0x62,0x64,0x21, \
+      0xA5,0x5A,0xC3,0x3C,0x69,0x96,0x0F,0xF0 }
+
+#else /* product profile */
+
+#define RF_CRYPT_DIAG_PREV_SESSION 0
+#define DONGLE_UART_DIAG 0
+/* DONGLE_CRYPT_BENCH_FORCE_KEY stays undefined; rf_crypt.h defaults it to 0. */
+
+#endif /* DONGLE_BENCH_PROFILE */
+
 /* CODEREVIEW P4 (RF-liveness parity, ported from CH570): reschedule delay for a
  * failed RF_Rx/RF_Tx arm at a terminal camp (rf_arm_retry_if_failed). Same
  * 80 x 625 us = 50 ms as CH570. A 0 would hot-spin the delayed RF_EVT_RX_RESTART

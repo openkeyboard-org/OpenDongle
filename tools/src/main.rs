@@ -14,10 +14,10 @@ mod fault;
 mod flows;
 mod hex;
 mod iap;
-mod status;
 mod rfdiag;
+mod status;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
@@ -128,6 +128,38 @@ struct Cli {
     #[arg(long, value_name = "RUNG", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag"])]
     rf_poke: Option<u8>,
 
+    /// BENCH: install this 16-byte link key (32 hex characters) on the stored
+    /// bond and activate link encryption (arms a session). The keyboard must
+    /// have advertised encryption at pairing and must be given the same key.
+    /// There is no on-air key establishment yet; do not use a real secret.
+    #[arg(long, value_name = "HEX32", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke"])]
+    provision_link_key: Option<String>,
+
+    /// Erase the stored bond (arms a session). Replug the dongle afterwards:
+    /// it accepts no new pair until reset, then stays in pairing.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key"])]
+    clear_bond: bool,
+
+    /// Print the link-encryption counters (command 0x98, product layout):
+    /// frames verified and frames dropped, by reason. Read-only, unarmed.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond"])]
+    crypt_diag: bool,
+
+    /// Give the dongle 32 bytes of entropy for its next link-key exchange
+    /// (command 0x9C). With no value the bytes come from this computer's
+    /// random number generator; a value is 64 hex characters. The dongle has
+    /// no hardware random source, so without a seed its key rests on radio
+    /// timing alone. The seed is mixed into that, never used in its place,
+    /// and is lost when the dongle is unplugged: send it after plugging the
+    /// dongle in and before pairing.
+    #[arg(long, value_name = "HEX64", num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond", "crypt_diag", "kex_bench"])]
+    kex_seed: Option<String>,
+
+    /// BENCH: time one X25519 scalar multiplication on the device (command
+    /// 0x99, KEX_BENCH firmware only). The radio is starved while it runs.
+    #[arg(long, conflicts_with_all = ["enter_bootloader", "info", "fault", "status", "diag", "rf_poke", "provision_link_key", "clear_bond", "crypt_diag"])]
+    kex_bench: bool,
+
     /// With --status or --diag: number of samples (default 1, at least 1)
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
     samples: u32,
@@ -144,9 +176,20 @@ struct Cli {
 
     /// The update image you intend to flash next. Checked against the
     /// device family (ODG2 header vs GetDevInfo) BEFORE the reboot, so a
-    /// wrong-family image is refused while the app is still running.
+    /// wrong-family image is refused while the app is still running. Read
+    /// host-side for that guard only -- it is never flashed; the artifact
+    /// OpenBoot flashes is the .obb bundle (see --bundle).
     #[arg(long, value_name = "FILE", requires = "enter_bootloader")]
     image: Option<PathBuf>,
+
+    /// The .obb update bundle to flash once the bootloader is up. Not read
+    /// by this tool: it only names the artifact in the printed `openboot
+    /// flash` next-step so that line can be copied and run as-is. A/B
+    /// updates need the bundle -- OpenBoot alternates its write target, and
+    /// a bare .bin only matches one slot by luck (firmware/BOOT.md,
+    /// "Updating: use the bundle").
+    #[arg(long, value_name = "FILE", requires = "enter_bootloader")]
+    bundle: Option<PathBuf>,
 
     /// With --enter-bootloader and no --image: reboot without the
     /// family guard (you take wrong-image risk into your own hands)
@@ -157,7 +200,16 @@ struct Cli {
 impl Cli {
     fn show_info(&self) -> bool {
         self.info
-            || (!self.enter_bootloader && !self.fault && !self.status && !self.diag && self.rf_poke.is_none())
+            || (!self.enter_bootloader
+                && !self.fault
+                && !self.status
+                && !self.diag
+                && self.rf_poke.is_none()
+                && self.provision_link_key.is_none()
+                && !self.clear_bond
+                && !self.crypt_diag
+                && !self.kex_bench
+                && self.kex_seed.is_none())
     }
 
     /// --samples/--period-ms only mean something to the two samplers.
@@ -166,7 +218,70 @@ impl Cli {
     }
 }
 
+/// Single-quote a path for the printed hand-off line. The line exists to be
+/// copied into a shell, so an unquoted path containing a space (or any other
+/// shell metacharacter) would be split into the wrong arguments by whoever
+/// pastes it. POSIX single quotes are literal apart from `'` itself, which is
+/// escaped the usual `'\''` way.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-/=:+,@".contains(&b))
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The copy-and-run `openboot flash` hand-off line. Always names the .obb
+/// bundle -- never the family-guard `--image` .bin, which is host-side input
+/// that OpenBoot must not be handed: it is slot-A-based, and OpenBoot
+/// alternates its write target, so a bare .bin is only ever right for one
+/// slot by luck (firmware/BOOT.md, "Updating: use the bundle").
+fn flash_next_step(vid: u16, pid: u16, bundle: Option<&Path>, suffix: &str) -> String {
+    let artifact = match bundle {
+        Some(p) => shell_quote(&p.display().to_string()),
+        None => "<chip>-product.obb".to_string(),
+    };
+    format!("next: openboot --vid 0x{vid:04X} --pid 0x{pid:04X} flash --force {artifact}{suffix}")
+}
+
+/// `--image` takes the flat slot-A `.bin` (or `.hex`) the family guard reads;
+/// an `.obb` bundle is a different container that load_firmware would
+/// misparse as a flat image based at 0x2000 and then family-check garbage.
+fn image_arg_is_bundle(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("obb"))
+}
+
 fn run(cli: &Cli) -> Result<ExitCode> {
+    if let Some(ipath) = &cli.image {
+        if image_arg_is_bundle(ipath) {
+            return Err(anyhow!(
+                "--image {} is an .obb bundle; the family guard needs the flat \
+                 slot-A .bin (or .hex). Pass that as --image and the bundle as \
+                 --bundle -- the bundle is what OpenBoot flashes afterwards",
+                ipath.display()
+            ));
+        }
+    }
+
+    // The mirror of the guard above. --bundle is never read here; it is only
+    // interpolated into the copy-and-run `openboot flash` line, so a .bin
+    // passed here is printed as if it were flashable. Copying that line hands
+    // OpenBoot a slot-A-based flat image while it alternates its write target,
+    // which is right for one slot by luck and wrong for the other.
+    if let Some(bpath) = &cli.bundle {
+        if !image_arg_is_bundle(bpath) {
+            return Err(anyhow!(
+                "--bundle {} is not an .obb bundle; OpenBoot needs the bundle so \
+                 it can pick the variant for the slot it is actually writing. \
+                 Pass the flat slot-A .bin as --image instead",
+                bpath.display()
+            ));
+        }
+    }
+
     let api = HidApi::new()?;
 
     // --hidraw opens whatever path it names, with no check that the node
@@ -175,7 +290,16 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // opened confirm from enumeration alone that the path is the interface the
     // selectors describe; a mismatch is a refusal, not a note. Discovered
     // devices are matched on those selectors already and are not affected.
-    if cli.fault || cli.status || cli.diag || cli.rf_poke.is_some() {
+    if cli.fault
+        || cli.status
+        || cli.diag
+        || cli.rf_poke.is_some()
+        || cli.provision_link_key.is_some()
+        || cli.clear_bond
+        || cli.crypt_diag
+        || cli.kex_bench
+        || cli.kex_seed.is_some()
+    {
         if let Some(path) = cli.hidraw.as_deref() {
             require_path_identity(&api, path, cli.vid, cli.pid, cli.interface)?;
         }
@@ -222,23 +346,18 @@ fn run(cli: &Cli) -> Result<ExitCode> {
                     }
                     // The flags are not optional: openboot defaults to its
                     // generic 1209:0001 and would not find this product. Name
-                    // the image when one was given, so the printed line can be
+                    // the bundle when one was given, so the printed line can be
                     // copied and run as-is rather than silently flashing a
                     // placeholder the user has to remember to substitute.
-                    match &cli.image {
-                        Some(path) => println!(
-                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
-                             {}  (family NOT verified)",
+                    println!(
+                        "{}",
+                        flash_next_step(
                             cli.vid,
                             cli.pid,
-                            path.display()
-                        ),
-                        None => println!(
-                            "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force \
-                             <app.bin>  (family NOT verified)",
-                            cli.vid, cli.pid
-                        ),
-                    }
+                            cli.bundle.as_deref(),
+                            "  (family NOT verified)"
+                        )
+                    );
                     return Ok(ExitCode::SUCCESS);
                 }
                 eprintln!(
@@ -271,7 +390,200 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
     if !cli.sampler_args_valid() {
-        return Err(anyhow!("--samples/--period-ms apply only to --status or --diag"));
+        return Err(anyhow!(
+            "--samples/--period-ms apply only to --status or --diag"
+        ));
+    }
+    if let Some(text) = cli.kex_seed.as_deref() {
+        let (seed, source) = if text.is_empty() {
+            let mut seed = [0u8; iap::KEX_SEED_BYTES];
+            getrandom::fill(&mut seed)
+                .map_err(|e| anyhow!("this computer's random number generator failed: {e}"))?;
+            (seed, "this computer's random number generator")
+        } else {
+            (parse_kex_seed(text)?, "the command line")
+        };
+        let r = iap::op_kex_seed(&dev, &seed)?
+            .ok_or_else(|| anyhow!("KexSeed: no response (firmware without the key exchange?)"))?;
+        if r.len() < 3 || r[0] != iap::CMD_KEX_SEED || r[1] < 1 {
+            return Err(anyhow!(
+                "KexSeed: unexpected reply; raw={}",
+                iap::hexsp(&r, 8)
+            ));
+        }
+        match r[2] {
+            0 => {}
+            1 => return Err(anyhow!("KexSeed: the dongle refused the seed's length")),
+            2 => {
+                return Err(anyhow!(
+                    "KexSeed: the dongle refused a seed whose bytes are all the same"
+                ))
+            }
+            s => return Err(anyhow!("KexSeed: status 0x{s:02X}")),
+        }
+        println!("entropy seed accepted: 32 bytes from {source}");
+        println!("it is used by the next key exchange and lost when the dongle is unplugged");
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.kex_bench {
+        let r = iap::op_kex_bench(&dev)?
+            .ok_or_else(|| anyhow!("KexBench: no response (not a KEX_BENCH build?)"))?;
+        if r.len() < 34 || r[0] != 0x99 || r[1] != 32 {
+            return Err(anyhow!(
+                "KexBench: unexpected reply; raw={}",
+                iap::hexsp(&r, 8)
+            ));
+        }
+        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        let (total, max, min, n) = (word(2), word(6), word(10), word(14));
+        let us = |cycles: u32| f64::from(cycles) / 60.0;
+        println!("x25519 on device (60 MHz, interrupts masked per step):");
+        println!("  steps           {n}");
+        println!(
+            "  total           {total} cycles ({:.1} ms)",
+            us(total) / 1000.0
+        );
+        println!("  mean step       {:.1} us", us(total) / f64::from(n));
+        println!("  longest step    {max} cycles ({:.1} us)", us(max));
+        println!("  shortest step   {min} cycles ({:.1} us)", us(min));
+        println!(
+            "  begin / finish  {:.1} us / {:.1} us",
+            us(word(26)),
+            us(word(30))
+        );
+        println!("  result[0..8]    {}", iap::hexsp(&r[18..26], 8));
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.crypt_diag {
+        let r =
+            iap::op_crypt_diag(&dev)?.ok_or_else(|| anyhow!("CryptDiag: no response (timeout)"))?;
+        if r.len() < 2
+            || r[0] != iap::CMD_CRYPT_DIAG
+            || (r[1] as usize) < 28
+            || r.len() < 2 + r[1] as usize
+        {
+            return Err(anyhow!(
+                "CryptDiag: unexpected reply; raw={}",
+                iap::hexsp(&r, 8)
+            ));
+        }
+        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+        let n = r[1] as usize;
+        println!(
+            "link encryption (payload {n} B{}):",
+            if n == 42 { ", product layout" } else { "" }
+        );
+        println!("  verified        {}", word(2));
+        const REASON: [&str; 6] = ["(ok slot)", "shape", "inactive", "mac", "replay", "engine"];
+        for (i, name) in REASON.iter().enumerate().skip(1) {
+            println!("  drop {:<11}{}", name, word(6 + 4 * i));
+        }
+        if n == 42 {
+            println!("  aes redo        {}", word(30));
+            println!("  announce retry  {}", word(34));
+            println!("  boot KAT        run={} fail={}", r[38], r[39]);
+            println!("  plaintext drop  {}", word(40));
+        }
+        // Link-key exchange counters (0x9A), where the firmware has them.
+        if let Ok(Some(k)) = dev.xfer(&iap::packet_simple(0x9A, &[]), 500) {
+            if k.len() >= 10 && k[0] == 0x9A && k[1] >= 8 {
+                const FAIL: [&str; 6] = [
+                    "none",
+                    "low-order key",
+                    "AES engine",
+                    "confirmation",
+                    "peer abort",
+                    "timeout",
+                ];
+                const STATE: [&str; 7] = [
+                    "idle",
+                    "keygen",
+                    "public keys",
+                    "shared secret",
+                    "confirm",
+                    "done",
+                    "failed",
+                ];
+                println!("key exchange:");
+                println!("  started         {}", k[2]);
+                println!("  completed       {}", k[3]);
+                println!(
+                    "  last failure    {}",
+                    FAIL.get(k[4] as usize).unwrap_or(&"?")
+                );
+                println!(
+                    "  state           {}",
+                    STATE.get(k[5] as usize).unwrap_or(&"?")
+                );
+                println!("  entropy samples {}", u16::from_le_bytes([k[6], k[7]]));
+                println!("  commit failures {}", k[8]);
+                println!("  tried this link {}", k[9]);
+                if k[1] >= 20 && k.len() >= 22 {
+                    println!("  failures        {}", k[19]);
+                    println!("  dongle x25519   phase {} count {}", k[20], k[21]);
+                    let p = &k[10..18];
+                    println!("keyboard status (frames received: {}):", k[18]);
+                    println!(
+                        "  state           {}",
+                        STATE.get(p[0] as usize).unwrap_or(&"?")
+                    );
+                    println!(
+                        "  last failure    {}",
+                        FAIL.get(p[1] as usize).unwrap_or(&"?")
+                    );
+                    println!("  candidate={} keys_ready={} dongle_confirm_ok={} dongle_pub_mask=0x{:X} dongle_conf_mask=0x{:X}",
+                        p[2] & 1, (p[2] >> 1) & 1, (p[2] >> 2) & 1, p[2] >> 4, p[6]);
+                    println!(
+                        "  x25519          phase {} count {} op {}",
+                        p[3], p[4], p[5]
+                    );
+                    println!("  sessions ok     {}", p[7]);
+                    println!(
+                        "  seeded by MCU   {}",
+                        if p[2] & 0x08 != 0 { "yes" } else { "no" }
+                    );
+                }
+                if k[1] >= 22 && k.len() >= 24 {
+                    println!("dongle entropy seed:");
+                    println!("  received        {}", k[22]);
+                    println!("  used in draws   {}", k[23] & 0x7F);
+                    println!(
+                        "  one waiting     {}",
+                        if k[23] & 0x80 != 0 { "yes" } else { "no" }
+                    );
+                }
+            }
+        }
+        // BLE library heap watermark (0x9B), measurement builds only.
+        if let Ok(Some(h)) = dev.xfer(&iap::packet_simple(0x9B, &[]), 500) {
+            if h.len() >= 30 && h[0] == 0x9B && h[1] >= 28 {
+                let w = |i: usize| u32::from_le_bytes(h[2 + 4 * i..6 + 4 * i].try_into().unwrap());
+                println!("library heap (measurement build):");
+                println!("  size            {} B", w(0));
+                println!("  untouched       {} B", w(1));
+                println!(
+                    "  highest touched {} B from the start ({} B never reached at the end)",
+                    w(2),
+                    w(0) - w(2)
+                );
+                println!("  largest gap     {} B at offset {}", w(3), w(4));
+                println!(
+                    "  after start-up  untouched {} B, highest touched {} B",
+                    w(5),
+                    w(6)
+                );
+            }
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cli.clear_bond {
+        bond::clear_bond(&dev)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+    if let Some(text) = cli.provision_link_key.as_deref() {
+        let key = bond::parse_link_key(text)?;
+        bond::provision_link_key(&dev, &key)?;
+        return Ok(ExitCode::SUCCESS);
     }
     if let Some(rung) = cli.rf_poke {
         // Armed like the bond commands: arm, poke, always disarm.
@@ -281,7 +593,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         let _ = op_disarm(&dev);
         let response = poke?.ok_or_else(|| anyhow!("RfPoke: no response (timeout)"))?;
         if response.len() < 4 || response[0] != 0x94 {
-            return Err(anyhow!("RfPoke: unexpected reply; raw={}", iap::hexsp(&response, 8)));
+            return Err(anyhow!(
+                "RfPoke: unexpected reply; raw={}",
+                iap::hexsp(&response, 8)
+            ));
         }
         let rc = response[2];
         println!(
@@ -428,7 +743,9 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     // "mine arrived" from "someone else's was already here".
     let preexisting: std::collections::BTreeSet<String> = {
         let api = HidApi::new()?;
-        openboot_paths(&api, track_vid, track_pid).into_iter().collect()
+        openboot_paths(&api, track_vid, track_pid)
+            .into_iter()
+            .collect()
     };
     // Refuse rather than warn. Not because the follow-up flash could hit the
     // wrong unit - it could not; openboot narrows by HID usage page and then
@@ -507,18 +824,10 @@ fn run(cli: &Cli) -> Result<ExitCode> {
              {:04X} usage {:02X})",
             arrived[0], cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
         );
-        match &cli.image {
-            Some(p) => println!(
-                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force {}",
-                cli.vid,
-                cli.pid,
-                p.display()
-            ),
-            None => println!(
-                "next: openboot --vid 0x{:04X} --pid 0x{:04X} flash --force <app.bin>",
-                cli.vid, cli.pid
-            ),
-        }
+        println!(
+            "{}",
+            flash_next_step(cli.vid, cli.pid, cli.bundle.as_deref(), "")
+        );
         Ok(ExitCode::SUCCESS)
     } else if arrived.len() > 1 {
         eprintln!(
@@ -539,9 +848,7 @@ fn run(cli: &Cli) -> Result<ExitCode> {
         eprintln!("         Refusing to report success: that is not the unit asked for.");
         Ok(ExitCode::from(2))
     } else if app_gone {
-        eprintln!(
-            "WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s"
-        );
+        eprintln!("WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s");
         Ok(ExitCode::from(2))
     } else {
         eprintln!("WARNING: device still present 10 s after EnterBootloader was accepted");
@@ -621,6 +928,27 @@ fn openboot_paths(api: &HidApi, vid: u16, pid: u16) -> Vec<String> {
         .collect()
 }
 
+/// 64 hex characters -> 32 bytes. The firmware refuses a seed whose bytes are
+/// all the same; refuse it here too, with a better message.
+fn parse_kex_seed(text: &str) -> Result<[u8; iap::KEX_SEED_BYTES]> {
+    let text = text.trim();
+    if text.len() != 2 * iap::KEX_SEED_BYTES || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(anyhow!(
+            "the seed must be exactly 64 hex characters (32 bytes)"
+        ));
+    }
+    let mut seed = [0u8; iap::KEX_SEED_BYTES];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap();
+    }
+    if seed.iter().all(|&b| b == seed[0]) {
+        return Err(anyhow!(
+            "a seed whose bytes are all the same is not entropy; refused"
+        ));
+    }
+    Ok(seed)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
@@ -634,6 +962,20 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kex_seed_text_is_64_hex_characters_and_not_one_repeated_byte() {
+        let good = "000102030405060708090a0b0c0d0e0f101112131415161718191A1B1C1D1E1F";
+        let seed = super::parse_kex_seed(good).unwrap();
+        assert_eq!(seed[0], 0x00);
+        assert_eq!(seed[31], 0x1F);
+        assert!(super::parse_kex_seed(&good[..62]).is_err());
+        assert!(super::parse_kex_seed(&format!("{good}00")).is_err());
+        assert!(super::parse_kex_seed(&"zz".repeat(32)).is_err());
+        assert!(super::parse_kex_seed(&"00".repeat(32)).is_err());
+        assert!(super::parse_kex_seed(&"ff".repeat(32)).is_err());
+        assert!(super::parse_kex_seed(&"5a".repeat(32)).is_err());
+    }
+
     use super::*;
     use clap::CommandFactory;
 
@@ -682,7 +1024,12 @@ mod tests {
         assert!(!status.show_info());
         assert_eq!((status.samples, status.period_ms), (1, 200));
         let sampled = Cli::try_parse_from([
-            "opendongle", "--status", "--samples", "50", "--period-ms", "100",
+            "opendongle",
+            "--status",
+            "--samples",
+            "50",
+            "--period-ms",
+            "100",
         ])
         .unwrap();
         assert_eq!((sampled.samples, sampled.period_ms), (50, 100));
@@ -715,16 +1062,75 @@ mod tests {
 
     #[test]
     fn enter_bootloader_cli_contract() {
-        // --image requires --enter-bootloader...
+        // --image and --bundle require --enter-bootloader...
         assert!(Cli::try_parse_from(["opendongle", "--image", "fw.bin"]).is_err());
+        assert!(Cli::try_parse_from(["opendongle", "--bundle", "fw.obb"]).is_err());
         // ...and --info conflicts with --enter-bootloader.
         assert!(Cli::try_parse_from(["opendongle", "--info", "--enter-bootloader"]).is_err());
         let full = Cli::try_parse_from([
-            "opendongle", "--enter-bootloader", "--image", "fw.bin",
+            "opendongle",
+            "--enter-bootloader",
+            "--image",
+            "fw.bin",
+            "--bundle",
+            "fw.obb",
         ])
         .unwrap();
         assert!(full.enter_bootloader);
         assert!(full.image.is_some());
+        assert!(full.bundle.is_some());
+    }
+
+    // The printed hand-off must name the .obb bundle -- BOOT.md's update flow
+    // flashes the bundle, and a raw slot-A .bin handed to `openboot flash`
+    // fails whenever slot B is the write target. Printing the family-guard
+    // --image path here is the exact defect this line guards against.
+    #[test]
+    fn flash_next_step_names_the_bundle_never_the_image() {
+        let with = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("ch592-product.obb")), "");
+        assert_eq!(
+            with,
+            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force ch592-product.obb"
+        );
+        let without = flash_next_step(0x0C45, 0xFEFE, None, "  (family NOT verified)");
+        assert_eq!(
+            without,
+            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force \
+             <chip>-product.obb  (family NOT verified)"
+        );
+        assert!(!without.contains(".bin"));
+    }
+
+    #[test]
+    fn obb_is_rejected_as_a_family_guard_image() {
+        assert!(image_arg_is_bundle(Path::new("ch592-product.obb")));
+        assert!(image_arg_is_bundle(Path::new("CH570.OBB")));
+        assert!(!image_arg_is_bundle(Path::new("slot-a.bin")));
+        assert!(!image_arg_is_bundle(Path::new("app.hex")));
+        assert!(!image_arg_is_bundle(Path::new("no-extension")));
+    }
+
+    // --bundle is only ever printed into a copy-and-run shell line, so both
+    // of these are about what a human ends up pasting.
+    #[test]
+    fn shell_quote_only_quotes_when_it_must() {
+        assert_eq!(shell_quote("ch592-product.obb"), "ch592-product.obb");
+        assert_eq!(
+            shell_quote("build/ch570-product.obb"),
+            "build/ch570-product.obb"
+        );
+        assert_eq!(shell_quote("my builds/a.obb"), "'my builds/a.obb'");
+        assert_eq!(shell_quote("it's.obb"), r"'it'\''s.obb'");
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn flash_next_step_quotes_a_path_with_spaces() {
+        let line = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("my builds/a.obb")), "");
+        assert!(
+            line.contains("'my builds/a.obb'"),
+            "unquoted path in: {line}"
+        );
     }
 
     // The dongle's bootloader shares the application's VID:PID, so these

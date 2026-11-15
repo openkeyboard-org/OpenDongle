@@ -12,6 +12,11 @@
 /* Callback for data received on EP6 OUT (IAP interface) */
 typedef void (*usb_ep6_out_cb_t)(const uint8_t *data, uint8_t len);
 
+/* Callback invoked from the USB ISR on a bus reset, after the deferred EP6
+ * packet latch is dropped and before EP6 OUT is re-enabled -- the IAP layer
+ * cancels its session state here (IAP_Reset). ISR context: byte writes only. */
+typedef void (*usb_bus_reset_cb_t)(void);
+
 /* Initialize USB device with all 5 HID interfaces */
 void USB_DevInit(void);
 
@@ -31,7 +36,9 @@ void USB_SendMouse(const uint8_t report[5]);
  * First byte must be the Report ID (1=consumer, 2=sysctl, 3=NKRO) */
 void USB_SendComposite(const uint8_t *report, uint8_t len);
 
-/* Send data on EP6 IN (Interface 4, for IAP responses) */
+/* Send data on EP6 IN (Interface 4, for IAP responses). Called from the EP6
+ * OUT callback after a bus reset has ended that command's session
+ * (USB_EP6CommandReset), it arms nothing. */
 void USB_SendEP6(const uint8_t *data, uint8_t len);
 
 /* True once EP6 IN has no armed report: USB_SendEP6 sets T_RES=ACK and the
@@ -40,8 +47,18 @@ void USB_SendEP6(const uint8_t *data, uint8_t len);
  * detached/suspended host never takes the packet — pair with a bounded wait. */
 int USB_EP6InIdle(void);
 
+/* Nonzero when a bus reset has arrived since USB_PollEP6 took the IAP command
+ * whose callback is now running: the command still completes, but the host
+ * session it was sent in has ended. Set by the USB interrupt, so a decision
+ * that must be atomic with a reset reads it with interrupts masked. Only
+ * meaningful inside the EP6 OUT callback. */
+uint8_t USB_EP6CommandReset(void);
+
 /* Register callback for EP6 OUT data */
 void USB_SetEP6OutCallback(usb_ep6_out_cb_t cb);
+
+/* Register the bus-reset cancellation hook (see usb_bus_reset_cb_t) */
+void USB_SetBusResetCallback(usb_bus_reset_cb_t cb);
 
 /* Drain a deferred IAP command (EP6 OUT) from the main loop. The USB ISR latches
  * the packet and NAKs EP6; this runs the registered callback outside ISR context

@@ -31,10 +31,10 @@
  *    PRESERVING VALIDATED CONTEXT, not one fixed shape: no RF arm may move
  *    from the context its chip bench-validated onto this seam's slow path as
  *    part of the merge. Concretely — CH570's radio sink keeps its
- *    IRQ-synchronous pair-ACK scheduling and post-poll RX arm [Codex CX1];
+ *    IRQ-synchronous pair-ACK scheduling and post-poll RX arm [CX1];
  *    CH59x's sink keeps its validated mix (synchronous rf_start_rx at the
  *    promote sites, post-poll RX deferred via the TMOS pass it was always
- *    validated at [Codex CX2] — TMOS latency is not the pump's EP6-exposed
+ *    validated at [CX2] — TMOS latency is not the pump's EP6-exposed
  *    latency). Cadence stays on hal_timing either way.
  *  - Delayed post: hal_event_post_delayed(bit, delta_ticks) fires the bit
  *    once after delta_ticks (Tsys, hal_timing.h domain). Re-posting a
@@ -45,7 +45,7 @@
  *    has not yet dispatched.
  *
  * PUMP RE-ENTRANCY SPEC (the CH570 side; here because it is the contract the
- * shared handlers are written against) [Codex CX3]:
+ * shared handlers are written against) [CX3]:
  *  - The pump snapshots-and-clears the pending mask under a brief IRQ-mask,
  *    then runs handlers with IRQs ON: handlers CAN be preempted by radio/
  *    timer IRQs that mutate RF state and post new bits (dispatched next

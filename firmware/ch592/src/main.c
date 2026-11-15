@@ -43,6 +43,9 @@
 #include "dongle_platform.h"
 #include "usb_device.h"
 #include "iap.h"
+#include "stack_watermark.h"
+#include "heap_watermark.h"
+#include "uart_diag.h"
 #include "pm_ch592.h"
 
 /* Placed AFTER CONFIG.h on purpose: before that include neither the SDK default
@@ -66,6 +69,72 @@
 #endif
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
+
+#if DONGLE_HEAP_WATERMARK
+/* Measurement builds only (heap_watermark.h). */
+#define HEAP_WM_WORDS (BLE_MEMHEAP_SIZE / 4u)
+
+static uint32_t heap_wm_boot_untouched;
+static uint32_t heap_wm_boot_top;
+
+void heap_watermark_paint(void)
+{
+    for (uint32_t i = 0; i < HEAP_WM_WORDS; i++) {
+        MEM_BUF[i] = HEAP_WATERMARK_PATTERN;
+    }
+}
+
+/* out[0] untouched bytes, [1] end of the highest touched word, [2] largest
+ * untouched run in bytes, [3] where that run starts. */
+static void heap_wm_scan(uint32_t out[4])
+{
+    uint32_t untouched = 0, top = 0, run = 0, best = 0, best_at = 0;
+
+    for (uint32_t i = 0; i < HEAP_WM_WORDS; i++) {
+        if (MEM_BUF[i] == HEAP_WATERMARK_PATTERN) {
+            untouched++;
+            run++;
+            if (run > best) {
+                best = run;
+                best_at = i + 1u - run;
+            }
+        } else {
+            run = 0;
+            top = i + 1u;
+        }
+    }
+    out[0] = untouched * 4u;
+    out[1] = top * 4u;
+    out[2] = best * 4u;
+    out[3] = best_at * 4u;
+}
+
+void heap_watermark_mark_boot(void)
+{
+    uint32_t v[4];
+
+    heap_wm_scan(v);
+    heap_wm_boot_untouched = v[0];
+    heap_wm_boot_top = v[1];
+}
+
+uint8_t heap_watermark_fill(uint8_t *out)
+{
+    uint32_t v[7];
+
+    v[0] = (uint32_t)BLE_MEMHEAP_SIZE;
+    heap_wm_scan(&v[1]);
+    v[5] = heap_wm_boot_untouched;
+    v[6] = heap_wm_boot_top;
+    for (uint32_t i = 0; i < 7u; i++) {
+        out[4u * i]      = (uint8_t)v[i];
+        out[4u * i + 1u] = (uint8_t)(v[i] >> 8);
+        out[4u * i + 2u] = (uint8_t)(v[i] >> 16);
+        out[4u * i + 3u] = (uint8_t)(v[i] >> 24);
+    }
+    return HEAP_WATERMARK_BYTES;
+}
+#endif /* DONGLE_HEAP_WATERMARK */
 
 #if (defined(BLE_MAC)) && (BLE_MAC == TRUE)
 const uint8_t MacAddr[6] = {0x84, 0xC2, 0xE4, 0x03, 0x02, 0x02};
@@ -166,6 +235,17 @@ void Main_Circulation(void)
         /* Forward host HID LED changes from foreground, outside the highcode loop
          * body so USB LED plumbing does not consume timing-critical SRAM. */
         poll_usb_led_state();
+#if DONGLE_UART_DIAG
+        /* Bench telemetry on UART1 PA9: non-blocking, at most one TX-FIFO
+         * fill per pass, one 127-byte frame per second. */
+        UartDiag_Service();
+#endif
+#if DONGLE_RF_CRYPT
+        /* Every pass, power management or not: latched crypto work re-posts
+         * its wake, which covers a post lost inside TMOS and (through the PM
+         * post latch) keeps the idle decision below from sleeping past it. */
+        (void)RF_CryptWorkKick();
+#endif
 #if DONGLE_PM_IDLE
         /* Idle the core until the next interrupt if, and only if, this
          * iteration left nothing queued and the RF/USB state admits it
@@ -179,6 +259,13 @@ int main(void)
 {
     /* Capture reset status before clock/BLE bring-up can perturb it. */
     uint8_t reset_status = R8_RESET_STATUS;
+
+#if DONGLE_STACK_WATERMARK
+    /* Measurement builds: paint the free RAM before the BLE arena and stack
+     * see real work (no entropy-capture constraint on this chip -- review
+     * finding 18 wants the CH592 depth datum too). */
+    stack_watermark_paint();
+#endif
 
     dongle_fault_boot(reset_status);
     SetSysClock(CLK_SOURCE_PLL_60MHz);
@@ -203,6 +290,9 @@ int main(void)
     SysTick->CTLR = 0;
     SysTick->SR = 0;
     PFIC_ClearPendingIRQ(SysTick_IRQn);
+#endif
+#if DONGLE_HEAP_WATERMARK
+    heap_watermark_paint();   /* before the library is handed the heap */
 #endif
     CH59x_BLEInit();
     HAL_Init();
@@ -241,6 +331,7 @@ int main(void)
     /* Route EP6 OUT (interface 4) into the IAP dispatcher so the dongle stays
      * in-field reflashable via flash_dongle.py / the stock Windows tool. */
     USB_SetEP6OutCallback(IAP_PacketHandler);
+    USB_SetBusResetCallback(IAP_Reset);   /* reset cancels the IAP session */
 
 #if DONGLE_PM_IDLE
     /* The TMR3 heartbeat starts before RF_TaskInit so every TMOS deadline is
@@ -251,5 +342,12 @@ int main(void)
     RF_TaskInit();
     RF_SetHIDCallback(usb_hid_callback);    /* forward keyboard reports to USB */
 
+#if DONGLE_UART_DIAG
+    UartDiag_Init();
+#endif
+
+#if DONGLE_HEAP_WATERMARK
+    heap_watermark_mark_boot();
+#endif
     Main_Circulation();
 }

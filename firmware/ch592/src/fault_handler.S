@@ -12,8 +12,8 @@
  * software, watchdog, and manual resets, so a repeated fatal event records a
  * REPEAT_FAILSTOP disposition and halts instead of creating a reset storm.
  *
- * Bytes 0x20005800..03 remain the startup sentinel. The record layout from
- * 0x20005804 onward is shared with platform_ch592.c through fault_record.h and
+ * Bytes 0x20005FC0..03 remain the startup sentinel. The record layout from
+ * 0x20005FC4 onward is shared with platform_ch592.c through fault_record.h and
  * is linker-pinned by link.ld.
  */
 

@@ -49,6 +49,17 @@ __attribute__((aligned(4))) static uint8_t EP6_Buf[64 + 64];
  *   EP5 RX mode, and a 128 B EP5_Buf.
  */
 #define EP_OUT(buf)  (buf)
+
+/* Zero the OUT half of the EP6 buffer (the IAP command just handled, or one
+ * a bus reset cancelled). Inline: one caller is the USB interrupt. */
+static inline __attribute__((always_inline)) void usb_ep6_out_wipe(void)
+{
+    volatile uint8_t *p = EP_OUT(EP6_Buf);
+
+    for (uint8_t i = 0; i < 64u; i++) {
+        p[i] = 0;
+    }
+}
 #define EP1_IN()     (EP1_Buf)
 #define EP2_IN()     (EP2_Buf)
 #define EP3_IN()     (EP3_Buf)
@@ -77,6 +88,10 @@ static const uint8_t *usb_desc_ptr;
  * read. */
 static volatile uint8_t usb_led_state;
 static usb_ep6_out_cb_t ep6_out_cb;
+/* Invoked from the USB ISR's bus-reset path so the IAP layer can cancel its
+ * session state without usb_device.c gaining a link-time dependency on it
+ * (the same layering argument as ep6_out_cb). */
+static usb_bus_reset_cb_t usb_bus_reset_cb;
 
 /* USB suspend state. Set when the host stops SOF (RB_UIF_SUSPEND + bus idle),
  * cleared on resume and on bus reset. The dongle is bus-powered and keeps the
@@ -142,7 +157,7 @@ static volatile uint8_t usb_resume_clear_kbd;
  * carries the device's whole current state and is the better reconciliation.
  * The check and the arm happen under one mask in usb_reconcile_keyboard /
  * usb_arm_mouse / usb_arm_composite, so a fresh press can neither be
- * overwritten by the flush nor released by it (codex and CodeRabbit reviews of
+ * overwritten by the flush nor released by it (reviews of
  * the suspend fix). For EP1 this also means a report that arrived after resume
  * outranks the stash captured during suspend: newest wins. */
 static volatile uint8_t usb_reconcile_ep1;
@@ -187,7 +202,7 @@ static void usb_ep1_service(void);   /* the one place EP1 is armed (defined belo
  * never collected, so it stays at the head and usb_ep1_service() re-arms it once
  * the endpoint is usable again. Required EVERYWHERE we force EP1 to NAK: no
  * completion can arrive for a NAKed endpoint, so leaving ownership set wedges the
- * queue permanently (codex). If the hardware does complete a transfer we already
+ * queue permanently. If the hardware does complete a transfer we already
  * cancelled, the completion handler will NOT retire it -- retirement is gated on
  * the ownership flag this clears -- so the entry is simply re-armed and delivered
  * again. That is safe: these are absolute key-state reports, so a repeat conveys
@@ -205,10 +220,23 @@ static void usb_ep1_cancel_owned(void)
  * running them in the ISR would starve TMOS_SystemProcess() and the RF EV10
  * supervision. One slot is enough — IAP is strict request/response, so the host
  * waits for our EP6-IN reply before sending the next OUT. EP6 OUT stays NAKed
- * until after the callback, so the command can be read in place from EP6_Buf's
- * OUT half instead of copying to a second 64-byte buffer. */
+ * until after the callback.
+ *
+ * The callback is handed a private copy (iap_pkt_snap), not the endpoint
+ * buffer: a bus reset zeroes that buffer from the ISR (the cancelled command
+ * may be a key or a seed), and a handler reading it in place could check one
+ * packet and act on another -- a seed with its tail zeroed, or an argument
+ * turned into the arming value. iap_pkt_running marks
+ * the span in which the foreground owns a command; while it is set neither
+ * a bus reset nor CLEAR_FEATURE re-opens EP6 OUT, so nothing new can be
+ * admitted behind the callback's back. iap_pkt_reset records a bus reset
+ * that arrived in that span (USB_EP6CommandReset): the command still runs,
+ * but it belongs to a host session that no longer exists. */
 static volatile uint8_t iap_pkt_pending;
 static volatile uint8_t iap_pkt_len;   /* set in USB ISR with iap_pkt_pending, read in foreground */
+static volatile uint8_t iap_pkt_running;
+static volatile uint8_t iap_pkt_reset;
+static uint8_t iap_pkt_snap[64];
 
 /* Per-interface idle and protocol values */
 static uint8_t usb_idle[USB_NUM_INTERFACES];
@@ -276,9 +304,10 @@ static const uint8_t hid_desc_offsets[USB_NUM_INTERFACES] = {
 
 /* ---------- USB Setup Request Processing ---------- */
 
-/* Runs from flash: EP0 control transfers only happen during enumeration /
- * occasional GET/SET, never concurrently with a flash erase or program (IAP
- * streams on EP6; the one-shot bond write happens at pair time). Keep noinline
+/* Runs from flash. The host can send a control transfer at any time, but
+ * this cannot run during a flash erase or program: those mask every
+ * interrupt for their whole duration, and the USB interrupt that calls this
+ * is taken only once the flash operation has finished. Keep noinline
  * so the parser cannot be folded back into the SRAM USB IRQ shell. */
 DONGLE_HIGHCODE_COLD
 static __attribute__((noinline)) void USB_EP0_Setup(void)
@@ -438,22 +467,46 @@ static __attribute__((noinline)) void USB_EP0_Setup(void)
 #endif
 #endif
             } else if ((bmReqType & 0x1F) == 0x02 && wValue == 0x0000 && bRequest == 0x01) {
-                /* CLEAR_FEATURE(ENDPOINT_HALT) */
+                /* CLEAR_FEATURE(ENDPOINT_HALT). wIndex bit 7 selects the
+                 * direction and MUST be decoded (TODO.md; 2026-08-16 review,
+                 * finding 24): masking it off always reset the IN half, so a
+                 * host clearing the halt on EP6 OUT (0x06) -- the one
+                 * bidirectional endpoint (R8_UEP567_MOD enables both halves,
+                 * the descriptor declares OUT 0x06) -- reset the WRONG
+                 * direction and left the OUT half untouched. IN halves reset
+                 * to NAK-until-armed with DATA0; the OUT half returns to
+                 * ACK-ready with DATA0, unless a command is latched or
+                 * running, when it stays NAKing for USB_PollEP6 to re-open
+                 * (so this cannot break the one-slot flow control).
+                 * Direction/endpoint pairs that do not exist STALL. */
                 uint8_t ep = wIndex & 0x0F;
-                switch (ep) {
-                case 1:
-                    R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK;
-                    usb_ep1_cancel_owned();   /* NAK + DATA0 restart: nothing will complete */
-                    /* Re-arm immediately: unlike suspend, the endpoint is usable
-                     * again right now, and without this a queued report waits for
-                     * the next arrival that may never come. */
-                    usb_ep1_service();
-                    break;
-                case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 5: R8_UEP5_CTRL = (R8_UEP5_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                case 6: R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
-                default: err = 0xFF; break;
+                if (wIndex & 0x80u) {
+                    switch (ep) {
+                    case 1:
+                        R8_UEP1_CTRL = (R8_UEP1_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK;
+                        usb_ep1_cancel_owned();   /* NAK + DATA0 restart: nothing will complete */
+                        /* Re-arm immediately: unlike suspend, the endpoint is usable
+                         * again right now, and without this a queued report waits for
+                         * the next arrival that may never come. */
+                        usb_ep1_service();
+                        break;
+                    case 2: R8_UEP2_CTRL = (R8_UEP2_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 3: R8_UEP3_CTRL = (R8_UEP3_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 5: R8_UEP5_CTRL = (R8_UEP5_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    case 6: R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_T_TOG | MASK_UEP_T_RES)) | UEP_T_RES_NAK; break;
+                    default: err = 0xFF; break;
+                    }
+                } else if (ep == 6u) {
+                    /* DATA0 restart either way, but re-open admission only when
+                     * no command is pending or running: re-ACKing under a pending command
+                     * lets the next OUT overwrite EP6_Buf before USB_PollEP6 has
+                     * run the first one, under the first one's length. The poll
+                     * re-ACKs when it finishes. */
+                    R8_UEP6_CTRL = (R8_UEP6_CTRL & ~(RB_UEP_R_TOG | MASK_UEP_R_RES))
+                                   | ((iap_pkt_pending || iap_pkt_running)
+                                      ? UEP_R_RES_NAK : UEP_R_RES_ACK);
+                } else {
+                    err = 0xFF;
                 }
             } else {
                 err = 0xFF;
@@ -625,12 +678,35 @@ static __attribute__((noinline)) void USB_BusReset(void)
 #endif
     usb_dev_addr = 0;
 
+    /* Cancel the deferred IAP state BEFORE the EP6 re-ACK below (2026-08-16
+     * review, finding 13): reset re-enables EP6 OUT, so a new packet can land
+     * immediately -- if a pre-reset command were still latched, the foreground
+     * would run it against a torn-down session, or the new packet would
+     * overwrite the shared DMA buffer under a length the foreground already
+     * holds. The registered hook (IAP_Reset) additionally disarms the
+     * mutation session and a not-yet-started EnterBootloader; ISR context,
+     * byte writes only. A command the foreground has already taken
+     * (iap_pkt_running) is not touched: it runs on its own copy, and EP6 OUT
+     * stays NAKing below until USB_PollEP6 has finished with it. What that
+     * leaves, accepted: a command already running when the reset arrives
+     * still completes. A reply the host has not already read is lost
+     * either way: armed before the reset, EP6 IN goes back to NAK below;
+     * after it, USB_SendEP6 does not arm it (iap_pkt_reset). */
+    iap_pkt_pending = 0;
+    iap_pkt_len = 0;
+    if (iap_pkt_running)
+        iap_pkt_reset = 1;    /* for the command that is running: its session is gone */
+    usb_ep6_out_wipe();       /* a cancelled command may be a key or a seed */
+    if (usb_bus_reset_cb)
+        usb_bus_reset_cb();
+
     R8_UEP0_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK;
     R8_UEP1_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK | USB_HID_IN_TOG_MODE;
     R8_UEP2_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK | USB_HID_IN_TOG_MODE;
     R8_UEP3_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK | USB_HID_IN_TOG_MODE;
     R8_UEP5_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK | USB_HID_IN_TOG_MODE;
-    R8_UEP6_CTRL = UEP_R_RES_ACK | UEP_T_RES_NAK | RB_UEP_AUTO_TOG;
+    R8_UEP6_CTRL = (iap_pkt_running ? UEP_R_RES_NAK : UEP_R_RES_ACK)
+                   | UEP_T_RES_NAK | RB_UEP_AUTO_TOG;
 
     usb_suspended = 0;     /* a bus reset always leaves the device active */
     usb_remote_wakeup = 0; /* USB spec: feature defaults off after reset */
@@ -694,19 +770,59 @@ void USB_IRQHandler(void)
     if (intflag & RB_UIF_TRANSFER) {
         uint8_t raw_st = R8_USB_INT_ST;
         /* SETUP is flagged by RB_UIS_SETUP_ACT and always targets EP0. On CH592
-         * the endpoint bits in R8_USB_INT_ST do NOT read as 0 for a SETUP (they
-         * carry stale endp state — observed as raw 0xB2 = SETUP_ACT|SETUP|ep2),
-         * so matching on the token field (UIS_TOKEN_SETUP|0 == 0x30) misses it
+         * the endpoint bits in R8_USB_INT_ST are not forced to 0 for a SETUP
+         * (they keep stale endp state — observed as raw 0xB2 = SETUP_ACT | idle
+         * token | ep2; the SDK names the idle token value 0x30 UIS_TOKEN_SETUP),
+         * so matching on token and endpoint together (0x30 | 0) misses it
          * and enumeration never starts. Gate on SETUP_ACT instead — the
-         * canonical WCH CH59x pattern. */
-        if (raw_st & RB_UIS_SETUP_ACT) {
-#if DONGLE_PM_IDLE
-            usb_last_setup_tsys = hal_now();   /* EP0-quiet window starts here */
-#endif
-            R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG | UEP_R_RES_ACK | UEP_T_RES_NAK;
-            USB_EP0_Setup();
-        } else
-        switch (raw_st & (MASK_UIS_TOKEN | MASK_UIS_ENDP)) {
+         * canonical WCH CH59x pattern.
+         *
+         * A SETUP does not replace the token and endpoint fields (datasheet,
+         * R8_USB_INT_ST): when this interrupt was held off (a flash operation
+         * masks it for milliseconds) a transfer can have completed AND a SETUP
+         * arrived before it runs, and the status then carries both -- a token
+         * that is not idle, with SETUP_ACT. The datasheet's order is: handle
+         * the transfer, clear UIF_TRANSFER once to retire it, handle the
+         * SETUP, clear again; the SDK's CompoundDev handler does the same.
+         * Handling only the SETUP, as this did, dropped the transfer: an EP6
+         * command the host had been ACKed for never ran, and a keyboard
+         * report's completion was never seen.
+         *
+         * Not exercised on hardware, and resting on the SDK's reading of two
+         * things the datasheet leaves unsaid: that SETUP_ACT read after the
+         * first clear means a SETUP not yet handled, and that nothing else
+         * completes between the two clears (the second would retire it
+         * unseen). EP0 NAKs for part of that span only: until USB_EP0_Setup
+         * re-arms it at the end of the parse, and from the first clear only
+         * when the SETUP was already in raw_st. The other endpoints are not
+         * closed at all.
+         *
+         * Not closed, and older than this order: a SETUP that lands after
+         * raw_st was read, while an EP0 stage handler is running. Its packet
+         * is written into EP0_Buf by the controller, and USB_EP0_IN can then
+         * copy the old descriptor's next chunk over it, or the OUT case read
+         * a byte of it as the LED state. The suppression below covers only a
+         * SETUP already flagged in raw_st. A late one is parsed without EP0
+         * having been closed first, if the re-read finds it at all (whether
+         * SETUP_ACT survives the first clear is not documented). */
+        uint8_t tok = raw_st & (MASK_UIS_TOKEN | MASK_UIS_ENDP);
+        uint8_t transfer = (raw_st & MASK_UIS_TOKEN) != MASK_UIS_TOKEN;
+        uint8_t setup = raw_st & RB_UIS_SETUP_ACT;
+
+        if (setup && (raw_st & MASK_UIS_ENDP) == 0u) {
+            /* The transfer is an EP0 stage of the control transfer this SETUP
+             * has replaced. EP0_Buf holds the SETUP packet now: the IN handler
+             * would write the old descriptor's next chunk over it, and the
+             * OUT handler would read an LED state out of it. Drop the stage
+             * (0x30 matches no case below), keeping the one thing a completed
+             * stage commits: SET_ADDRESS takes effect when its status IN
+             * completes (USB 2.0 9.4.6). */
+            if (tok == (UIS_TOKEN_IN | 0) && usb_setup_req == 0x05) {
+                R8_USB_DEV_AD = usb_dev_addr;
+            }
+            tok = MASK_UIS_TOKEN;
+        }
+        switch (tok) {
         /* ---- EP0 IN ---- */
         case UIS_TOKEN_IN | 0:
             USB_EP0_IN();
@@ -781,25 +897,27 @@ void USB_IRQHandler(void)
              * running them here would starve the ~1 Hz RF EV10 supervision and
              * drop the keyboard link. One slot suffices — IAP is strict
              * request/response, so the host waits for our EP6-IN reply. */
-            if ((raw_st & RB_UIS_TOG_OK) && !iap_pkt_pending) {
+            if ((raw_st & RB_UIS_TOG_OK) && !iap_pkt_pending && !iap_pkt_running) {
                 uint8_t rx_len = R8_USB_RX_LEN;
                 if (rx_len > 64u) rx_len = 64u;
                 iap_pkt_len = rx_len;
                 iap_pkt_pending = 1;
                 /* Latched: NAK until USB_PollEP6 has run it and re-ACKs. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
-            } else if (iap_pkt_pending) {
-                /* Defensive: an OUT completed while a command is pending. The
-                 * SIE's auto-busy (RB_UC_INT_BUSY) NAKs until UIF_TRANSFER is
-                 * cleared below, and the explicit NAK then holds until the
-                 * poll re-ACKs, so ordinary traffic cannot get here; only the
-                 * bus-reset path, which re-ACKs EP6 OUT without cancelling a
-                 * pending command, can admit one, and its DMA has then already
-                 * overwritten EP6_Buf under the old iap_pkt_len (a pre-existing
-                 * exposure, codex). Keep the NAK. */
+            } else if (iap_pkt_pending || iap_pkt_running) {
+                /* Defensive: an OUT completed while a command is latched or
+                 * running. The SIE's auto-busy (RB_UC_INT_BUSY) NAKs until
+                 * UIF_TRANSFER is cleared below, the explicit NAK then holds
+                 * until the poll re-ACKs, and neither a bus reset nor
+                 * CLEAR_FEATURE re-opens the endpoint meanwhile, so nothing
+                 * should get here. Whether this SIE reports a wrong-toggle
+                 * OUT against a NAKing endpoint is not established; if it
+                 * does, this keeps the NAK, where the
+                 * branch below would re-open the endpoint under the running
+                 * command and its epilogue would then drop the next packet. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
             } else {
-                /* Toggle mismatch with nothing pending: the host retried a
+                /* Toggle mismatch with nothing pending or running: the host retried a
                  * packet whose ACK it lost after we had already taken and run
                  * it (USB 2.0 8.6.4), or a bus error. The duplicate is
                  * dropped without advancing the toggle and the endpoint must
@@ -816,7 +934,38 @@ void USB_IRQHandler(void)
             break;
         }
 
-        R8_USB_INT_FG = RB_UIF_TRANSFER;
+        if (transfer) {
+            if (setup) {
+                /* Retiring the transfer may end the automatic NAK that
+                 * UIF_TRANSFER holds (RB_UC_INT_BUSY) before the SETUP has
+                 * been read: close EP0 first, so no data stage can land on
+                 * the SETUP packet or be answered from the old transfer.
+                 * Only for a SETUP seen in raw_st: an ordinary transfer must
+                 * leave EP0 as its handler set it. */
+                R8_UEP0_CTRL = UEP_R_RES_NAK | UEP_T_RES_NAK;
+            }
+            R8_USB_INT_FG = RB_UIF_TRANSFER;
+            /* One that arrived while the transfer was being handled is not
+             * in raw_st; whether the clear above left it flagged is not
+             * documented, so look again, as the SDK does. */
+            setup |= R8_USB_INT_ST & RB_UIS_SETUP_ACT;
+        }
+        if (setup) {
+#if DONGLE_PM_IDLE
+            usb_last_setup_tsys = hal_now();   /* EP0-quiet window starts here */
+#endif
+            /* After a transfer was retired above nothing holds EP0 busy, so
+             * from here it NAKs while the request is parsed; USB_EP0_Setup
+             * always ends by writing the whole register. (For a SETUP found
+             * only by the re-read, EP0 was open between that clear and this
+             * write.) */
+            R8_UEP0_CTRL = RB_UEP_R_TOG | RB_UEP_T_TOG
+                           | (transfer ? UEP_R_RES_NAK : UEP_R_RES_ACK) | UEP_T_RES_NAK;
+            USB_EP0_Setup();
+        }
+        if (setup || !transfer) {
+            R8_USB_INT_FG = RB_UIF_TRANSFER;
+        }
     }
 
     if (intflag & RB_UIF_BUS_RST) {
@@ -858,8 +1007,9 @@ void USB_DevInit(void)
 
     /* EP1/EP2/EP3 are HID IN-only in the descriptor, so keep them TX-only and
      * write their report buffers at DMA offset 0. EP4 has no descriptor and no
-     * ISR case, so its RX/TX enables stay off (its CTRL below still parks it
-     * at NAK defensively). EP5 is TX-only; EP6 stays dual-buffered for IAP
+     * ISR case, so its RX/TX enables stay off (its CTRL below is still
+     * written, IN at NAK; with the enables off neither response is used).
+     * EP5 is TX-only; EP6 stays dual-buffered for IAP
      * OUT traffic. */
     R8_UEP4_1_MOD = RB_UEP1_TX_EN;
     R8_UEP2_3_MOD = RB_UEP2_TX_EN | RB_UEP3_TX_EN;
@@ -1116,7 +1266,7 @@ void USB_SendKeyboard(const uint8_t report[8])
  * keystroke, or all-up if it was released before resume), else keys-up so a
  * pre-suspend held key cannot stay logically stuck. ONE IRQ mask covers the
  * whole decision - the fresh-report gate, the suspend check, the stash
- * consumption and the arm - because the pieces interact (codex review):
+ * consumption and the arm - because the pieces interact:
  *  - a fresh report armed since the resume edge (usb_reconcile_ep1 clear)
  *    carries the whole key state and outranks the stash: deliver nothing, and
  *    LEAVE the stash alone - if the bus has suspended again meanwhile, that
@@ -1263,21 +1413,32 @@ void USB_SendEP6(const uint8_t *data, uint8_t len)
      * Mask IRQs around this read-modify-write so a concurrent IN completion
      * can't be lost (the keyboard/mouse/composite senders do the same). */
     uint32_t irq_state = __risc_v_disable_irq();
-    R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
+    /* Not for a command whose host session a bus reset has ended: the reset
+     * took back any reply armed before it, and one armed after it would be
+     * read by the next session as the answer to something it never sent.
+     * Tested under the mask, so the reset is either before this (no reply)
+     * or after it (the reset NAKs EP6 IN again). */
+    if (!(iap_pkt_running && iap_pkt_reset))
+        R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_T_RES) | UEP_T_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
 }
 
 int USB_EP6InIdle(void)
 {
-    /* Single-byte register read; the T_RES field is written only by
-     * USB_SendEP6 (to ACK) and the ISR's EP6-IN completion (back to NAK),
-     * so no IRQ masking is needed to sample it. */
+    /* Single-byte register read; the T_RES field is written by USB_SendEP6
+     * (to ACK) and by the ISR (back to NAK: EP6-IN completion, bus reset,
+     * CLEAR_FEATURE), so no IRQ masking is needed to sample it. */
     return (R8_UEP6_CTRL & MASK_UEP_T_RES) == UEP_T_RES_NAK;
 }
 
 void USB_SetEP6OutCallback(usb_ep6_out_cb_t cb)
 {
     ep6_out_cb = cb;
+}
+
+void USB_SetBusResetCallback(usb_bus_reset_cb_t cb)
+{
+    usb_bus_reset_cb = cb;
 }
 
 void USB_PollEP6(void)
@@ -1337,14 +1498,57 @@ void USB_PollEP6(void)
      * latches cleanly. */
     if (!iap_pkt_pending)
         return;
-    if (ep6_out_cb)
-        ep6_out_cb(EP_OUT(EP6_Buf), iap_pkt_len);
-    iap_pkt_pending = 0;
-    /* Re-ACK EP6 OUT. Same shared-register hazard as USB_SendEP6: the ISR's
-     * EP6-IN completion RMWs R8_UEP6_CTRL, so mask IRQs around this RMW. */
+
+    /* Take the command: copy it out in one masked section (about 6
+     * instructions a byte, 4 to 7 us), so the copy is the packet the host
+     * sent or nothing -- a bus reset cannot land part-way. The section's
+     * effect on radio interrupt latency has not been measured; flash
+     * operations already mask for far longer. */
+    uint8_t len;
     uint32_t irq_state = __risc_v_disable_irq();
+    if (!iap_pkt_pending) {                 /* a bus reset just cancelled it */
+        (void)__risc_v_enable_irq(irq_state);
+        return;
+    }
+    len = iap_pkt_len;
+    if (len > sizeof(iap_pkt_snap))
+        len = sizeof(iap_pkt_snap);
+    for (uint8_t i = 0; i < len; i++)
+        iap_pkt_snap[i] = EP_OUT(EP6_Buf)[i];
+    iap_pkt_running = 1;
+    iap_pkt_reset = 0;
+    (void)__risc_v_enable_irq(irq_state);
+
+    /* Do not keep the command's bytes (a link key or an entropy seed) in the
+     * endpoint buffer until the next one overwrites them. Outside the mask:
+     * with iap_pkt_running set the endpoint NAKs, so the only other writer
+     * is a bus reset, which writes the same zeros. */
+    usb_ep6_out_wipe();
+
+    if (ep6_out_cb)
+        ep6_out_cb(iap_pkt_snap, len);
+    {
+        volatile uint8_t *w = iap_pkt_snap;
+
+        for (uint8_t i = 0; i < sizeof(iap_pkt_snap); i++)
+            w[i] = 0;
+    }
+
+    /* Give EP6 OUT back. One masked section: the ISR's EP6-IN completion
+     * RMWs R8_UEP6_CTRL (the hazard USB_SendEP6 has), and the flags and the
+     * re-ACK must change together so a bus reset sees either "running, keep
+     * NAKing" or "free". Nothing can have been admitted meanwhile: EP6 OUT
+     * has NAKed since the ISR latched this command. */
+    irq_state = __risc_v_disable_irq();
+    iap_pkt_running = 0;
+    iap_pkt_pending = 0;
     R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_ACK;
     (void)__risc_v_enable_irq(irq_state);
+}
+
+uint8_t USB_EP6CommandReset(void)
+{
+    return iap_pkt_reset;
 }
 
 uint8_t USB_HasPendingWork(void)
