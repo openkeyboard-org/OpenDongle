@@ -240,7 +240,7 @@ SECTIONS
     ASSERT(_eusrstack == 0x20002FF0,
         "stack top must sit below the OpenBoot bootreq word")
 
-    /* CODEREVIEW F01 (+ Codex round-4): the EXACT loadable image size in bytes
+    /* CODEREVIEW F01 (+ round-4 review): the EXACT loadable image size in bytes
      * (.data is the last loadable flash section and its LMA end is 4-aligned).
      * flash_dongle.py pads the programmed image only to the 4-byte
      * flash-write unit and commits that exact length, and the device IAP-write

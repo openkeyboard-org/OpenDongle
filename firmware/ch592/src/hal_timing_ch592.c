@@ -25,7 +25,7 @@
 #include "CH59x_common.h"   /* __HIGH_CODE — keep the arm/cancel wrappers in SRAM
                              * like the rf_tmr0_* primitives they front, so the
                              * seam adds no flash-XIP latency to the phase-locked
-                             * pair-ACK / poll arm paths (codex, P2.3 ii-b). */
+                             * pair-ACK / poll arm paths (P2.3 ii-b). */
 
 /* Per-slot callback table, set at arm time, dispatched in TMOS task context via
  * hal_timing_ch592_dispatch(). volatile: arms run from the radio-IRQ status
@@ -111,7 +111,7 @@ void TMR0_IRQHandler(void)
 /* Monotonic Tsys tick from the QingKe SysTick free-running at HCLK == Tsys
  * (60 MHz). In the product build the SDK already configured it exactly this
  * way (CH59x_BLEInit -> SysTick_Config: up-count, STCLK=HCLK, CMP~=2^64,
- * SysTick IRQ masked; srandCB reads CNT once at init -- codex P3a #1), so this
+ * SysTick IRQ masked; srandCB reads CNT once at init -- P3a #1), so this
  * normally just reads the running counter; the lazy start below only covers a
  * build that skips CH59x_BLEInit. The double-init race is benign (identical
  * programming). Wraps at 2^32 (~71.6 s) per the hal_timing.h contract --
@@ -244,7 +244,7 @@ void hal_timer_cancel(uint8_t slot)
  * functions directly, so the slot_cb table is the live dispatch path the
  * shared rf_task.c (P2.5) will rely on. Returns 1 if a registered, still-armed
  * callback ran. */
-/* Register a slot callback WITHOUT touching the timer (P2.3 ii-d, codex fix).
+/* Register a slot callback WITHOUT touching the timer (P2.3 ii-d fix).
  * Two uses: (1) RF_TaskInit pre-registers the fixed CH592 work callbacks for
  * the TMR0-backed pair, so event posts that arrive without a preceding
  * hal_timer_arm on that slot (the inherited-promote ownership transfer, the

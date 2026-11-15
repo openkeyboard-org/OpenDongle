@@ -115,7 +115,7 @@ completes both stages long before either bound.
 the main-loop rate measured by the diag page (~44 k passes/s), and say so in
 the comment.
 
-*Found by codex during the review of the IAP `0x92` RF diagnostics page,
+*Found during the review of the IAP `0x92` RF diagnostics page,
 confirmed by the page's own readout.*
 
 ## Defect: CH570 one-shot arms wider than 26 bits are silently truncated
@@ -175,7 +175,7 @@ current code breaks.
 hardware matrix and re-pin the digests. Worth adding a bench case that forces a
 link loss on CH570 and measures the reacquire watchdog against a wall clock.
 
-*Found by codex during the import review; confirmed by reading the SDK register
+*Found during the import review; confirmed by reading the SDK register
 definition, the tick constants, and the cancel-then-arm ordering in
 `rf_send_keys_up_on_link_loss()`.*
 ## Hazard: the IN handlers fight the hardware toggle, and the obvious fix is not safe
@@ -322,7 +322,7 @@ takes the wrap arm and hops two slots, and supervision tears the link down.
 Masking the dongle's interrupts for a whole number of poll slots on a live link
 (`opendongle --rf-poke 40+N`) dropped the link every time at 5 and 10 slots and
 never at 1-4, 6-8 or 12. Restricting the correction to step 0 only moved the
-failure into the remainder band after a 5k gap (codex counterexample: 5 slots +
+failure into the remainder band after a 5k gap (counterexample: 5 slots +
 15..27 ticks).
 
 **The fix is a model, not a patch.** The dongle now keeps the keyboard's model: an
@@ -355,7 +355,7 @@ slots, `hal_rf_shut()`) ran before `bond_record_semantic_valid()`, whose early r
 then left the radio shut with no timer and no re-arm driver, deaf until a reset. Latent
 (the producer cannot build a record the check rejects today), CH570 only. The check is
 now hoisted above the teardown, as the entry's fix sketch said, so an invalid record
-returns before any radio state changes; found again by the codex pass on the camp
+returns before any radio state changes; found again by the review pass on the camp
 watchdog, which the teardown also cancelled.
 
 ## Follow-up: bench case for the mouse/consumer suspend replay fix (needs a controller harness)
@@ -363,7 +363,7 @@ watchdog, which the teardown also cancelled.
 **What was fixed without it:** `USB_SuspendResume` now NAKs EP2/EP3 at suspend
 and `USB_PollEP6` reconciles them on resume (mouse all-up, consumer no-key,
 coordinated with fresh reports through `usb_reconcile_ep2/ep3`). The change was
-reviewed (three codex passes to Merge) and regression-tested on the keyboard
+reviewed (three review passes to Merge) and regression-tested on the keyboard
 path (host asleep 60 s, link intact, 0 lapses, the resume flush executed against
 a real host), but the defect scenario itself, a mouse or consumer press armed
 when SOF stops, has not been reproduced or shown fixed on hardware.

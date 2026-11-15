@@ -157,7 +157,7 @@ static volatile uint8_t usb_resume_clear_kbd;
  * carries the device's whole current state and is the better reconciliation.
  * The check and the arm happen under one mask in usb_reconcile_keyboard /
  * usb_arm_mouse / usb_arm_composite, so a fresh press can neither be
- * overwritten by the flush nor released by it (codex and CodeRabbit reviews of
+ * overwritten by the flush nor released by it (reviews of
  * the suspend fix). For EP1 this also means a report that arrived after resume
  * outranks the stash captured during suspend: newest wins. */
 static volatile uint8_t usb_reconcile_ep1;
@@ -202,7 +202,7 @@ static void usb_ep1_service(void);   /* the one place EP1 is armed (defined belo
  * never collected, so it stays at the head and usb_ep1_service() re-arms it once
  * the endpoint is usable again. Required EVERYWHERE we force EP1 to NAK: no
  * completion can arrive for a NAKed endpoint, so leaving ownership set wedges the
- * queue permanently (codex). If the hardware does complete a transfer we already
+ * queue permanently. If the hardware does complete a transfer we already
  * cancelled, the completion handler will NOT retire it -- retirement is gated on
  * the ownership flag this clears -- so the entry is simply re-armed and delivered
  * again. That is safe: these are absolute key-state reports, so a repeat conveys
@@ -1266,7 +1266,7 @@ void USB_SendKeyboard(const uint8_t report[8])
  * keystroke, or all-up if it was released before resume), else keys-up so a
  * pre-suspend held key cannot stay logically stuck. ONE IRQ mask covers the
  * whole decision - the fresh-report gate, the suspend check, the stash
- * consumption and the arm - because the pieces interact (codex review):
+ * consumption and the arm - because the pieces interact:
  *  - a fresh report armed since the resume edge (usb_reconcile_ep1 clear)
  *    carries the whole key state and outranks the stash: deliver nothing, and
  *    LEAVE the stash alone - if the bus has suspended again meanwhile, that

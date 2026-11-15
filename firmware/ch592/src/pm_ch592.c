@@ -137,7 +137,7 @@ extern volatile uint32_t RTCTigFlag;   /* the HAL's RTC_IRQHandler (RTC.c) sets 
  * the SDK's own ADC_ClearITFlag() uses the same write. Bench 2026-09-06, R2a
  * negative control: IPR0 bit 29 stayed set between samples, 100 % alien vetoes,
  * idle duty 0. Whether a held ADC request re-pends after a PFIC clear or needs a
- * fresh edge is not documented (codex review), so pm_irq_pending clears BOTH the
+ * fresh edge is not documented, so pm_irq_pending clears BOTH the
  * source (a START-clear write: START=0 is "stop", no conversion starts, PGA bits
  * preserved) and the PFIC pending bit, counts it (page 6 [50]), and re-reads
  * IPR so a bit that is still set falls through to the alien veto. The sample
@@ -403,7 +403,7 @@ static void pm_tmr3_plan(void)
             cand = PM_DEADLINE_MIN_RTC;                   /* awaiting its dispatch: one short wake */
         } else if (dist <= PM_DUE_WINDOW_RTC) {
             /* Due now: TMOS's expiry test accepts equality, so its event may
-             * already be queued (codex: dist == 0 arms the floor, not a unit). */
+             * already be queued (dist == 0 arms the floor, not a unit). */
             if (r0_ok && pm_settled(d, r0)) {
                 clear |= 1u << i; pm_plan_seen[i] = d;   /* and already due at the previous plan */
                 continue;
@@ -438,7 +438,7 @@ static void pm_tmr3_plan(void)
  * to 100 %, and hal_now(), whose SysTick stopped with the clocks, is re-based
  * by the halted RTC ticks so every reader stays monotonic against wall time.
  * TMR3 also paused; its planned fire lands late after the wake, harmless. */
-/* Slack, and why it is this large (codex): the vendor primitive takes its WFI with
+/* Slack, and why it is this large: the vendor primitive takes its WFI with
  * interrupts ENABLED (WFE mode plus SLEEPDEEP wedges this core), so between the
  * unmask and the WFI the RTC trigger can fire and its ISR consume the event. TMR3's
  * clock stops in Halt, so a consumed trigger would leave USB as the only wake and a
@@ -510,7 +510,7 @@ static void pm_halt(uint32_t irq)
     setup_in = usb_last_setup_tsys;
     /* Program the absolute trigger here rather than through RTC_TRIGFunCfg: that helper
      * normalises with `> RTC_MAX_COUNT`, so a target landing exactly on the modulus is never
-     * wrapped (codex). Same two registers, correct arithmetic, and the deadline we keep is
+     * wrapped. Same two registers, correct arithmetic, and the deadline we keep is
      * exactly the one the hardware compares against. */
     deadline = pm_rtc_add(pm_rtc_now(), ticks);
     sys_safe_access_enable();
@@ -536,7 +536,7 @@ static void pm_halt(uint32_t irq)
     (void)__risc_v_enable_irq(irq);                       /* the deep WFI needs an acceptable interrupt */
     /* Last look, unmasked and immediately before the vendor call: never halt on a trigger that
      * already fired or is about to, and never on a USB state that has moved.
-     * KNOWN RESIDUAL (codex, not closed): the vendor primitive takes its WFI with interrupts
+     * KNOWN RESIDUAL (not closed): the vendor primitive takes its WFI with interrupts
      * enabled, so a resume or bus reset arriving after this check, including inside the vendor
      * prologue, is serviced and its flag cleared, and the WFI then sleeps with reconciliation
      * owed. The wait cannot be made conditional without abandoning the vendor primitive, since
@@ -550,7 +550,7 @@ static void pm_halt(uint32_t irq)
         /* USB too: between the unmask and here a resume or bus reset can have run and cleared
          * its own interrupt flag, so the raw flags prove nothing and only the driver's state
          * does. Halting an active or unconfigured device would cost up to a backstop period of
-         * service (codex). */
+         * service. */
         uint8_t usb_gone = (uint8_t)((USB_PmSnapshot() & USB_PM_SUSPENDED) == 0u);
         if (fired || usb_gone || PM_RTC_PAST(left) || left < PM_HALT_GUARD_RTC) {
             if (pm_halt_abandons < 0xFFFFu) pm_halt_abandons++;
@@ -570,12 +570,12 @@ static void pm_halt(uint32_t irq)
     r_out = pm_rtc_now();
     sys_out = (uint32_t)SysTick->CNT;
     elapsed = (r_out >= r_in) ? (r_out - r_in) : (PM_RTC_MOD - r_in + r_out);
-    /* Paired accounting (codex): the RTC spans the whole call, the SysTick only its
+    /* Paired accounting: the RTC spans the whole call, the SysTick only its
      * awake parts (setup, wake ISRs, cleanup). Advance the SysTick by the difference,
      * never by the total, or every halt would inflate hal_now() by its own overhead. */
     /* Exact: the RTC spans the whole call, the SysTick only its awake parts. Subtract in
      * SysTick units and never floor the awake delta first, or each halt adds back up to one
-     * RTC tick of phantom time (codex). */
+     * RTC tick of phantom time. */
     {
         uint32_t total_sys = elapsed * PM_TMR3_PER_RTC;
         awake = sys_out - sys_in;
@@ -585,7 +585,7 @@ static void pm_halt(uint32_t irq)
             pm_halt_ticks += corr / PM_TMR3_PER_RTC;
             /* A SETUP serviced by the wake ISR stamped the clock BEFORE this correction, so the
              * correction would age it by the halted time and shorten, or erase, the EP0 quiet
-             * window the idle admission depends on. Carry it forward by the same amount (codex). */
+             * window the idle admission depends on. Carry it forward by the same amount. */
             if (usb_last_setup_tsys != setup_in) {
                 usb_last_setup_tsys += corr;
             }
@@ -595,7 +595,7 @@ static void pm_halt(uint32_t irq)
     /* Attribution is best-effort and cannot prove a trigger was never consumed: the USB flags are
      * sampled after the wake ISR may have cleared them, and a rescue by the backstop AFTER a
      * consumed trigger looks exactly like a wake at the deadline. What the counters do show is
-     * how many halts returned early, which is the shape a lost trigger would change (codex). */
+     * how many halts returned early, which is the shape a lost trigger would change. */
     if (usb_flag) {
         if (pm_halt_usb_wakes < 0xFFu) pm_halt_usb_wakes++;
     } else if (!PM_RTC_PAST(pm_rtc_dist(deadline, r_out))) {
@@ -917,7 +917,7 @@ void pm_idle_try(uint8_t entry_work)
         /* An UNCLAIMED remote-wake request is already a PM veto; a CLAIMED one (the K-state
          * pulse, driven synchronously in the foreground before this path runs) must NOT veto,
          * since its latch survives until the resume or reset edge and would otherwise stop the
-         * dongle halting for the rest of the suspend episode (codex). */
+         * dongle halting for the rest of the suspend episode. */
         if ((usb & USB_PM_SUSPENDED) && RF_WinRadioOff()
                 && pm_plan_best >= PM_HALT_MIN_RTC) {
             pm_halt(irq);                               /* Halt until the planned deadline; returns masked */
@@ -964,7 +964,7 @@ void TMR3_IRQHandler(void)
      * if the idle path - the only other place that re-arms - is vetoed for
      * a long time (the 200 ms window after a USB SETUP, an unconfigured
      * bus). Writing CNT_END restarts the count; the next admitted sleep
-     * re-arms precisely anyway (codex design review). */
+     * re-arms precisely anyway. */
     R32_TMR3_CNT_END = PM_CAP_RTC * PM_TMR3_PER_RTC;
     /* The previous plan's read ages by fires (header): at the limit it is
      * withdrawn here, not only tested at the next plan, so a lap of the

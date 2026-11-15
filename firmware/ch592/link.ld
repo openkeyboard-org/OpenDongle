@@ -313,7 +313,7 @@ SECTIONS
     ASSERT(_fault_record_end == 0x20005FF0 && _fault_keep_end == 0x20005FF0,
         "ERROR: N23 fault record/layout size changed (matches fault_record.h)")
 
-    /* CODEREVIEW F01 (+ Codex round-4): the EXACT loadable image size in bytes
+    /* CODEREVIEW F01 (+ round-4 review): the EXACT loadable image size in bytes
      * (.data is the last loadable flash section; its LMA end is 4-aligned, which
      * is the true .bin length). flash_dongle.py pads the programmed image only to
      * the 4-byte flash-write unit (NOT 16) and commits that exact length, and the

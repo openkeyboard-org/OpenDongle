@@ -11,7 +11,7 @@
  * or FSM material belongs in this header (rf_task state machines, guards, EV10,
  * hop formulas and dispatch live in rf_task.c behind the hal seams).
  *
- * Layering rules (codex-reviewed):
+ * Layering rules (reviewed):
  *  - header-only: the builder/decoder are static inline so extraction cannot
  *    change code placement (no new out-of-line flash calls on IRQ-reached
  *    paths, no .srodata/.rodata surprises);
@@ -232,7 +232,7 @@ static inline uint8_t rf_proto_is_pair_broadcast_from_peer(
  * nowhere near it; only the first poll after a coalesced gap is off-grid,
  * and if it hits the window that single poll is one channel off and the
  * next poll agrees again, because neither end resets its anchor to the
- * poll time (codex). On CH570 the acquisition-time grid shifts stay in the
+ * poll time. On CH570 the acquisition-time grid shifts stay in the
  * anchor's phase remainder, so the lead there is 13 up to those shifts.
  *
  * The recovered stock dongle rule was different: it reset the anchor to the
@@ -245,7 +245,7 @@ static inline uint8_t rf_proto_is_pair_broadcast_from_peer(
  * 10 poll slots dropped the link every time while 1-4, 6-8 and 12 never did.
  * Restricting the correction to step == 0 only moved the failure to the
  * remainder band [15, 27] after a 5k gap (the keyboard, 13 ticks ahead, has
- * already hopped there; codex). Counting edges from a whole-interval anchor
+ * already hopped there). Counting edges from a whole-interval anchor
  * is what removes the band altogether.
  *
  * Seeding contract (both chips): after a promote/re-key with hop seed S
@@ -344,7 +344,7 @@ static inline uint32_t rf_proto_hop_delta(uint32_t now, uint32_t last)
 
 /* (t + d) mod WRAP for t, d < WRAP. Subtract before adding: the 32-bit sum
  * t + d can exceed 2^32 when both are large (WRAP is 0xA8C00000), and a
- * truncated sum below WRAP would slip past a single reduction (codex). */
+ * truncated sum below WRAP would slip past a single reduction. */
 static inline uint32_t rf_proto_hop_add(uint32_t t, uint32_t d)
 {
     uint32_t room = RF_PROTO_HOP_WRAP - t;

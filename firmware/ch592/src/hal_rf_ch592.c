@@ -52,7 +52,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf);
  * written by the callback only (one context); the arm and shut counters are
  * reached from the task AND from the IRQ-tail sink, so those increments are
  * single-instruction AMOs (amoadd.w) rather than load/add/store, which the
- * tail could split (codex review). */
+ * tail could split. */
 #define RF_DIAG_INC(field)  ((void)__atomic_fetch_add(&rf_diag.field, 1u, __ATOMIC_RELAXED))
 static hal_rf_diag_t rf_diag = { .last_rx_rc = 0xFFu, .last_tx_rc = 0xFFu, .last_shut_rc = 0xFFu };
 

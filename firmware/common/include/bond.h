@@ -140,7 +140,7 @@ static inline int bond_key_flags_valid(const bond_record_t *rec)
  * already arrives with ENC_CAPABLE. A same-peer re-pair therefore RESTORES the
  * full 0x03 relationship, which is the point -- the bond remembers.
  *
- * The trade-off, stated plainly (Codex review): a peer that re-pairs WITHOUT
+ * The trade-off, stated plainly: a peer that re-pairs WITHOUT
  * the key it used to hold -- factory-reset, re-flashed to a plaintext build, or
  * replacement hardware reusing the MAC -- now meets a dongle that still requires
  * encryption, so the link is fail-closed dead until the operator clears the bond

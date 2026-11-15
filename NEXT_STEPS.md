@@ -178,7 +178,7 @@ connected state at all. "Dongle stuck in waiting-reconnect" was an artifact of
 the sampling rate, not a state. The counters are also RAM and reset with the
 dongle, so a baseline taken before a reset makes a working link look dead.
 
-**Leading mechanism (Codex, from source):** fresh pair and bonded reconnect
+**Leading mechanism (from source):** fresh pair and bonded reconnect
 anchor connected-mode hop timing differently. The dongle sends the initial ACK
 on its current AA/channel (`:2825`) but seeds `rf_hop.last` only at the chained
 session burst ~50 ms later (`:2030`, `:2890`); a fresh pair has both ends anchor
@@ -227,11 +227,11 @@ still owed.**
 **Prior art — this class of defect is already documented in-tree.**
 `rf_task.c:2131` records that a promote-time hop re-anchor "defeats the burst#1
 anchor ... fresh-pair tolerates the offset but bonded reconnect ... produces a
-fixed hop-phase offset -> deaf connected poll -> rx=0 (bench + codex
+fixed hop-phase offset -> deaf connected poll -> rx=0 (bench + review
 2026-07-07)", and CH570 already compiles that re-anchor out
 (`RF_TASK_EXECUTOR_TMOS 0`), keeping the burst#1 anchor with a 13-tick backdate.
 So the known mitigation is in place and the residual is a phase-precision
-problem, not the gross ~200 ms offset. Codex re-derived the same mechanism
+problem, not the gross ~200 ms offset. A review re-derived the same mechanism
 independently from source.
 
 **THE INSTABILITY IS NOT RECONNECT-SPECIFIC (2026-08-23, the owed comparison).**

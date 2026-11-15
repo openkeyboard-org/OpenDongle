@@ -533,7 +533,7 @@ static void st_dispatch(void)
 }
 
 /*
- * SEMANTICS NOTE (Codex edge): st_advance() syncs the epoch but does NOT dispatch.
+ * SEMANTICS NOTE (edge case): st_advance() syncs the epoch but does NOT dispatch.
  * If this slot had already expired and its callback had not run yet, re-setting it
  * here overwrites the old deadline -- intentionally SUPPRESSING the stale callback
  * (restart-the-timer semantics; what the RF re-arm paths want). A DIFFERENT slot's
@@ -544,7 +544,7 @@ static void st_dispatch(void)
 /* Bounded one-shot drain at grid granularity (the coexistence tick):
  * dispatch every due non-periodic slot, highest priority first, at most
  * ST_N dispatches per tick (a cb that re-arms itself due cannot monopolize
- * the ISR — Codex hardening). One-shot deadlines and the periodic st_now()
+ * the ISR — hardening). One-shot deadlines and the periodic st_now()
  * share one continuous domain, so the compares hold across mode
  * transitions. Called from the TMR IRQ AFTER the poll cb — flash-resident
  * (the XIP fetch only delays one-shot dispatch by µs; SRAM budget).
@@ -785,7 +785,7 @@ uint8_t st_periodic_nudge(uint32_t delta)
         accepted = 1u;
     }
     (void)__risc_v_enable_irq(s);
-    return accepted;      /* callers count ACCEPTED sweep steps (Codex) */
+    return accepted;      /* callers count ACCEPTED sweep steps */
 }
 
 /* Flash-resident: the promote runs once per session (SRAM budget). */

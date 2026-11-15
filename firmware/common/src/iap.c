@@ -930,7 +930,7 @@ void IAP_PacketHandler(const uint8_t *pkt, uint8_t rx_len)
  *
  * Deadlines are WALL time via hal_now() (Tsys ticks), not pass counts: the
  * main loops run hundreds of passes per millisecond, so a pass bound could
- * expire before the host's next 1 ms EP6 IN token ever arrived (codex
+ * expire before the host's next 1 ms EP6 IN token ever arrived (a
  * checkpoint-2 finding). u32 tick arithmetic is modular, so the deltas
  * survive hal_now() wrap. */
 #define IAP_SVC_RF_QUIESCE_TICKS (500000u * HAL_TICKS_PER_US) /* 500 ms */

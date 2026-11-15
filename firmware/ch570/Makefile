@@ -273,7 +273,7 @@ endif
 
 CONFIG_TEXT := schema=8||chip=ch570||profile=$(PROFILE_ID)||clock=100mhz||rf=1||usb=1||iap=1||boot=openboot-usb||openboot=$(OPENBOOT_REVISION)||fault=1||health=0||hw_poll_grid=1||rx_max=32||stack_floor=0x700||sdk=$(SDK_REVISION)||compiler=$(COMPILER_ID)||compiler_sha256=$(COMPILER_SHA256)
 # $(ASM_SRC) belongs here too: without it, editing either AES kernel changes
-# the firmware without changing its build identity (CodeRabbit/Codex review).
+# the firmware without changing its build identity (review).
 BUILD_ID_INPUTS := $(APP_SRC) $(STARTUP_SRC) $(ASM_SRC) $(wildcard $(COMMON)/include/*.h)
 BUILD_ID_INPUTS += $(wildcard src/*.h) link.ld ../dongle_image_id.py
 BUILD_ID_INPUTS += $(OPENBOOT)/firmware/app/openboot_app.h

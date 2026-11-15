@@ -65,7 +65,7 @@
 #include "hal_timing_ch592.h"  /* CH592 task-dispatch shim (CONNECTED_POLL slot) */
 #include "hal_dispatch.h"      /* deferred-event seam (chip header aliases above) */
 #if !RF_TASK_EXECUTOR_TMOS
-/* CX1 (codex): CONNECTED-state RF re-arms are timing-critical (the keyboard
+/* CX1: CONNECTED-state RF re-arms are timing-critical (the keyboard
  * replies inside the ~875 us window) and the CH570 pump's worst-case latency
  * under EP6 IAP flash traffic is milliseconds — so on this executor the
  * radio-IRQ sink arms them SYNCHRONOUSLY (its validated legacy shape). On
@@ -85,7 +85,7 @@ void hal_timer_promote_periodic(uint8_t from_slot, uint8_t to_slot,
                                 uint32_t fallback_period,
                                 hal_timer_cb_t cb);  /* hal_timing_ch570.c */
 uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
-/* Phase acquisition (Codex option C, 2026-07-08). A crystal-flat grid that
+/* Phase acquisition (option C, 2026-07-08). A crystal-flat grid that
  * starts outside the sleeping keyboard's narrow RX window misses it
  * IDENTICALLY forever (real-Bridge75 finding: promote+bond OK, rx=0 for
  * every poll at two different anchors). The v0.96 software timer acquired
@@ -95,7 +95,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
  * fixed offset (v0.96's effective mod-slot phase ≈ the ~9.7 ms print delay
  * ≈ +75 us; replace with the measured CH592 value when its probe returns),
  * then, while CONNECTED with zero poll responses, stretch the grid +8 us
- * per poll (Codex band 4-8 us — bigger steps can hop a narrow window) until
+ * per poll (band 4-8 us — bigger steps can hop a narrow window) until
  * the first reply, then hold flat.
  * N10 SCOPE (CODEREVIEW, accepted residual): this sweep is LOCAL to one
  * uninterrupted grid — a ~26-poll session covers ~0..267 us, and the step
@@ -103,7 +103,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
  * full-slot cross-session tiling is NOT achieved. The stock Bridge75 locks in
  * practice (production-validated); a true cumulative-phase primitive is
  * deferred pending a phase-controllable failing control. See rf_ch570_acq_arm
- * and analysis/codex-review-campaign-2026-07-17/change12-N10-sweep-spike.md. */
+ * and the 2026-07-17 review campaign's change12-N10-sweep-spike.md. */
 #define RF_CH570_GRID_PHASE_OFFSET_TICKS 7500u   /* 75 us @100 MHz */
 #define RF_CH570_ACQ_STEP_TICKS 800u             /* 8 us per poll */
 #define RF_CH570_ACQ_MAX_NUDGES 150u   /* 150*8us=1.2ms; > one full slot only
@@ -114,7 +114,7 @@ uint8_t hal_timer_grid_nudge(uint32_t ticks);        /* hal_timing_ch570.c */
 static void rf_ch570_acq_arm(uint8_t seed);  /* flash helper below */
 static volatile uint32_t rf_ch570_acq_base; /* RX tally at promote:
                                          * ANY connected RX freezes the
-                                         * sweep (Codex: the first reply may
+                                         * sweep (the first reply may
                                          * be a LEN-10 HID report, not a
                                          * LEN-1 poll response)             */
 static volatile uint32_t rf_ch570_acq_nudges;
@@ -749,7 +749,7 @@ static volatile uint8_t rf_confirm_state;
 static uint8_t rf_pair_is_fresh;
 #endif /* RF_CONFIRM_BEFORE_PERSIST */
 #if RF_TASK_EXECUTOR_TMOS
-/* Codex full-batch review (merge blocker): set by a burst-active async TX_FAIL in
+/* Full-batch review (merge blocker): set by a burst-active async TX_FAIL in
  * the radio callback (IRQ) to defer the dual-AA fresh-pair fallback to task
  * context — rf_return_to_fresh_pair does RF_Shut+reconfigure, illegal from the
  * callback. Without it a burst TX_FAIL re-arms RX on the session AA only and can
@@ -921,7 +921,7 @@ static uint32_t rf_hop_read(void)
     return ticks;
 }
 
-/* Wrap-safe backdate on the hop clock's modulus (codex: never leave a raw
+/* Wrap-safe backdate on the hop clock's modulus (never leave a raw
  * `- 13` that can underflow past zero near the wrap). always_inline makes the
  * no-call-from-IRQ contract explicit (callers include the radio-IRQ sink). */
 __attribute__((always_inline))
@@ -1042,7 +1042,7 @@ static inline uint8_t rf_accept_peer_mac(const uint8_t *mac)
  * is NOT implemented (CODEREVIEW N10, accepted residual — the stock Bridge75
  * is production-validated regardless; a true cumulative-phase primitive is
  * deferred pending a phase-controllable failing control, see
- * analysis/codex-review-campaign-2026-07-17/change12-N10-sweep-spike.md).
+ * the 2026-07-17 review campaign's change12-N10-sweep-spike.md).
  * Flash-resident noinline: the promote paths run in the HIGH_CODE sink (SRAM). */
 __attribute__((noinline))
 static void rf_ch570_acq_arm(uint8_t seed)
@@ -1680,7 +1680,7 @@ static void rf_enter_stock_reacquire(void)
 #endif
 
 #if RF_TASK_EXECUTOR_TMOS
-    /* Codex full-batch review (+ 2-fix re-review): send the all-keys-up and LEAVE
+    /* Full-batch review (+ 2-fix re-review): send the all-keys-up and LEAVE
      * CONNECTED under one IRQ mask. rf_send_keys_up_on_link_loss only fires while
      * rf_state==CONNECTED, and the connected RX sink (radio IRQ) forwards a
      * key-DOWN while CONNECTED — so without this, a late HID RX landing between the
@@ -1689,7 +1689,7 @@ static void rf_enter_stock_reacquire(void)
      * atomically with the keys-up closes that RF-ordering window.
      *
      * CH570 uses its established non-TMOS path below.
-     * KNOWN RESIDUAL (Codex, NOT closed here): this closes the RF-state ordering
+     * KNOWN RESIDUAL (NOT closed here): this closes the RF-state ordering
      * race, not the full host-delivery guarantee — a key-DOWN already consumed by
      * the host can leave a pending EP1 completion IRQ that NAKs the newly-stashed
      * keys-up after unmask; fully closing that needs USB endpoint-completion
@@ -1923,13 +1923,13 @@ static void rf_stock_reacquire_giveup(void)
     hal_event_cancel(RF_EVT_POST_POLL_RX);
     rf_abort_pair_burst();
 #if RF_CONFIRM_BEFORE_PERSIST
-    /* Codex fix re-review: a WAIT_REARM here means the peer HAD confirmed the
+    /* Fix re-review: a WAIT_REARM here means the peer HAD confirmed the
      * session (a valid connected RX was seen) but the post-confirm rearm never
      * succeeded and reacquire has now exhausted. The pair is genuine, so make it
      * durable before giving up (matches the confirm-timeout WAIT_REARM branch);
      * otherwise a confirmed bond is silently lost if this races ahead of the
      * confirm deadline (e.g. a failed RF_EVT_CONFIRM_TIMEOUT allocation). */
-    /* Codex 2-fix re-review (blocking): claim the confirm state under an IRQ mask
+    /* 2-fix re-review (blocking): claim the confirm state under an IRQ mask
      * (the confirm-timeout handler's model). Giveup runs in task context but a late
      * EV10 TX_FINISH can promote back to CONNECTED just before this, and the radio
      * IRQ sink can advance WAIT_RX->WAIT_REARM (and forward HID) between an unmasked
@@ -1950,7 +1950,7 @@ static void rf_stock_reacquire_giveup(void)
     if (gv_confirm == RF_CONFIRM_STATE_WAIT_REARM) {
         rf_arm_bond_persist();
     } else if (gv_confirm == RF_CONFIRM_STATE_WAIT_RX) {
-        /* Codex full-batch review (#3, low): an UNCONFIRMED fresh pair reached
+        /* Full-batch review (#3, low): an UNCONFIRMED fresh pair reached
          * giveup. Normally RF_EVT_CONFIRM_TIMEOUT routes an unconfirmed pair to the
          * dual-AA fresh-pair fallback, but if that delayed post failed to allocate
          * there is no deadline, so reacquire exhaustion lands here instead. The
@@ -2777,7 +2777,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
     case HAL_RF_EV_TX_DONE:   sta = TX_MODE_TX_FINISH; rsr = 0; break;
     case HAL_RF_EV_TX_FAIL:   sta = TX_MODE_TX_FAIL;   rsr = 0; break;
     case HAL_RF_EV_RX_TIMEOUT:
-        /* The extractor maps unknown vendor sta here (codex P2.4 #1): give
+        /* The extractor maps unknown vendor sta here (P2.4 #1): give
          * the preserved body a sta no case matches so it falls into its
          * switch default -- the legacy defensive RX_RESTART. */
         sta = 0xFFu; rsr = 0; break;
@@ -2892,7 +2892,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * without a fresh confirmation.
                  *
                  * KNOWN LIMITATION -- N11 is PARTIAL for bond-replacing re-pairs
-                 * (Codex impl-review; OWNER-ACCEPTED WONTFIX 2026-07-13): such a
+                 * (impl-review; OWNER-ACCEPTED WONTFIX 2026-07-13): such a
                  * re-pair reuses the loaded session AA (advertised in the pair-ACK),
                  * which the OLD keyboard also knows. If the new keyboard misses every
                  * ACK yet the old keyboard is still powered and polling that AA, the
@@ -3200,7 +3200,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * N11 shape) disabled the phase-lock -> deaf fresh pairs. Only
              * LIVENESS is un-gated: a non-confirming frame (LEN-3/6/other) may
              * refresh supervision but CANNOT extend the confirm deadline or cause
-             * a persist (that stays gated on WAIT_REARM). Codex-reviewed safe. */
+             * a persist (that stays gated on WAIT_REARM). Reviewed safe. */
             rf_refresh_connected_supervision();
 #else
             rf_refresh_connected_supervision();
@@ -3402,7 +3402,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                  * but bonded reconnect (keyboard anchors on the FIRST
                  * session-AA 15-byte, i.e. earlier) does not: it produces a
                  * fixed hop-phase offset -> deaf connected poll -> rx=0
-                 * (bench + codex 2026-07-07). CH570 keeps the burst#1 anchor. */
+                 * (bench + review 2026-07-07). CH570 keeps the burst#1 anchor. */
                 rf_hop.prev_idx = rf_proto_hop_seed(rf_pair_ack15[4]);
                 rf_hop.last = rf_hop_backdate(rf_hop_read(), RF_PROTO_HOP_EDGE_LEAD);   /* the poll grid starts here: edge anchor */
 #endif
@@ -3496,7 +3496,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     rfd_confirm_armed++;
                     hal_event_post_delayed(RF_EVT_CONFIRM_TIMEOUT,
                         RF_CONFIRM_TIMEOUT_TMOS * HAL_TMOS_UNIT_TICKS);
-                    /* N11 fix (bench-proven 2026-07-13, Codex-reviewed): a fresh
+                    /* N11 fix (bench-proven 2026-07-13, reviewed): a fresh
                      * promote MUST arm normal supervision so the EV10-rekey
                      * reacquire runs and LOCKS the connected-poll RX phase.
                      * Skipping it (the original N11 shape) left the fresh pair
@@ -3655,7 +3655,7 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
              * re-arms a fresh burst. */
             rf_abort_pair_burst();
 #if RF_TASK_EXECUTOR_TMOS
-            /* Codex full-batch review (merge blocker): a burst-active TX_FAIL
+            /* Full-batch review (merge blocker): a burst-active TX_FAIL
              * (rf_inject_burst_active is set from the FIRST pair-AA TX through the
              * session-AA chain, so this covers a failure of EITHER) leaves the
              * keyboard possibly still on the pair AA — either it never got a
@@ -3790,7 +3790,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
      * bond write still reaches DataFlash before the radio dies (the update
      * flow promises the bond survives).
      *
-     * ORDER MATTERS (codex checkpoint-2 finding): the latch is set FIRST.
+     * ORDER MATTERS (checkpoint-2 finding): the latch is set FIRST.
      * These handlers run with IRQs on (hal_dispatch.h pump contract), so an
      * RF callback preempting between a shutdown and a later latch-write
      * could observe rf_quiesced == 0 and re-arm the shut radio. With the
@@ -3915,7 +3915,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * the AA flip is clean (no deaf mid-flip gap). The initial ~300 ms
              * session-AA camp (before this first tick) already gives a bonded,
              * active keyboard reconnect priority: it re-broadcasts ~19 ms after
-             * link loss (conn_timeout/20), well inside that camp (Codex A-priority
+             * link loss (conn_timeout/20), well inside that camp (A-priority
              * analysis). This camp NARROWS but does not close B1 (a keyboard slow
              * to reconnect -- sleep/key-wake -- during a bond-replacing re-pair):
              * B1 is a documented OWNER-ACCEPTED WONTFIX (see the classifier note
@@ -3947,14 +3947,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          *     yet succeeded by the deadline): the pair IS accepted, so PROCEED --
          *     arm the durable write and hand off to normal supervision, which (unlike
          *     a fresh-pair teardown) owns the connected keys-up/reacquire path. This
-         *     both gives WAIT_REARM a deadline (Codex B3) and avoids stranding a
-         *     forwarded key-down without a keys-up (Codex fix re-review).
+         *     both gives WAIT_REARM a deadline (B3) and avoids stranding a
+         *     forwarded key-down without a keys-up (fix re-review).
          *   - NONE: the RX_RESTART handler already claimed and posted the persist. */
         uint32_t irq = __risc_v_disable_irq();
         uint8_t st = rf_confirm_state;
         rf_confirm_state = RF_CONFIRM_STATE_NONE;
         if (st == RF_CONFIRM_STATE_WAIT_RX) {
-            /* Codex fix re-review: atomically leave CONNECTED here, INSIDE the IRQ
+            /* Fix re-review: atomically leave CONNECTED here, INSIDE the IRQ
              * mask, before the teardown. Otherwise a HID packet arriving between the
              * claim and rf_return_to_fresh_pair's later rf_state write would still
              * see CONNECTED, be forwarded as a key-down, and then be torn down with
@@ -3962,7 +3962,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * mask holds, the sink's connected branch can't run after the claim, so
              * no key is forwarded on this teardown -> no keys-up is owed. */
             rf_state = RF_STATE_PAIRING;
-            /* Codex full-batch review: clear the EV10-active flag in the SAME
+            /* Full-batch review: clear the EV10-active flag in the SAME
              * masked claim as the rf_state flip. Otherwise a pending EV10
              * TX_FINISH between here and rf_return_to_fresh_pair's later clear
              * (~line 1640) still satisfies the EV10 promote predicate and
@@ -3992,7 +3992,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         } else if (st == RF_CONFIRM_STATE_WAIT_REARM) {
             rfd_confirm_to_waitrearm++;
             rf_arm_bond_persist();            /* confirmed -> make it durable */
-            /* Codex fix re-review: only (re)arm the first-supervision timer if we
+            /* Fix re-review: only (re)arm the first-supervision timer if we
              * are still the CONNECTED owner of the radio. If a persistent post-
              * confirm RX-arm failure dropped us into EV10 reacquire (rf_state ==
              * PAIRING, rf_supervision_ev10_active) before this deadline fired,
@@ -4009,7 +4009,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 
     if (events & RF_EVT_RX_RESTART) {
 #if RF_TASK_EXECUTOR_TMOS
-        /* Codex full-batch review (merge blocker): a burst-active async TX_FAIL
+        /* Full-batch review (merge blocker): a burst-active async TX_FAIL
          * asked (from the radio callback) for the dual-AA fresh-pair relisten
          * instead of a session-AA-only re-arm. Do it here in task context —
          * rf_return_to_fresh_pair re-camps the boot window alternating pair/
@@ -4039,7 +4039,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * rf_start_rx() directly -- connected poll via RF_EVT_POST_POLL_RX, EV10
          * and burst via explicit rf_start_rx. Removed.) */
 #if RF_CONFIRM_BEFORE_PERSIST
-        /* CODEREVIEW N11 (Codex impl-review): snapshot the confirm state at handler
+        /* CODEREVIEW N11 (impl-review): snapshot the confirm state at handler
          * ENTRY, BEFORE rf_rearm_rx. Persist only if we were ALREADY WAIT_REARM
          * here — that proves the rf_rearm_rx() below happens AFTER the confirm was
          * observed. Otherwise a confirm landing DURING rf_rearm_rx (entry was
@@ -4058,7 +4058,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         /* A restart that lands in a terminal camp without the liveness tick
          * (the bond-clear tombstone paths reach their camp this way, with no
          * timer left) starts it here, so no camp depends on its entry site
-         * remembering to (codex). One compare on the connected path. */
+         * remembering to. One compare on the connected path. */
         if (rf_state == RF_STATE_PAIRING && !rf_camp_wd_active && rf_camp_is_terminal()) {
             rf_camp_watchdog_arm();
         }
@@ -4089,7 +4089,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
          * used for empty-poll TX, sized here for the stock length-10
          * RX arm. */
 #if RF_CONFIRM_BEFORE_PERSIST
-        /* CODEREVIEW N11 (Codex impl-review; widened to CH570 per review): stale-
+        /* CODEREVIEW N11 (impl-review; widened to CH570 per review): stale-
          * event guard. A POST_POLL_RX co-dispatched with a confirm timeout that
          * fell back to PAIRING (via rf_return_to_fresh_pair, which camps a fresh
          * RX) must NOT re-prime the connected post-poll RX over that camp. Now
@@ -4445,7 +4445,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 * HAL_TICKS_PER_PROTO_TICK;
             if (rf_stock_first_supervision_armed) {
                 rf_stock_first_supervision_armed = 0;
-                /* Snapshot the stamp BEFORE reading the clock (codex P3a
+                /* Snapshot the stamp BEFORE reading the clock (P3a
                  * #1): the radio IRQ-tail sink can preempt this task-context
                  * code and refresh the stamp between the two loads — with
                  * the clock read first that manufactures last > now and the
@@ -4881,7 +4881,7 @@ static void rf_send_poll(void)
     }
     if (send_led) {
         /* static lifetime: RF_Tx() may read the payload after this function's
-         * stack frame returns (codex). rf_send_poll is never re-entered (TMOS
+         * stack frame returns. rf_send_poll is never re-entered (TMOS
          * task context on CH592, the poll timer's ISR on CH570), so a
          * function-static is safe and matches CH570's static
          * connected_app_payload[]. */
@@ -5302,7 +5302,7 @@ static void rf_persist_bond_task(void)
              * while rf_bond_pending_rec still held the keyless candidate,
              * falsifying that flag's documented meaning -- harmless today
              * because nothing else consumes the pending record, but a trap for
-             * the rekey/KX work that will (Codex review).
+             * the rekey/KX work that will.
              *
              * bond_load() above ran with interrupts ENABLED, so the radio IRQ
              * may have published a newer candidate for a DIFFERENT peer in the
@@ -5344,7 +5344,7 @@ static void rf_persist_bond_task(void)
      * shut radio and cancelled timers were never restored (TODO defect,
      * latent: the producer cannot build a record the check rejects today). */
 #if !RF_TASK_EXECUTOR_TMOS
-    /* CX4 (codex, hardware-forced CH570 delta), root-cause-revised 2026-07-07.
+    /* CX4 (hardware-forced CH570 delta), root-cause-revised 2026-07-07.
      * This runs ONCE per session — the first promote of a fresh pair, before
      * the bond is persisted. The ONLY safe shape when we are already CONNECTED
      * is the CH592's: write the bond WITHOUT disturbing the radio and stay
@@ -5378,7 +5378,7 @@ static void rf_persist_bond_task(void)
         rf_channel = RF_PROTO_RECONNECT_CAMP_CHANNEL;
         rf_start_rx();
         rf_arm_retry_if_failed();   /* P4: this recamp arms no timer */
-        rf_camp_watchdog_arm();     /* a terminal camp too (codex: it was the one without the tick) */
+        rf_camp_watchdog_arm();     /* a terminal camp too (it was the one without the tick) */
     }
 #endif
     if (save_rc != 0) {
@@ -5419,7 +5419,7 @@ void RF_TaskInit(void)
     tmos_memset(rf_peer_mac, 0, sizeof(rf_peer_mac));
     rf_state = RF_STATE_IDLE;
     rf_hid_callback = NULL;
-    /* Pre-register the fixed TMR0-pair work callbacks (codex ii-d): events can
+    /* Pre-register the fixed TMR0-pair work callbacks (ii-d): events can
      * reach dispatch without a prior hal_timer_arm on their slot and must
      * never find a null cb. (The inherited-promote/pair-retry producers were
      * deleted at R1b ii; kept for the EV10 arms and defense in depth.) */
@@ -5713,7 +5713,7 @@ void RF_SetLEDState(uint8_t led)
      * ISR) was not just unnecessary but HARMFUL: its csrrc/csrrs on CSR 0x800
      * (mask 0x88 = MIE|MPIE), executed in the boot loop right after CH59x_BLEInit
      * / USB_DevInit, could leave USB_IRQn masked and break USB enumeration (see
-     * the CSR-0x800 warning near main.c:177). Bench-confirmed + codex-reviewed
+     * the CSR-0x800 warning near main.c:177). Bench-confirmed + reviewed
      * 2026-06-14. */
     rf_led_state = (uint8_t)(led & 0x07u);
     if (rf_state == RF_STATE_CONNECTED) {
@@ -6039,7 +6039,7 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         return 0xE3u;
     }
 #endif
-    /* Snapshot the predicate AND act under one IRQ mask (codex final review):
+    /* Snapshot the predicate AND act under one IRQ mask:
      * between an unmasked check and the mask a radio IRQ can accept a beacon
      * and start a pair-ACK burst, which the intervention would then tear
      * through while reporting success. Only the exact terminal camp qualifies:
@@ -6065,7 +6065,7 @@ uint8_t RF_DiagIntervene(uint8_t rung)
         /* Fault injection: shut the radio and leave it deaf. The camp
          * watchdog must bring it back at its next tick: reset its baseline
          * here, or an event that landed between the last tick and this shut
-         * would make that tick read "alive" and cost a second one (codex). */
+         * would make that tick read "alive" and cost a second one. */
         hal_rf_shut();
         rf_camp_wd_seen   = rf_camp_wd_events();
         rf_camp_wd_silent = 0u;
