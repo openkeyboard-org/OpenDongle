@@ -405,29 +405,20 @@ static void handle_kex_seed(const uint8_t *data, uint8_t len)
     if (len != KEX_SEED_BYTES) {
         resp[2] = 1u;
     } else {
-        /* Work on a copy: a bus reset clears the endpoint buffer from the
-         * USB interrupt, and a seed checked there and used afterwards could
-         * be all zeros by the time it is used. A copy torn by a reset is
-         * either refused below or a shorter seed; neither does harm. */
-        uint8_t seed[KEX_SEED_BYTES];
-        volatile uint8_t *w = seed;
+        /* `data` is the poll's private copy of the packet (USB_PollEP6), not
+         * the endpoint buffer a bus reset zeroes: what is checked here is
+         * what is used, and the poll wipes it when this returns. */
         uint8_t i, same = 1u;
 
-        for (i = 0u; i < KEX_SEED_BYTES; i++) {
-            seed[i] = data[i];
-        }
         for (i = 1u; i < KEX_SEED_BYTES; i++) {
-            if (seed[i] != seed[0]) {
+            if (data[i] != data[0]) {
                 same = 0u;
             }
         }
         if (same) {
             resp[2] = 2u;
         } else {
-            RF_KexSeed(seed);
-        }
-        for (i = 0u; i < KEX_SEED_BYTES; i++) {
-            w[i] = 0u;
+            RF_KexSeed(data);
         }
     }
     USB_SendEP6(resp, sizeof(resp));

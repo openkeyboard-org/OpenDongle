@@ -71,7 +71,8 @@ uint8_t RF_KexDiag(uint8_t out[22]);
 /* IAP 0x9C: a 32-byte entropy seed from the host (kex_proto.h, KEX_SEED_*).
  * Held until the next private-key draw folds it into the pool, then wiped;
  * a later seed replaces one still waiting. RAM only: it is lost at reset.
- * Safe to call from the USB interrupt. */
+ * Main-loop context only (the IAP handler): the draw that consumes the seed
+ * runs there too, and neither is protected against the other. */
 void RF_KexSeed(const uint8_t seed[32]);
 #endif
 
