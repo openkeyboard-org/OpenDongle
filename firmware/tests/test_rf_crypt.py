@@ -243,9 +243,14 @@ class CcmRxPath(unittest.TestCase):
         self.assertEqual(self.drive(script), ["rx SHAPE"])
 
     def test_engine_fault_is_terminal_not_forwarded(self):
+        # Build the frame outside the f-string: a backslash inside an f-string
+        # EXPRESSION is a SyntaxError before Python 3.12, so the inlined
+        # b'\x01\x02' made this whole module fail to import on any older
+        # interpreter -- taking every test in it with it, not just this one.
+        payload = self.frame(1, 0, TAG_CONSUMER, b"\x01\x02")
         script = "\n".join(self.session_prefix() + [
             "failnext",
-            f"rx {self.frame(1, 0, TAG_CONSUMER, b'\x01\x02')}",
+            f"rx {payload}",
         ]) + "\n"
         self.assertEqual(self.drive(script), ["rx ENGINE"])
 

@@ -42,6 +42,7 @@ REPORT_SIZE = 65          # 1 report-ID byte + 64-byte payload
 
 CMD_HANDSHAKE = 0x5A
 CMD_GETDEVINFO = 0x84
+ACK_OK = 0x0F          # send_status4()'s ack byte (iap.c)
 CMD_BOND_WRITE = 0x87
 CMD_BOND_READ = 0x88
 ACK_HANDSHAKE = 0xA5
@@ -187,16 +188,33 @@ class Iap:
         return bytearray(r[3:3 + BOND_SIZE]), status
 
     def bond_write(self, rec: bytes):
+        """Status byte from BondWrite, parsed at its fixed position.
+
+        Every BondWrite path in the firmware answers via send_status4(), which
+        sends exactly {ACK_OK, 0x01, status, 0x00} (iap.c), so the status is at
+        index 2 and nowhere else. Index 1 is the length byte, always 0x01,
+        which is itself a valid status ("NV erase failed"), and the trailing
+        pad 0x00 is the success code: a reply that is not exactly that shape is
+        refused, not searched for something that looks like a status.
+        """
         r = self.xfer(CMD_BOND_WRITE, bytes(rec))
-        if not r or r[0] != ACK_OK or len(r) < 3:
-            raise SystemExit(f"BondWrite got no/short reply: {r.hex() if r else None}")
-        # send_status4 reply is [0x0F][len=1][status][pad] -- the status is at
-        # index 2. The old code scanned from index 1 (the length byte, always
-        # 0x01), which collides with WRITE_STATUS[0x01] ("NV erase failed") and
-        # so misreported EVERY success as an erase failure. Never caught because
-        # the CH592 bench used the compiled-in force key, not this tool -- the
-        # CH570 bench (no force key) is the first to exercise it.
+        if not r:
+            raise SystemExit("BondWrite got no reply")
+        if len(r) < 3 or r[0] != ACK_OK or r[1] != 0x01:
+            raise SystemExit(
+                f"BondWrite: malformed reply (want ack 0x{ACK_OK:02X} len 0x01, "
+                f"got {r[:4].hex(' ')}); refusing to guess a status")
         return r[2]
+
+    def disarm(self):
+        """Drop the mutation session. GetDevInfo(0) is the disarm, mirroring
+        tools/src/iap.rs op_disarm. Best-effort: this runs on the way out, so a
+        failure here must not mask the error that is actually being reported.
+        """
+        try:
+            self.xfer(CMD_GETDEVINFO, struct.pack("<I", 0))
+        except OSError:
+            pass
 
 
 def checksum(rec: bytes) -> int:
@@ -304,6 +322,13 @@ def main() -> int:
             print("Give the SAME key to the keyboard, or the link authenticates nothing:")
             print(f"  A6-style bench frame 0xAE — see OpenController firmware/bench")
     finally:
+        # Drop the mutation session before letting go of the device. arm()
+        # opens it and every exit path used to just close the fd -- --show
+        # returns early, so a read-only invocation left the dongle armed for
+        # BondWrite until something else disarmed or reset it. Disarm first,
+        # then close; disarm() is best-effort so it cannot mask a real error
+        # on the way out. tools/src/flows.rs follows the same protocol.
+        dev.disarm()
         dev.close()
     return 0
 
