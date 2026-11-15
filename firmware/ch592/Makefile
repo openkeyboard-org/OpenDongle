@@ -68,7 +68,7 @@ SDK_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 # is what finally puts the bootloader's identity into the build id - previously
 # CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
 # composed into a factory image with every gate green.
-OPENBOOT_REVISION := 2e05d257ee43d0af5cdd74b41e16214e40302da1
+OPENBOOT_REVISION := 46b2590e99b8a0bdc773aa62cc53fef1a5675adc
 
 # Build profile. `product` is the shipping configuration. `bench` compiles the
 # UART-only campaign scaffolding -- the compiled-in force key, UART1/PA9

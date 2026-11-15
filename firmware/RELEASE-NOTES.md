@@ -15,7 +15,13 @@ The bootloader handled a completed transfer and the SETUP flagged behind it in o
 cleared the transfer flag once, where the CH592 datasheet requires the transfer to be retired
 first and the flag cleared a second time after the SETUP. One unit on one port of that hub failed
 7 updates out of 7 with v0.11. With v0.12 the same unit passed 3 out of 3 there, 2 out of 2 behind
-the other hub and 1 on a root port.
+the other hub and 2 out of 2 on a root port.
+
+v0.12 also stays attached for 5 ms after its last reply before it detaches. Built on a newer
+OpenBoot, where the poll loop runs faster, the bootloader detached so soon after answering BOOT
+that the same hub never delivered the answer, and `openboot flash` reported an update that had
+succeeded as failed. The bootloader in this firmware got its answer through each time it was
+tried, but only because its loop is slower, so the wait is there by design now.
 
 The application is not affected by the defect and its code did not change for this; its build id
 did, because the bootloader's revision is one of its inputs.
