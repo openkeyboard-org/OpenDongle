@@ -102,6 +102,68 @@ void IAP_Reset(void)
     iap_reboot_pending = 0;
 }
 
+/* A command the main loop has taken still runs to its end when a bus reset
+ * arrives (USB_PollEP6), and IAP_Reset above runs from that reset's
+ * interrupt. A handler that had already made its decision would then write
+ * the session state straight back: GetDevInfo arming a session nobody in the
+ * new one asked for, EnterBootloader latching a reboot the reset had just
+ * cancelled, any handler counting an error into the tally the reset had
+ * zeroed. The three below decide and write under one interrupt mask, so the
+ * reset is either before the pair (and refuses it) or after it (and undoes
+ * it). The first two return 0 when refused. Replies are covered separately:
+ * USB_SendEP6 arms none for a command whose session has been reset.
+ *
+ * What a reset does not stop is the work of a command already admitted: a
+ * bond write, a bond clear or an RF poke that passed its armed check runs to
+ * its end (stopping half-way would leave flash and RAM disagreeing). */
+static uint8_t iap_arm_session(void)
+{
+    uint8_t live;
+    uint32_t irq = __risc_v_disable_irq();
+
+    live = (uint8_t)!USB_EP6CommandReset();
+    if (live) {
+        iap_armed = 1;
+        iap_err_count = 0;
+    }
+    (void)__risc_v_enable_irq(irq);
+    return live;
+}
+
+static uint8_t iap_latch_reboot(void)
+{
+    uint8_t live;
+    uint32_t irq = __risc_v_disable_irq();
+
+    /* Armed is itself cleared by the reset, so it is the test. */
+    live = iap_armed;
+    if (live) {
+        iap_reboot_pending = 1;
+    }
+    (void)__risc_v_enable_irq(irq);
+    return live;
+}
+
+static void iap_count_error(void)
+{
+    uint32_t irq = __risc_v_disable_irq();
+
+    if (!USB_EP6CommandReset()) {
+        iap_err_count++;
+    }
+    (void)__risc_v_enable_irq(irq);
+}
+
+/* For a link key held in a local: stores the compiler may not drop. */
+static void iap_wipe(void *p, uint8_t len)
+{
+    volatile uint8_t *w = (volatile uint8_t *)p;
+
+    while (len--) {
+        *w++ = 0u;
+    }
+}
+
 static void send_reject(void)
 {
     /* Match the stock dispatcher: malformed or disallowed packets time out. */
@@ -168,8 +230,9 @@ static void handle_getdevinfo(const uint8_t *data, uint8_t data_len)
     if (arg == 1) {
         uint8_t resp[12];
 
-        iap_armed = 1;
-        iap_err_count = 0;
+        if (!iap_arm_session()) {
+            return;     /* the session ended under this command: no reply */
+        }
 
         resp[0] = ACK_DEVINFO;
         resp[1] = 0x08;
@@ -204,7 +267,7 @@ static void handle_retired(uint8_t status)
         send_reject();
         return;
     }
-    iap_err_count++;
+    iap_count_error();
     send_status4(status);
 }
 
@@ -230,12 +293,17 @@ static void handle_enter_bootloader(const uint8_t *data, uint8_t data_len)
         return;
     }
     if (data_len != sizeof(magic) || memcmp(data, magic, sizeof(magic)) != 0) {
-        iap_err_count++;
+        iap_count_error();
         send_status4(DONGLE_IAP_STATUS_UNSUPPORTED);
         return;
     }
+    /* A bus reset anywhere from the armed check above to the latch cancels
+     * both halves: the reply is not armed (USB_SendEP6) or is taken back by
+     * the reset, and the latch finds the session disarmed. Only a reply the
+     * host had already read before it reset the bus stands, with no reboot
+     * behind it. */
     send_status4(0x00);
-    iap_reboot_pending = 1;
+    (void)iap_latch_reboot();
 }
 
 static void handle_bond_write(const uint8_t *data, uint8_t data_len)
@@ -246,85 +314,80 @@ static void handle_bond_write(const uint8_t *data, uint8_t data_len)
     }
 
     if (data_len != sizeof(bond_record_t)) {
-        iap_err_count++;
+        iap_count_error();
         send_status4(0xB0);
         return;
     }
 
+    /* Both records can hold a link key. Every path from here leaves through
+     * the wipes at the end; the two locals are this handler's only copies
+     * (the packet itself is the poll's, and the poll wipes it). */
     bond_record_t rec;
+    bond_record_t back __attribute__((aligned(4)));
+    uint8_t status;
+    uint8_t failed = 1u;    /* every status but 0x00 and 0xB5 counts as an error */
+
     for (uint8_t i = 0; i < sizeof(rec); i++) {
         ((uint8_t *)&rec)[i] = data[i];
     }
 
     if (rec.magic != BOND_MAGIC || rec.version != BOND_VERSION
         || bond_checksum(&rec) != rec.checksum || rec.session_aa == 0) {
-        iap_err_count++;
-        send_status4(0xB1);
-        return;
+        status = 0xB1;
     }
-
     /* CODEREVIEW N08: semantic validation (bounds, relational
      * interval/timeout, MAC hygiene, peer != effective dongle identity).
      * 0xB2 = semantically-rejected (0xB1 stays structural). The identity leg
      * uses the FACTORY MAC (not a live override — a record replacing an
      * override is judged against the chip identity). */
-    if (!bond_record_semantic_valid(&rec,
+    else if (!bond_record_semantic_valid(&rec,
 #if DONGLE_HAS_RF
-                                    RF_FactoryMac()
+                                         RF_FactoryMac()
 #else
-                                    0
+                                         0
 #endif
-                                    )) {
-        iap_err_count++;
-        send_status4(0xB2);
-        return;
+                                         )) {
+        status = 0xB2;
     }
-
     /* V2: key/flag canonical form. 0xB3 = a provisioned key that is blank/erased,
      * or a key left in the record without BOND_FLAG_ENC_KEY set. Also rejects a
      * redacted BondRead view written straight back (ENC_KEY set, key zeroed). */
-    if (!bond_key_flags_valid(&rec)) {
-        iap_err_count++;
-        send_status4(0xB3);
-        return;
+    else if (!bond_key_flags_valid(&rec)) {
+        status = 0xB3;
     }
-
-    uint8_t status = (uint8_t)bond_save(&rec);
-    if (status) {
-        iap_err_count++;
-        send_status4(status);   /* 0x01 erase / 0x02 write NV failure */
-        return;
+    /* 0x01 erase / 0x02 write NV failure */
+    else if ((status = (uint8_t)bond_save(&rec)) != 0u) {
     }
-
     /* Read-back verification -- the same discipline the RF task applies to
      * its own persists (rf_persist_bond_task) and BondClear applies to the
      * erase. bond_save returning 0 only says the flash driver reported
      * success; the record the NEXT BOOT will load is what must match. 0xB4 =
      * written-but-verify-failed: nothing is applied to the running task, so
      * RAM keeps the previous coherent state. */
-    {
-        bond_record_t back __attribute__((aligned(4)));
-        if (!bond_load(&back) || !bond_tuple_equal(&back, &rec)) {
-            iap_err_count++;
-            send_status4(0xB4);
-            return;
+    else if (!bond_load(&back) || !bond_tuple_equal(&back, &rec)) {
+        status = 0xB4;
+    } else {
+        failed = 0u;
+#if DONGLE_HAS_RF
+        /* Install into the RUNNING task (finding-2 P0: BondWrite used to
+         * persist and report success while the live crypto state ran the old
+         * key until a reset -- the freshly provisioned peer then required
+         * encryption the dongle would not speak, and "reboot the dongle" was
+         * an undocumented required step). 0xB5 = saved+verified but apply
+         * DEFERRED: a key removal landed while the encrypted link is live; it
+         * takes effect when the link drops (fail-closed until then). */
+        if (RF_ApplyBondRecord(&rec)) {
+            status = 0xB5;
         }
+#endif
     }
 
-#if DONGLE_HAS_RF
-    /* Install into the RUNNING task (finding-2 P0: BondWrite used to persist
-     * and report success while the live crypto state ran the old key until a
-     * reset -- the freshly provisioned peer then required encryption the
-     * dongle would not speak, and "reboot the dongle" was an undocumented
-     * required step). 0xB5 = saved+verified but apply DEFERRED: a key
-     * removal landed while the encrypted link is live; it takes effect when
-     * the link drops (fail-closed until then). */
-    if (RF_ApplyBondRecord(&rec)) {
-        send_status4(0xB5);
-        return;
+    iap_wipe(&rec, (uint8_t)sizeof(rec));
+    iap_wipe(&back, (uint8_t)sizeof(back));
+    if (failed) {
+        iap_count_error();
     }
-#endif
-    send_status4(0x00);
+    send_status4(status);
 }
 
 #if DONGLE_KEX_BENCH
@@ -435,9 +498,12 @@ static void handle_bond_clear(void)
     /* Firmware-side erase + readback verification (the only trustworthy
      * clear: host-side DataFlash writes around the running RF firmware
      * corrupt the page). On success, RF_TombstoneBond() (below) invalidates the
-     * in-RAM bond and blocks re-persist + new accept/promote until reset so the
-     * clear survives; a currently-live link keeps forwarding until it drops (it
-     * cannot reacquire or re-persist), and is gone at the next reset. */
+     * in-RAM bond and blocks re-persist + new accept/promote until a chip reset
+     * or a verified BondWrite so the clear survives. A currently-live plaintext
+     * link keeps forwarding until it
+     * drops (it cannot reacquire or re-persist) and is gone at the next reset;
+     * an encrypted one stops at once, because the tombstone also destroys the
+     * key and every frame then fails closed. */
     uint8_t status = (uint8_t)bond_clear();
     if (status == 0) {
 #if DONGLE_HAS_RF
@@ -449,7 +515,7 @@ static void handle_bond_clear(void)
         RF_TombstoneBond();
 #endif
     } else {
-        iap_err_count++;
+        iap_count_error();
     }
     send_status4(status);
 }
@@ -880,14 +946,31 @@ void IAP_Service(void)
     static uint32_t svc_start;
 
     switch (svc_state) {
-    case IAP_SVC_IDLE:
+    case IAP_SVC_IDLE: {
+        /* Past this point the reboot is committed: RF quiesce is one-way, so
+         * completing it is the only sane exit. Latch that separately from
+         * iap_reboot_pending, which a bus reset may still clear -- and read
+         * and latch under one mask, or a reset between the two would cancel
+         * a reboot that then went ahead.
+         *
+         * The unmasked test first is not an optimisation: this runs on every
+         * pass of the main loop, and masking interrupts on every pass is the
+         * pattern that broke enumeration on the CH592 (USB_ServiceRemoteWake
+         * has the history). A reset after it is caught by the masked re-read. */
         if (!iap_reboot_pending) {
             return;
         }
-        /* Past this point the reboot is committed: RF quiesce is one-way, so
-         * completing it is the only sane exit. Latch that separately from
-         * iap_reboot_pending, which a bus reset may still clear. */
-        iap_reboot_committed = 1;
+        uint32_t irq = __risc_v_disable_irq();
+        uint8_t go = iap_reboot_pending;
+
+        if (go) {
+            iap_reboot_committed = 1;
+        }
+        (void)__risc_v_enable_irq(irq);
+        if (!go) {
+            return;
+        }
+    }
 #if DONGLE_HAS_RF
         RF_QuiesceRequest();
 #endif

@@ -83,19 +83,29 @@ uint8_t dongle_nv_is_erased(uint32_t off, uint32_t len)
      * bond_save() verification, which pass sizeof(bond_record_t), are not
      * rejected as "over the buffer". Aligned for the EEPROM_READ DMA path. */
     uint8_t buf[BOND_RECORD_MAX_NV] __attribute__((aligned(4)));
+    volatile uint8_t *w = buf;
+    uint8_t erased = 1u;
 
     if (len > sizeof(buf)) {
         return 0u;
     }
     if (EEPROM_READ(off, buf, len) != 0) {
-        return 0u;
-    }
-    for (uint32_t i = 0; i < len; i++) {
-        if (buf[i] != 0xffu) {
-            return 0u;
+        erased = 0u;
+    } else {
+        for (uint32_t i = 0; i < len; i++) {
+            if (buf[i] != 0xffu) {
+                erased = 0u;
+                break;
+            }
         }
     }
-    return 1u;
+    /* What was read is the stored bond record whenever the range is not
+     * erased, link key included (bond_save asks before it erases). Do not
+     * leave it on the stack. */
+    for (uint32_t i = 0; i < sizeof(buf); i++) {
+        w[i] = 0u;
+    }
+    return erased;
 }
 
 uint8_t dongle_nv_erase(uint32_t off, uint32_t len)

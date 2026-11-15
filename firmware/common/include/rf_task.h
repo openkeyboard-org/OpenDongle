@@ -70,7 +70,8 @@ uint8_t RF_KexDiag(uint8_t out[22]);
 
 /* IAP 0x9C: a 32-byte entropy seed from the host (kex_proto.h, KEX_SEED_*).
  * Held until the next private-key draw folds it into the pool, then wiped;
- * a later seed replaces one still waiting. RAM only: it is lost at reset.
+ * a later seed replaces one still waiting. RAM only: it is lost when the
+ * chip resets or loses power (a USB bus reset leaves it).
  * Main-loop context only (the IAP handler): the draw that consumes the seed
  * runs there too, and neither is protected against the other. */
 void RF_KexSeed(const uint8_t seed[32]);
@@ -82,7 +83,8 @@ void RF_SetHIDCallback(rf_hid_cb_t cb);
 /* CODEREVIEW N06: the IAP BondClear handler calls this right after erasing the
  * DataFlash bond, so the running RF task can't re-persist its still-live in-RAM
  * bond over the cleared record. Invalidates the in-RAM bond, cancels any pending
- * persist, and blocks further persists until the next reset. */
+ * persist, and blocks further persists until the next reset or a verified
+ * BondWrite (RF_ApplyBondRecord), whichever comes first. */
 void RF_TombstoneBond(void);
 
 /* The IAP BondWrite handler calls this AFTER bond_save plus a
