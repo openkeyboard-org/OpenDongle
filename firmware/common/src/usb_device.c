@@ -226,7 +226,7 @@ static void usb_ep1_cancel_owned(void)
  * buffer: a bus reset zeroes that buffer from the ISR (the cancelled command
  * may be a key or a seed), and a handler reading it in place could check one
  * packet and act on another -- a seed with its tail zeroed, or an argument
- * turned into the arming value (codex, 2026-11-14). iap_pkt_running marks
+ * turned into the arming value. iap_pkt_running marks
  * the span in which the foreground owns a command; while it is set neither
  * a bus reset nor CLEAR_FEATURE re-opens EP6 OUT, so nothing new can be
  * admitted behind the callback's back. iap_pkt_reset records a bus reset
@@ -786,7 +786,7 @@ void USB_IRQHandler(void)
          * SETUP, clear again; the SDK's CompoundDev handler does the same.
          * Handling only the SETUP, as this did, dropped the transfer: an EP6
          * command the host had been ACKed for never ran, and a keyboard
-         * report's completion was never seen (codex, 2026-11-14).
+         * report's completion was never seen.
          *
          * Not exercised on hardware, and resting on the SDK's reading of two
          * things the datasheet leaves unsaid: that SETUP_ACT read after the
@@ -911,8 +911,8 @@ void USB_IRQHandler(void)
                  * until the poll re-ACKs, and neither a bus reset nor
                  * CLEAR_FEATURE re-opens the endpoint meanwhile, so nothing
                  * should get here. Whether this SIE reports a wrong-toggle
-                 * OUT against a NAKing endpoint is not established (codex,
-                 * 2026-11-14); if it does, this keeps the NAK, where the
+                 * OUT against a NAKing endpoint is not established; if it
+                 * does, this keeps the NAK, where the
                  * branch below would re-open the endpoint under the running
                  * command and its epilogue would then drop the next packet. */
                 R8_UEP6_CTRL = (R8_UEP6_CTRL & ~MASK_UEP_R_RES) | UEP_R_RES_NAK;
