@@ -6,7 +6,8 @@
 use anyhow::{bail, Result};
 
 use crate::iap::{
-    check, hexsp, op_arm, op_bond_clear, op_bond_read, op_bond_write, op_disarm, IapDevice, ACK_GETDEVINFO, ACK_OK,
+    check, hexsp, op_arm, op_bond_clear, op_bond_read, op_bond_write, op_disarm, IapDevice,
+    ACK_GETDEVINFO, ACK_OK,
 };
 
 const BOND_MAGIC: u32 = 0x444E_4F42;
@@ -161,7 +162,10 @@ fn format_mac(mac: &[u8; 6]) -> String {
 fn raw_without_key(raw: &[u8; BOND_RECORD_LEN]) -> String {
     let mut shown = *raw;
     shown[28..44].fill(0);
-    format!("{} (link key bytes 28..43 masked)", hexsp(&shown, shown.len()))
+    format!(
+        "{} (link key bytes 28..43 masked)",
+        hexsp(&shown, shown.len())
+    )
 }
 
 /// `line`: see the call sites; part of the diagnostics readout.
@@ -326,7 +330,9 @@ pub fn clear_bond(dev: &IapDevice) -> Result<()> {
     // The disarm reply after a clear has been seen as a status frame rather
     // than the usual ack, so only a transport failure is reported.
     if op_disarm(dev).is_err() {
-        eprintln!("warning: disarm not confirmed; replug the dongle to be sure the session is closed");
+        eprintln!(
+            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
+        );
     }
     let reply = reply?.ok_or_else(|| anyhow::anyhow!("BondClear: no response (timeout)"))?;
     if reply.len() < 3 || reply[0] != ACK_OK {
@@ -388,8 +394,8 @@ pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
     let outcome = (|| -> Result<u8> {
         let arm = op_arm(dev)?;
         check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
-        let response = op_bond_read(dev)?
-            .ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
+        let response =
+            op_bond_read(dev)?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
         let record = match decode_response(&response)? {
             BondRead::Valid(record) => record,
             BondRead::Invalid(_) => bail!("no valid bond: pair the keyboard before provisioning"),
@@ -403,7 +409,9 @@ pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
         Ok(reply[2])
     })();
     if op_disarm(dev).is_err() {
-        eprintln!("warning: disarm not confirmed; replug the dongle to be sure the session is closed");
+        eprintln!(
+            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
+        );
     }
 
     match outcome? {
@@ -484,10 +492,18 @@ mod tests {
         };
         assert!(record.redacted);
         assert_eq!(record.flags, BOND_FLAG_ENC_CAPABLE | BOND_FLAG_ENC_KEY);
-        let text = render_bond(&decode_response(&reply).unwrap()).join("
-");
-        assert!(text.contains("encryption      active (capable + key)"), "{text}");
-        assert!(text.contains("link key        present (redacted)"), "{text}");
+        let text = render_bond(&decode_response(&reply).unwrap()).join(
+            "
+",
+        );
+        assert!(
+            text.contains("encryption      active (capable + key)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("link key        present (redacted)"),
+            "{text}"
+        );
     }
 
     #[test]
