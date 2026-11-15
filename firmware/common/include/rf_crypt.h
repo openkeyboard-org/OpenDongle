@@ -102,6 +102,58 @@ static inline void rf_crypt_beacon_accept_latches(uint8_t bond_valid,
     }
 }
 
+/* ----------------------------------------- re-pairing the stored keyboard
+ *
+ * A keyboard that is unpaired and paired again has erased its link key; one
+ * that is merely put into pairing has not. Either way the dongle sees a
+ * pairing beacon from the address it is bonded to, keeps the encryption
+ * requirement and carries the stored key over (rf_crypt_beacon_accept_latches,
+ * bond_carry_link_key). For the keyboard that still has its key that is the
+ * right answer: the relationship is restored. For the one that erased it the
+ * link was dead: the dongle dropped everything it sent as plaintext on an
+ * encrypted bond and started no new exchange, because the bond had a key.
+ * The bond had to be cleared or replaced to get out of it: a host tool, or
+ * pairing a different keyboard first.
+ *
+ * The dongle cannot tell the two apart from the beacon, so it does not try.
+ * The beacon only OFFERS a re-pair, when it meets everything a different
+ * keyboard's beacon must meet on a bonded dongle -- the pairing window is
+ * open and the signal is strong enough -- and arrived on the pairing address
+ * rather than the bond's. What the keyboard sends next decides:
+ *
+ *   - a frame that verifies under the stored key: it has the key. The offer
+ *     is withdrawn and nothing changes.
+ *   - a plaintext HID frame: it is TAKEN to have no key. The stored key is
+ *     dropped, the bond becomes keyless as a different keyboard's would be,
+ *     and the usual post-pairing exchange can give it a new one, under that
+ *     exchange's own conditions. (rf_task.c: rf_repair_void.)
+ *
+ * Plaintext is a trigger, not evidence: the frame carries nothing that says
+ * who sent it. The offer has no expiry either. It stands, across link lapses
+ * and reconnects, until one of the two answers arrives, a different keyboard
+ * pairs, a host tool replaces or clears the bond, or the dongle resets; a
+ * keyboard that was re-paired and then left idle is repaired when it is
+ * first typed on. So making the offer needs a beacon past the gate, and
+ * taking it up afterwards needs only a plaintext HID frame on the link.
+ *
+ * What it costs: from the moment the key is dropped until the exchange
+ * completes, the keyboard's plaintext is forwarded, as after any first
+ * pairing. What it does not add: whoever can get a beacon past this gate can
+ * already pair a keyboard with a different address and be forwarded the same
+ * way. A beacon from the stored address that does not pass the gate makes no
+ * offer; the bond then stays fail-closed, unless an earlier beacon in the
+ * same power-up made one that is still standing.
+ *
+ * `new_pair_ok` is the caller's evaluation of the new-keyboard gate for this
+ * beacon. */
+static inline uint8_t rf_crypt_repair_offered(uint8_t bond_valid,
+                                              uint8_t same_peer,
+                                              uint8_t new_pair_ok,
+                                              uint8_t on_bond_aa)
+{
+    return (uint8_t)(bond_valid && same_peer && new_pair_ok && !on_bond_aa);
+}
+
 /* --------------------------------------------- authenticated-liveness guard
  *
  * How long an active encrypted bond may go with nothing authenticating before

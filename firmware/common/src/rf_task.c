@@ -2024,6 +2024,39 @@ static uint8_t rf_crypt_pending_plain;
  * host-provisioned -- and the establishment handshake that binds and
  * authenticates the advert is where it gets closed properly. */
 static uint8_t rf_crypt_peer_capable;
+#if DONGLE_KEX
+/* Re-pairing the stored keyboard (policy: rf_crypt.h, rf_crypt_repair_offered).
+ *   rf_repair_pending   a beacon made the offer and nothing has answered it.
+ *                       Set at the accept; withdrawn by a frame that verifies
+ *                       under the stored key, by a different keyboard's
+ *                       accept, by a host apply or clear, and when acted on.
+ *   rf_repair_void_req  a plaintext HID frame arrived while it was pending.
+ *                       Set in the radio IRQ sink, acted on in task context
+ *                       (rf_repair_void).
+ *   rf_bond_key_void    the stored link key has been dropped; the persist
+ *                       that follows must write the keyless candidate rather
+ *                       than carry the key over. Cleared once a persist has
+ *                       made flash agree, and by a host apply or clear.
+ * All three are RAM only: after a reset before the keyless record is written
+ * the old key is normally still on flash (a reset during the write itself
+ * can leave no record at all), and the user pairs again.
+ *
+ * rf_rx_aa is the access address rf_start_rx last armed the radio to receive
+ * on, written once the previous receive has been shut down. rf_access_addr is
+ * the address REQUESTED, and is assigned before that: for the moment in
+ * between, a frame caught on the old address would be judged by the new one.
+ * The offer is judged by rf_rx_aa. Two limits. It is right wherever an offer
+ * can be made, not everywhere: the EV10 reacquire configures the bond's
+ * address without going through rf_start_rx (a host-applied record can have
+ * changed it), but the beacon accept is disabled there and rf_start_rx runs
+ * before accepts resume. And whether the radio can still deliver a frame
+ * after RF_Shut returns is not established; if it can, this narrows the
+ * mismatch rather than closing it. */
+static volatile uint8_t rf_repair_pending;
+static volatile uint8_t rf_repair_void_req;
+static volatile uint8_t rf_bond_key_void;
+static volatile uint32_t rf_rx_aa;
+#endif
 
 /* Deferred crypto work: two latches instead of two event bits.
  *
@@ -2471,6 +2504,52 @@ static void rf_kex_stop(void)
     rf_kex = 0;
 }
 
+/* The stored keyboard was re-paired and has sent plaintext, which is taken as
+ * it holding no key (rf_crypt.h, "re-pairing the stored keyboard"): drop the
+ * stored key and make the bond what a different keyboard's would be at this
+ * point -- keyless, plaintext dispatch, capability kept, the authenticated-
+ * silence guard stood down -- so that the exchange below may start once the
+ * keyless record is on flash, under its usual conditions. Task context.
+ *
+ * Only on a confirmed, persisted bond: before that the fresh pairing's own
+ * persist is still to run, and it would carry the key back. The request is
+ * consumed either way; the keyboard repeats an unacknowledged report every
+ * poll, so the next one asks again. */
+static void rf_repair_void(void)
+{
+    uint8_t go;
+    uint32_t irq = __risc_v_disable_irq();
+
+    go = (uint8_t)(rf_repair_pending && rf_crypt_bond_enc && rf_bond_valid
+                   && rf_bond_persisted && !rf_bond_tombstone
+                   && rf_state == RF_STATE_CONNECTED
+#if RF_CONFIRM_BEFORE_PERSIST
+                   && rf_confirm_state == RF_CONFIRM_STATE_NONE
+#endif
+                   );
+    rf_repair_void_req = 0u;
+    if (go) {
+        rf_repair_pending = 0u;
+        rf_bond_key_void = 1u;
+        rf_crypt_bond_enc = 0u;
+        /* Nothing sealed under the old key is owed or wanted any more, and
+         * the guard that polices an encrypted link must not end this one: the
+         * poll that got here may already have asked for a release. */
+        rf_crypt_announce_count = 0u;
+        rf_crypt_fifo_head = rf_crypt_fifo_tail;
+        rf_crypt_silence_armed = 0u;
+        rf_crypt_force_release = 0u;
+        /* The record on flash still has the key: not persisted, which also
+         * holds the exchange back until the keyless one is written. */
+        rf_bond_persisted = 0;
+        rf_request_bond_persist();
+    }
+    (void)__risc_v_enable_irq(irq);
+    if (go) {
+        rf_crypt_clear();       /* outside the mask, as RF_TombstoneBond does */
+    }
+}
+
 /* Once per poll slot, connected, task context: feed the pool, notice a new
  * connection, and start an exchange when one is due. */
 static void rf_kex_poll_tick(void)
@@ -2478,6 +2557,9 @@ static void rf_kex_poll_tick(void)
     uint32_t now = hal_now();
     uint32_t stamp = rf_last_conn_rx_tsys;
 
+    if (rf_repair_void_req) {
+        rf_repair_void();
+    }
     rf_kex_poll_tsys = now;
     if (stamp != rf_kex_last_stamp) {           /* a reception since last poll */
         rf_kex_last_stamp = stamp;
@@ -2950,6 +3032,30 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                     (uint8_t)(tmos_memcmp(rf_peer_mac, &rxBuf[2], 6) != 0),
                     &rf_crypt_bond_enc,
                     &rf_crypt_peer_capable);
+#if DONGLE_KEX
+                /* A beacon from the stored keyboard that passes the gate a new
+                 * keyboard's must (the second disjunct of the accept condition
+                 * above, which on a bonded dongle is the open window, the
+                 * signal floor and a usable MAC) and came in on the pairing
+                 * address offers a re-pair; what the keyboard sends once
+                 * connected decides it (rf_crypt.h). Nothing changes here: the
+                 * requirement and the key stay. A different keyboard's accept
+                 * withdraws an offer made to the previous one.
+                 * rf_pair_window_open is still this beacon's value; it is
+                 * closed below. The address is the one the radio was armed
+                 * on (rf_rx_aa), not the one last requested. */
+                if (!rf_bond_valid || !tmos_memcmp(rf_peer_mac, &rxBuf[2], 6)) {
+                    rf_repair_pending = 0u;
+                    rf_repair_void_req = 0u;
+                } else if (rf_crypt_repair_offered(
+                               1u, 1u,
+                               (uint8_t)(rf_pair_window_open
+                                         && rf_rssi >= RF_PAIR_MIN_RSSI
+                                         && rf_accept_peer_mac(&rxBuf[2])),
+                               (uint8_t)(rf_rx_aa == rf_bond_aa))) {
+                    rf_repair_pending = 1u;
+                }
+#endif
 #endif
                 tmos_memcpy(rf_peer_mac, &rxBuf[2], 6);
                 /* A new pair is now in progress (this only runs for a fresh
@@ -3098,6 +3204,28 @@ static void rf_phy_event_sink(hal_rf_event_t ev, const uint8_t *rx, uint8_t rxle
                          * poll-ack confirm + supervision are unchanged.) */
                         rf_crypt_plain_drop++;
                         enc_handled = 1u;
+#if DONGLE_KEX
+                        /* ...unless a re-pair was offered: then it is taken
+                         * as the keyboard having no key. Still dropped, still
+                         * unacknowledged (the keyboard sends it again); the
+                         * task drops the stored key (rf_repair_void).
+                         *
+                         * It also confirms the tentative pairing, as a bare
+                         * reply or a plaintext HID frame does on a keyless
+                         * bond (N11, below): a keyboard with a report already
+                         * queued answers its first poll with that report and
+                         * never sends the bare reply, so without this the
+                         * pairing is never persisted and the repair, which
+                         * waits for that, never runs. */
+                        if (rf_repair_pending) {
+                            rf_repair_void_req = 1u;
+#if RF_CONFIRM_BEFORE_PERSIST
+                            if (rf_confirm_state == RF_CONFIRM_STATE_WAIT_RX) {
+                                rf_confirm_state = RF_CONFIRM_STATE_WAIT_REARM;
+                            }
+#endif
+                        }
+#endif
                     }
                 }
 #if DONGLE_KEX
@@ -4233,6 +4361,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                     }
 #endif
                 }
+#if DONGLE_KEX
+                /* The keyboard has the stored key: no re-pair to complete.
+                 * Under the mask, so a plaintext frame in the sink cannot set
+                 * the request between the two stores. */
+                rf_repair_pending = 0u;
+                rf_repair_void_req = 0u;
+#endif
                 (void)__risc_v_enable_irq(fb_irq);
                 rf_crypt_ok_count++;
                 rf_crypt_last_auth_tsys = hal_now();  /* authenticated liveness */
@@ -4512,6 +4647,9 @@ static void rf_start_rx(void)
      * persists across TX. Callers that change rf_access_addr rely on the
      * reconfigure here. */
     hal_rf_shut();
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    rf_rx_aa = rf_access_addr;      /* the old receive is down: see rf_rx_aa */
+#endif
     rf_configure(rf_access_addr);
     {
         uint8_t rx_status = hal_rf_start_rx(HAL_RF_CHANNEL_CURRENT, 0);
@@ -5281,9 +5419,15 @@ static void rf_persist_bond_task(void)
      * bond record mid-read; clear the pending flag atomically with the copy.
      * (Brief, post-pair, well clear of boot -- no USB-enum interaction.) */
     bond_record_t want __attribute__((aligned(4)));
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    uint8_t key_void;
+#endif
     uint32_t irq = __risc_v_disable_irq();
     tmos_memcpy(&want, &rf_bond_pending_rec, sizeof(want));
     rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    key_void = rf_bond_key_void;
+#endif
     (void)__risc_v_enable_irq(irq);
 
     bond_record_t cur __attribute__((aligned(4)));
@@ -5294,8 +5438,16 @@ static void rf_persist_bond_task(void)
          * candidate would be written over a provisioned key -- and precisely
          * because bond_tuple_equal() compares link_key, the skip below would
          * NOT have caught it. Task context, on the IRQ-snapshot-isolated local:
-         * the only place both records are in scope. */
-        bond_carry_link_key(&cur, &want);
+         * the only place both records are in scope.
+         *
+         * Not after rf_repair_void: the stored key has been dropped, and
+         * the keyless candidate is what must be written. */
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        if (!key_void)
+#endif
+        {
+            bond_carry_link_key(&cur, &want);
+        }
         if (want.flags & BOND_FLAG_ENC_KEY) {
             /* Keep the published RAM snapshot consistent with what is (or
              * already was) in flash: without this rf_bond_persisted would latch
@@ -5323,6 +5475,11 @@ static void rf_persist_bond_task(void)
              * dongle identity); no write */
             rf_bond_persisted = 1;
             rfd_persist_last_reason = RFD_PERSIST_ALREADY;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+            if (key_void) {
+                rf_bond_key_void = 0u;  /* flash already holds the keyless record */
+            }
+#endif
             return;
         }
     }
@@ -5391,6 +5548,11 @@ static void rf_persist_bond_task(void)
         rf_bond_persisted = 1;
         rfd_persist_ok++;
         rfd_persist_last_reason = RFD_PERSIST_OK;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        if (key_void) {
+            rf_bond_key_void = 0u;      /* the keyless record is on flash */
+        }
+#endif
     } else {
         rfd_persist_last_reason = RFD_PERSIST_READBACK;
     }
@@ -5497,6 +5659,11 @@ void RF_TombstoneBond(void)
     rf_bond_valid = 0;
     rf_bond_persisted = 0;
     rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+    rf_repair_pending = 0u;
+    rf_repair_void_req = 0u;
+    rf_bond_key_void = 0u;
+#endif
     (void)__risc_v_enable_irq(irq);
     hal_event_cancel(RF_EVT_PERSIST_BOND);
 #if DONGLE_RF_CRYPT
@@ -5577,6 +5744,12 @@ uint8_t RF_ApplyBondRecord(const bond_record_t *rec)
         rf_bond_valid = 1;
         rf_bond_persisted = 1;        /* the record IS the verified flash content */
         rf_bond_persist_pending = 0;
+#if DONGLE_RF_CRYPT && DONGLE_KEX
+        /* A verified record's key is the bond's key: no re-pair is open. */
+        rf_repair_pending = 0u;
+        rf_repair_void_req = 0u;
+        rf_bond_key_void = 0u;
+#endif
         rf_bond_default_aa = rec->session_aa;
         if (rec->conn_interval) rf_conn_interval = rec->conn_interval;
         if (rec->conn_timeout)  rf_conn_timeout  = rec->conn_timeout;

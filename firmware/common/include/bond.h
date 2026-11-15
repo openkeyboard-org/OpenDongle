@@ -144,7 +144,11 @@ static inline int bond_key_flags_valid(const bond_record_t *rec)
  * the key it used to hold -- factory-reset, re-flashed to a plaintext build, or
  * replacement hardware reusing the MAC -- now meets a dongle that still requires
  * encryption, so the link is fail-closed dead until the operator clears the bond
- * (IAP 0x89, or unpair). That is the correct failure direction and is strictly
+ * (IAP 0x89, or unpair) -- unless the dongle is built with the link-key
+ * exchange and the re-pair met the conditions in rf_crypt.h ("re-pairing the
+ * stored keyboard"): plaintext from the keyboard is then taken as it having
+ * no key, the stored key is dropped, and the usual exchange can negotiate a
+ * new one. Otherwise that is the correct failure direction and is strictly
  * better than what it replaces: before this fix the same re-pair silently
  * DOWNGRADED a provisioned pair to plaintext, which is the security failure
  * AR-01 describes. MAC equality is peer identity, not proof of key possession;
