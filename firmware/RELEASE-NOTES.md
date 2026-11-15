@@ -5,6 +5,25 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## 0.97.0: bootloader v0.12 enumerates behind a Genesys USB 2.0 hub
+
+Firmware 0.97.0 is built against OpenBoot v0.12. With v0.11, a dongle sent into its bootloader
+behind a Genesys Logic USB 2.0 hub (`05E3:0610`) was enumerated by Windows without its serial
+number, the HID driver failed to start (code 10) and `openboot flash` found no device; after the
+10 s idle window the application came back unharmed. A root port and another make of hub worked.
+The bootloader handled a completed transfer and the SETUP flagged behind it in one pass and
+cleared the transfer flag once, where the CH592 datasheet requires the transfer to be retired
+first and the flag cleared a second time after the SETUP. One unit on one port of that hub failed
+7 updates out of 7 with v0.11. With v0.12 the same unit passed 3 out of 3 there, 2 out of 2 behind
+the other hub and 1 on a root port.
+
+The application is not affected by the defect and its code did not change for this; its build id
+did, because the bootloader's revision is one of its inputs.
+
+A bootloader cannot be replaced by an update, so a unit made with v0.11 keeps it. Such a unit is
+updated on a root port, or on a hub it is known to work behind. `openboot` prints the bootloader
+version when it connects.
+
 ## Halt between receiver windows while the host sleeps (CH592)
 
 With the windowed receiver of the previous entry the dongle is idle between windows, and while
