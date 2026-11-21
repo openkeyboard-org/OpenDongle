@@ -12,7 +12,7 @@ Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from V
 | `OpenDongle-CH592.kicad_sch` | Schematic |
 | `OpenDongle-CH592.kicad_pcb` | PCB layout |
 | `lib/OpenDongle.kicad_sym` | Project-owned CH592D and four-pin PCB USB symbols |
-| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and independently created, WCH-informed antenna footprints |
+| `lib/OpenDongle.pretty/` | Project-owned USB edge connector, independently created, WCH-informed antenna, and CH592D QFN-20 footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 | `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
@@ -130,11 +130,11 @@ The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source req
 
 | References | Qty | Value / part | Package | Suggested LCSC part | Notes |
 | --- | ---: | --- | --- | --- | --- |
-| U3 | 1 | WCH CH592D | QFN-20, 3 mm x 3 mm, exposed pad | C41417128 | Confirm pin-1 orientation and exposed-pad soldering |
+| U3 | 1 | WCH CH592D | QFN-20, 3 mm x 3 mm, exposed pad | C41417128 | Confirm pin-1 orientation and exposed-pad soldering. Uses the project footprint, whose signal pad rows are 2.35 mm apart to clear the 1.9 +/- 0.2 mm exposed pad in datasheet V1.9 |
 | U2 | 1 | XC6206P332MR-G, 3.3 V LDO | SOT-23-3 | C5446 | |
 | Y1 | 1 | 32 MHz crystal | 3225, 4 pad | C7294588 | No external load capacitors fitted; confirm the part's load capacitance matches what firmware programs into the internal load caps |
 | C1, C2, C4 | 3 | 1 uF | 0603 | C15849 | X5R or better, 10 V minimum |
-| C5 | 1 | 470 nF | 0603 | C47339 | Alternate: C1623 |
+| C5 | 1 | 470 nF | 0603 | C1623 | X7R, 25 V. Do not substitute C47339: it is an 0402 part and does not fit the 0603 pads |
 
 AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and are not assembly parts.
 

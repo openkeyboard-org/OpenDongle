@@ -1,12 +1,12 @@
-%TF.GenerationSoftware,KiCad,Pcbnew,10.0.5*%
-%TF.CreationDate,2026-08-27T19:56:04+05:30*%
+%TF.GenerationSoftware,KiCad,Pcbnew,10.0.8*%
+%TF.CreationDate,2026-11-21T08:29:27+00:00*%
 %TF.ProjectId,OpenDongle-CH592,4f70656e-446f-46e6-976c-652d43483539,rev?*%
 %TF.SameCoordinates,Original*%
 %TF.FileFunction,Soldermask,Bot*%
 %TF.FilePolarity,Negative*%
 %FSLAX46Y46*%
 G04 Gerber Fmt 4.6, Leading zero omitted, Abs format (unit mm)*
-G04 Created by KiCad (PCBNEW 10.0.5) date 2026-08-27 19:56:04*
+G04 Created by KiCad (PCBNEW 10.0.8) date 2026-11-21 08:29:27*
 %MOMM*%
 %LPD*%
 G01*
