@@ -41,8 +41,13 @@ committed, verified and booted 5 out of 5 behind the Genesys hub, 5 out of 5 on 
 out of 7 behind the Anker hub, alternating slots; the bootloader handed back to the application
 by itself after its idle window on all three; and after pairing one key exchange completed and
 552 encrypted frames were verified with none dropped. Both application builds of this release
-reached the unit by update. The factory image as a file was not flashed over ISP, and CH570 was
-not run.
+reached the unit by update.
+
+The factory image was then flashed over ISP as a file, onto the same unit, by the procedure in
+the factory instructions. It enumerated as OpenDongle 2.4G and reported 0.97.1 with update
+`clean`; its bootloader reported v0.13; and `openboot verify` found the CRC of slot A on the
+device equal to that of the application inside the file. The bootloader region of the file is
+byte for byte the bootloader that was benched. CH570 was not run.
 
 A bootloader cannot be replaced by an update, so a unit made with v0.12 keeps it. Behind such a
 hub it can take 7 s to appear after `opendongle --enter-bootloader`; `openboot` has to be started
