@@ -40,6 +40,13 @@ fp-info-cache
 # stale the moment the layout changes, so they are not tracked. Regenerate with
 # the Fabrication Toolkit plugin before every order.
 hardware/**/production/
+# The plugin's saved dialog options, per-developer.
+hardware/**/fabrication-toolkit-options.json
+
+# Production bundles: zips of production/ plus the flashing instructions and
+# factory firmware, built for a specific fab order. Like production/ itself they
+# are specific to our fab and production run, so they are not tracked.
+hardware/**/*.zip
 
 # Local git-based history (KiCad 9.0+)
 .history
