@@ -5,6 +5,49 @@ silicon. This document states the security property of the RF link, the known
 issues that ship with it, and the manufacturing steps a unit needs before it
 leaves the bench.
 
+## 0.97.1: bootloader v0.13 is ready to answer when it attaches
+
+Firmware 0.97.1 is built against OpenBoot v0.13: OpenBoot `main` with two changes on top. The
+bootloader in 0.97.0 was v0.12 built from an older OpenBoot, so this one also brings what `main`
+has gained since, chiefly its own flash driver in place of the vendor library, link-time
+optimisation and an idle timeout measured in timer ticks. It is 5,496 bytes where that one was
+6,164. The application's code did not change; its version and build id did.
+
+**Start-up order.** The bootloader attached to USB first and worked out the active slot second.
+For the dongle that is a CRC over a whole image, and over two when slot B holds the newer one,
+because slot A is checked first. Until it finished, the device was on the bus and answered
+nothing. Behind a Genesys Logic USB 2.0 hub (`05E3:0610`) Windows saw the bootloader 1.6 s after
+the entry request when slot A was the newer and 6.8 s after it when slot B was, with no device
+shown in between. The idle window runs from the bootloader's own start, so about 4 s of its 10 s
+were left, and a script that waited 4 s gave up with nothing written. v0.13 does the check before
+it attaches. On one unit, on one port of that hub, entry then took 1.6 s from either slot, 7 times
+out of 7 each. v0.12 has the old order.
+
+On a root port and behind an Anker hub (`291A:2817`) the same unit takes 4.8 s and 4.1 s to
+appear. Neither depends on the slot and neither moved with this change.
+
+**Control requests.** `CLEAR_FEATURE(ENDPOINT_HALT)` on the report endpoint now only restarts
+its data sequence; it used to force the endpoint's answers as well, which could let a report
+overwrite one still being processed, or cancel a reply that was waiting to be collected.
+`SET_CONFIGURATION` now restarts both data sequences, as a host expects; a host that set the
+configuration a second time could otherwise lose the next report. The device descriptor carries
+the bootloader's version in binary-coded decimal, so Windows shows `REV_0013` where v0.12 showed
+`REV_000;`. None of the three was prompted by a failure seen on hardware, and Windows offers no
+way to provoke the first two on demand, so the bench shows that they do no harm, not that they
+work.
+
+Bench, one CH592 unit, bootloader bytes identical to this release's: CLI updates wrote,
+committed, verified and booted 5 out of 5 behind the Genesys hub, 5 out of 5 on a root port and 7
+out of 7 behind the Anker hub, alternating slots; the bootloader handed back to the application
+by itself after its idle window on all three; and after pairing one key exchange completed and
+552 encrypted frames were verified with none dropped. Both application builds of this release
+reached the unit by update. The factory image as a file was not flashed over ISP, and CH570 was
+not run.
+
+A bootloader cannot be replaced by an update, so a unit made with v0.12 keeps it. Behind such a
+hub it can take 7 s to appear after `opendongle --enter-bootloader`; `openboot` has to be started
+within the 4 s or so that are then left, or the unit goes back to its application unharmed.
+
 ## 0.97.0: bootloader v0.12 enumerates behind a Genesys USB 2.0 hub
 
 Firmware 0.97.0 is built against OpenBoot v0.12. With v0.11, a dongle sent into its bootloader
