@@ -1,8 +1,8 @@
 (kicad_symbol_lib
-	(version 20241209)
+	(version 20251024)
 	(generator "kicad_symbol_editor")
-	(generator_version "9.0")
-(symbol "CH592D"
+	(generator_version "10.0")
+	(symbol "CH592D"
 		(exclude_from_sim no)
 		(in_bom yes)
 		(on_board yes)
@@ -32,7 +32,7 @@
 				(justify left top)
 			)
 		)
-		(property "Footprint" "Package_DFN_QFN:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm"
+		(property "Footprint" "OpenDongle:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm_CH592D"
 			(at 0 0 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -504,7 +504,7 @@
 		)
 		(embedded_fonts no)
 	)
-(symbol "USB_A_PCB_4Pin"
+	(symbol "USB_A_PCB_4Pin"
 		(pin_names
 			(offset 1.016)
 		)

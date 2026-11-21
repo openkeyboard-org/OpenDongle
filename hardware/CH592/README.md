@@ -12,7 +12,7 @@ Unlike the [CH570](../CH570/) implementation, which runs the MCU straight from V
 | `OpenDongle-CH592.kicad_sch` | Schematic |
 | `OpenDongle-CH592.kicad_pcb` | PCB layout |
 | `lib/OpenDongle.kicad_sym` | Project-owned CH592D and four-pin PCB USB symbols |
-| `lib/OpenDongle.pretty/` | Project-owned USB edge connector and independently created, WCH-informed antenna footprints |
+| `lib/OpenDongle.pretty/` | Project-owned USB edge connector, independently created, WCH-informed antenna, and CH592D QFN-20 footprints |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 | `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
@@ -112,6 +112,7 @@ The antenna geometry and USB connector make the board construction part of the e
 | Minimum finished drill | 0.20 mm |
 | Minimum track/space used | 0.15 mm track, 0.127 mm design-rule clearance minimum |
 | Soldermask | Both sides; no soldermask over the USB contacts or antenna conductor |
+| Paste stencil | 0.10 mm recommended. U3's 0.70 mm x 0.20 mm signal-pad apertures have an area ratio of 0.80 at 0.10 mm and 0.67 at 0.12 mm |
 
 Additional requirements and checks:
 
@@ -130,11 +131,11 @@ The listed LCSC/JLCPCB numbers are suggested assembly parts, not sole-source req
 
 | References | Qty | Value / part | Package | Suggested LCSC part | Notes |
 | --- | ---: | --- | --- | --- | --- |
-| U3 | 1 | WCH CH592D | QFN-20, 3 mm x 3 mm, exposed pad | C41417128 | Confirm pin-1 orientation and exposed-pad soldering |
+| U3 | 1 | WCH CH592D | QFN-20, 3 mm x 3 mm, exposed pad | C41417128 | Confirm pin-1 orientation and exposed-pad soldering. Uses the project footprint, whose signal pad rows are 2.35 mm apart to clear the 1.9 +/- 0.2 mm exposed pad in datasheet V1.9 |
 | U2 | 1 | XC6206P332MR-G, 3.3 V LDO | SOT-23-3 | C5446 | |
 | Y1 | 1 | 32 MHz crystal | 3225, 4 pad | C7294588 | No external load capacitors fitted; confirm the part's load capacitance matches what firmware programs into the internal load caps |
 | C1, C2, C4 | 3 | 1 uF | 0603 | C15849 | X5R or better, 10 V minimum |
-| C5 | 1 | 470 nF | 0603 | C47339 | Alternate: C1623 |
+| C5 | 1 | 470 nF | 0603 | C1623 | X7R, 25 V. Do not substitute C47339: it is an 0402 part and does not fit the 0603 pads |
 
 AE2 (PCB antenna) and J1 (PCB USB connector) are fabricated as PCB copper and are not assembly parts.
 
@@ -164,10 +165,12 @@ The designators are non-contiguous: there is no **C3** and no **U1** (the parts 
 
 - The 0.8 mm FR-4 antenna was independently created, informed by the WCH reference antenna published in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib); no WCH CAD or artwork file was copied, imported, converted, or traced.
 - The PCB USB connector footprint is derived from the [USB armory](https://github.com/usbarmory/usbarmory) hardware design.
+- The CH592D QFN-20 footprint is a modified copy of `Package_DFN_QFN:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm` from the [KiCad footprint libraries](https://gitlab.com/kicad/libraries/kicad-footprints). That one file is licensed CC-BY-SA 4.0 with the [KiCad libraries exception](https://www.kicad.org/libraries/license/), not CERN-OHL-W-2.0; see [`../NOTICE`](../NOTICE).
 
 ## License
 
 This hardware design, including the independently created antenna
 implementation described in [`../NOTICE`](../NOTICE), is licensed under the
 CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See
-[`LICENSE`](LICENSE).
+[`LICENSE`](LICENSE). The one exception is the KiCad-derived CH592D footprint
+listed in [`../NOTICE`](../NOTICE), which is CC-BY-SA 4.0.

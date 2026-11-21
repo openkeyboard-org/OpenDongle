@@ -17,3 +17,22 @@ No WCH CAD, footprint, schematic, or artwork file was copied, imported,
 converted, or traced. The reference is retained as factual attribution for the
 design inspiration; the independently authored OpenKeyboard.org source files
 are licensed under CERN-OHL-W-2.0 with the rest of the hardware design.
+
+One footprint is not independently authored and is not licensed under
+CERN-OHL-W-2.0:
+
+* CH592/lib/OpenDongle.pretty/QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm_CH592D.kicad_mod
+
+It is a modified copy of Package_DFN_QFN:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm
+from the KiCad footprint libraries, copyright the KiCad library contributors:
+https://gitlab.com/kicad/libraries/kicad-footprints
+
+Changes made by OpenKeyboard.org: the 20 signal pads were shortened from the
+inner end (0.70 mm x 0.20 mm, 2.35 mm between opposing rows) to clear the
+CH592D exposed pad, the pin-1 silkscreen marker was moved, and the description
+was rewritten.
+
+That file is licensed under the Creative Commons Attribution-ShareAlike 4.0
+International licence (CC-BY-SA-4.0), with the KiCad libraries exception:
+https://creativecommons.org/licenses/by-sa/4.0/legalcode
+https://www.kicad.org/libraries/license/
