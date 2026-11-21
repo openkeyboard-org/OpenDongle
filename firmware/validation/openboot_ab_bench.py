@@ -324,7 +324,7 @@ def main() -> int:
                         help="restrict to one chip (default: every allowed probe)")
     parser.add_argument("--minichlink",
                         default=os.path.expanduser(
-                            "~/Development/Personal/WCH/ch32fun/minichlink/minichlink"))
+                            "~/Development/WCH/ch32fun/minichlink/minichlink"))
     parser.add_argument("--dry-run", action="store_true",
                         help="print every command without contacting a device")
     parser.add_argument("--scenario", default="all",

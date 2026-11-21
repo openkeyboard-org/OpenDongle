@@ -66,7 +66,7 @@ SDK_REVISION := 1e34c9450cd6df390153952c097cd09dd8a91aed
 # is what finally puts the bootloader's identity into the build id - previously
 # CONFIG_TEXT said only "boot=openboot-usb" and a locally modified bootloader
 # composed into a factory image with every gate green.
-OPENBOOT_REVISION := 46b2590e99b8a0bdc773aa62cc53fef1a5675adc
+OPENBOOT_REVISION := e0de9c907502a220de0983cc132b65bb546d62cb
 PROFILE_ID := ch570-product
 TARGET := opendongle-ch570-product
 
