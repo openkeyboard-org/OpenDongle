@@ -112,6 +112,7 @@ The antenna geometry and USB connector make the board construction part of the e
 | Minimum finished drill | 0.20 mm |
 | Minimum track/space used | 0.15 mm track, 0.127 mm design-rule clearance minimum |
 | Soldermask | Both sides; no soldermask over the USB contacts or antenna conductor |
+| Paste stencil | 0.10 mm recommended. U3's 0.70 mm x 0.20 mm signal-pad apertures have an area ratio of 0.80 at 0.10 mm and 0.67 at 0.12 mm |
 
 Additional requirements and checks:
 
@@ -164,10 +165,12 @@ The designators are non-contiguous: there is no **C3** and no **U1** (the parts 
 
 - The 0.8 mm FR-4 antenna was independently created, informed by the WCH reference antenna published in the [openwch schematic/PCB library](https://github.com/openwch/schpcb_lib); no WCH CAD or artwork file was copied, imported, converted, or traced.
 - The PCB USB connector footprint is derived from the [USB armory](https://github.com/usbarmory/usbarmory) hardware design.
+- The CH592D QFN-20 footprint is a modified copy of `Package_DFN_QFN:QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm` from the [KiCad footprint libraries](https://gitlab.com/kicad/libraries/kicad-footprints). That one file is licensed CC-BY-SA 4.0 with the [KiCad libraries exception](https://www.kicad.org/libraries/license/), not CERN-OHL-W-2.0; see [`../NOTICE`](../NOTICE).
 
 ## License
 
 This hardware design, including the independently created antenna
 implementation described in [`../NOTICE`](../NOTICE), is licensed under the
 CERN Open Hardware Licence Version 2 - Weakly Reciprocal. See
-[`LICENSE`](LICENSE).
+[`LICENSE`](LICENSE). The one exception is the KiCad-derived CH592D footprint
+listed in [`../NOTICE`](../NOTICE), which is CC-BY-SA 4.0.
