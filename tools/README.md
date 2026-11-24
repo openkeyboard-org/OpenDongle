@@ -76,6 +76,12 @@ counts as it. It exits 2, with an explanation, if the addressed application
 never left, if more than one new bootloader was ever seen, if the bootloader
 appeared and then left again, or when bootloaders were already present.
 
+A reboot request that gets no reply is not taken as a failure on the spot: the
+dongle resets a moment after it queues its answer, whether or not the host
+took it. The bus is watched all the same, and the missing reply is reported as
+the error (exit 1) only if the application is still there afterwards, in which
+case the session the request was sent in is closed again.
+
 It also exits 2, before rebooting anything, when several dongles are running
 their application and none was named with `--hidraw`: discovery opens the
 first match, and rebooting an arbitrary dongle is not something to do on a
@@ -325,7 +331,9 @@ vendor usage (`0xFF60`/`0x61`). Interfaces 3 and 4 both declare that usage, so
 it then reads each candidate's report descriptor and takes the one with an
 Output report — interface 4 is the only one that can be written to. Anything
 but exactly one match is refused; with two dongles attached, name one with
-`--hidraw`. An explicit `--interface N` other than 4 cannot be honoured without
+`--hidraw`. A candidate that cannot be opened or read counts against a match
+whenever there are more candidates than one dongle has: a second dongle that
+another program is holding must not leave the first looking like the only one. An explicit `--interface N` other than 4 cannot be honoured without
 interface numbers and finds nothing.
 
 **This path has not been run on macOS hardware.** The descriptor rule is tested

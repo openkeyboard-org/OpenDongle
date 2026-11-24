@@ -422,6 +422,23 @@ fn golden_rf_poke() {
 }
 
 #[test]
+fn golden_rf_poke_disarm_unconfirmed() {
+    // The poke ran, then the link failed on the disarm: the session may still
+    // be armed, and saying only "done" would call the dongle clean.
+    let link = dongle();
+    link.break_at(3);
+    check(
+        "rf_poke_disarm_unconfirmed",
+        transcript(&["--rf-poke", "1"], &link),
+    );
+    assert_eq!(
+        link.commands(),
+        vec![0x84, 0x94],
+        "arm, poke; the disarm never arrived"
+    );
+}
+
+#[test]
 fn golden_rf_poke_refused() {
     let link = except(0x94, Some(vec![0x94, 0x02, 0xE1, 0x05]));
     check("rf_poke_refused", transcript(&["--rf-poke", "40"], &link));

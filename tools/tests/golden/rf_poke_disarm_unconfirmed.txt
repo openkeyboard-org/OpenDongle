@@ -1,0 +1,7 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+rf-poke rung 1: done (rc=0x00), rf_state=3
+--- stderr ---
+warning: disarm not confirmed; replug the dongle to be sure the session is closed
+--- outcome ---
+exit 0

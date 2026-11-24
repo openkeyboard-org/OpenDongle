@@ -465,7 +465,7 @@ fn run(cli: &Cli, con: &mut Console) -> Result<ExitCode> {
 
     // Which interface is being rebooted. The watch tracks it by path, so the
     // path has to be one a user chose — or the only one there was to choose.
-    let target = match cli.hidraw.as_deref() {
+    let (target, interface) = match cli.hidraw.as_deref() {
         None => {
             // Discovery opened the first match. With one dongle that is the
             // dongle; with several it is an arbitrary one, and rebooting an
@@ -492,11 +492,14 @@ fn run(cli: &Cli, con: &mut Console) -> Result<ExitCode> {
                 );
                 return Ok(ExitCode::from(2));
             }
-            Target {
-                path: dev.path.clone(),
-                vid: cli.vid,
-                pid: cli.pid,
-            }
+            (
+                Target {
+                    path: dev.path.clone(),
+                    vid: cli.vid,
+                    pid: cli.pid,
+                },
+                cli.interface,
+            )
         }
         // --hidraw opens a path directly, with no check that it carries
         // cli.vid, cli.pid or cli.interface (iap.rs). The watch is phrased in
@@ -520,11 +523,14 @@ fn run(cli: &Cli, con: &mut Console) -> Result<ExitCode> {
                         cli.interface
                     );
                 }
-                Target {
-                    path: path.to_string(),
-                    vid: id.vid,
-                    pid: id.pid,
-                }
+                (
+                    Target {
+                        path: path.to_string(),
+                        vid: id.vid,
+                        pid: id.pid,
+                    },
+                    id.interface,
+                )
             }
             None => {
                 errln!(
@@ -546,13 +552,25 @@ fn run(cli: &Cli, con: &mut Console) -> Result<ExitCode> {
         handoff::enter_and_watch(dev, &target, &mut HidBus, &mut SystemClock, &mut || {
             console::reboot_accepted(con)
         })?;
-    let cx = HandoffContext {
-        vid: cli.vid,
-        pid: cli.pid,
-        interface: cli.interface,
-        bundle: cli.bundle.as_deref(),
-    };
+    let cx = handoff_context(&target, interface, cli.bundle.as_deref());
     Ok(ExitCode::from(console::report_handoff(&outcome, &cx, con)))
+}
+
+/// What the hand-off's report is phrased in: the identity of the device that
+/// was rebooted. With `--hidraw` that can differ from the `--vid`/`--pid`
+/// selectors, and it is the rebooted device's bootloader the user is then
+/// told about and handed an `openboot` command for.
+fn handoff_context<'a>(
+    target: &Target,
+    interface: i32,
+    bundle: Option<&'a Path>,
+) -> HandoffContext<'a> {
+    HandoffContext {
+        vid: target.vid,
+        pid: target.pid,
+        interface,
+        bundle,
+    }
 }
 
 fn main() -> ExitCode {
@@ -687,5 +705,20 @@ mod tests {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.starts_with(concat!("opendongle ", env!("CARGO_PKG_VERSION"))));
         assert!(Cli::try_parse_from(["opendongle", "--version"]).is_err());
+    }
+
+    #[test]
+    fn the_handoff_is_reported_in_the_rebooted_devices_identity() {
+        // --hidraw named a device that is not the --vid/--pid selectors: the
+        // bootloader that arrives carries ITS identity, and the openboot
+        // command printed afterwards has to find that one.
+        let target = Target {
+            path: "path-of-the-one-named".into(),
+            vid: 0x1234,
+            pid: 0x5678,
+        };
+        let cx = handoff_context(&target, 2, Some(Path::new("fw.obb")));
+        assert_eq!((cx.vid, cx.pid, cx.interface), (0x1234, 0x5678, 2));
+        assert_eq!(cx.bundle, Some(Path::new("fw.obb")));
     }
 }

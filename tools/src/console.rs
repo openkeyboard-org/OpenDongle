@@ -205,7 +205,11 @@ const DISARM_WARNING: &str =
 /// `--rf-poke`. Returns whether the rung ran; a refusal is printed, and is
 /// the caller's to turn into an exit status.
 pub fn rf_poke(dev: &IapDevice, rung: u8, con: &mut Console) -> Result<bool> {
-    let poke = rfdiag::rf_poke(dev, rung).result?;
+    let Armed { result, disarm } = rfdiag::rf_poke(dev, rung);
+    if disarm.is_err() {
+        errln!(con, "{DISARM_WARNING}");
+    }
+    let poke = result?;
     outln!(
         con,
         "rf-poke rung {rung}: {} (rc=0x{:02X}), rf_state={}",

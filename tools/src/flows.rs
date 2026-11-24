@@ -96,6 +96,23 @@ pub fn firmware_version(dev: &IapDevice) -> Result<String> {
     Ok(String::from_utf8_lossy(&response[..end]).into_owned())
 }
 
+/// The reboot request was sent and nothing came back.
+///
+/// Its own type because it is not a refusal, and a caller must be able to
+/// tell the two apart: a device that refused is still running, while one that
+/// went quiet may have reset before the host took its reply. Only the bus can
+/// say which — see [`crate::handoff::enter_and_watch`].
+#[derive(Debug)]
+pub struct EnterUnanswered;
+
+impl std::fmt::Display for EnterUnanswered {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EnterBootloader: no response (timeout)")
+    }
+}
+
+impl std::error::Error for EnterUnanswered {}
+
 /// Armed enter-bootloader sequence: handshake, arm, 0x85 with the magic
 /// payload, expecting the status-0 reply before the device resets into
 /// OpenBoot. The caller watches for the device leaving the bus.
@@ -103,8 +120,9 @@ pub fn firmware_version(dev: &IapDevice) -> Result<String> {
 /// There is no disarm on success — the device is resetting, and the reset
 /// clears the session. A device that REFUSES is still running with the
 /// session armed, so that path disarms before reporting the refusal. A reply
-/// that never comes is neither: the device may be mid-reset, and the caller
-/// has to look at the bus to find out.
+/// that never comes is neither, and is reported as [`EnterUnanswered`]: the
+/// device may be mid-reset, and the caller has to look at the bus to find
+/// out.
 pub fn enter_bootloader(dev: &IapDevice) -> Result<()> {
     let r = op_handshake(dev)?;
     check("Handshake", &r, ACK_HANDSHAKE, None)?;
@@ -113,7 +131,7 @@ pub fn enter_bootloader(dev: &IapDevice) -> Result<()> {
     let r = op_enter_bootloader(dev)?;
     let rr = r
         .as_ref()
-        .ok_or_else(|| anyhow!("EnterBootloader: no response (timeout)"))?;
+        .ok_or_else(|| anyhow::Error::new(EnterUnanswered))?;
     // Reply is the status4 shape [ACK_OK, 0x01, status, 0x00] — validate all
     // four bytes, not just the ack and status.
     if rr.len() < 4 || rr[0] != ACK_OK || rr[1] != 0x01 || rr[2] != 0 || rr[3] != 0 {
@@ -230,8 +248,9 @@ mod tests {
             0x85 => None,
             _ => answering(cmd, body),
         });
-        let err = enter_bootloader(&link.device()).unwrap_err().to_string();
-        assert!(err.contains("no response"), "{err}");
+        let err = enter_bootloader(&link.device()).unwrap_err();
+        assert!(err.is::<EnterUnanswered>(), "{err}");
+        assert!(err.to_string().contains("no response"), "{err}");
         assert_eq!(link.commands(), vec![0x5A, 0x84, 0x85]);
     }
 

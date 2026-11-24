@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::iap::{IapDevice, ReportLink};
 
@@ -21,6 +21,8 @@ struct Inner {
     respond: Responder,
     pending: VecDeque<Vec<u8>>,
     log: Vec<(u8, Vec<u8>)>,
+    /// The link fails every write from this one on, counting from 1.
+    breaks_at: Option<usize>,
 }
 
 /// Cloning shares the device, so a test can keep a handle to read the log
@@ -34,6 +36,7 @@ impl ScriptedLink {
             respond: Box::new(respond),
             pending: VecDeque::new(),
             log: Vec::new(),
+            breaks_at: None,
         })))
     }
 
@@ -45,6 +48,13 @@ impl ScriptedLink {
     /// Every request the host sent, as `(cmd, body)`, in order.
     pub fn log(&self) -> Vec<(u8, Vec<u8>)> {
         self.0.borrow().log.clone()
+    }
+
+    /// Make the link itself fail from the `nth` write on (counting from 1),
+    /// as an unplugged or stalled device does. A failed write is not logged:
+    /// the device never saw it.
+    pub fn break_at(&self, nth: usize) {
+        self.0.borrow_mut().breaks_at = Some(nth);
     }
 
     /// The command bytes alone.
@@ -60,6 +70,12 @@ impl ReportLink for ScriptedLink {
         let len = usize::from(report[2]);
         let body = report[3..3 + len].to_vec();
         let mut inner = self.0.borrow_mut();
+        if inner
+            .breaks_at
+            .is_some_and(|nth| inner.log.len() + 1 >= nth)
+        {
+            bail!("the scripted link is broken");
+        }
         inner.log.push((cmd, body.clone()));
         if let Some(mut reply) = (inner.respond)(cmd, &body) {
             // A real reply is the 64-byte report payload.

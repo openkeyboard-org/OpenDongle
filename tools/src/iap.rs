@@ -173,40 +173,85 @@ fn pick_interface(entries: &[(i32, u16, u16)], interface: i32) -> Pick {
     }
 }
 
-/// Open each candidate and keep the one whose descriptor has an Output
-/// report. Opening sends nothing. Anything but exactly one is a refusal: with
-/// none the descriptors could not be read, and with several (two dongles)
-/// nothing says which was meant.
+/// What looking at one candidate interface showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Examined {
+    /// Its report descriptor has an Output report: an IAP interface.
+    Iap,
+    /// Its descriptor was read and has none.
+    NotIap,
+    /// It could not be opened, or its descriptor could not be read.
+    Unreadable,
+}
+
+/// How many interfaces one dongle presents under the IAP usage (3 and 4).
+/// More candidates than this means more than one dongle.
+const CANDIDATES_PER_DONGLE: usize = 2;
+
+/// Which candidate is THE IAP interface, given what examining each showed.
+/// Anything but exactly one is a refusal: with none the descriptors could not
+/// be read, and with several (two dongles) nothing says which was meant.
+///
+/// A candidate that could not be examined is not evidence of absence. With
+/// two dongles attached and one of them unopenable — held by another program,
+/// say — the other's IAP interface would be the only one FOUND without being
+/// the only one THERE, and whatever came next would be done to a dongle
+/// nobody chose. So one match is accepted only when every candidate was
+/// examined, or when there are no more candidates than a single dongle has:
+/// then the unreadable one can only be that dongle's other interface.
+fn choose_iap(examined: &[Examined]) -> Result<usize> {
+    let iap: Vec<usize> = examined
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| **e == Examined::Iap)
+        .map(|(at, _)| at)
+        .collect();
+    let unreadable = examined
+        .iter()
+        .filter(|e| **e == Examined::Unreadable)
+        .count();
+    match iap[..] {
+        [] => bail!(
+            "this platform does not number HID interfaces, and none of the {}              with the dongle's vendor usage could be identified as the IAP              interface; name the device with --hidraw",
+            examined.len()
+        ),
+        [only] if unreadable == 0 || examined.len() <= CANDIDATES_PER_DONGLE => Ok(only),
+        [_] => bail!(
+            "one interface looks like the IAP interface, but {unreadable} of the {}              that could be one could not be examined and this platform does not              number them, so another dongle's may be among those; attach one              dongle, or name the device with --hidraw",
+            examined.len()
+        ),
+        _ => bail!(
+            "{} interfaces look like the IAP interface and this platform does not              number them, so they cannot be told apart; attach one dongle, or              name the device with --hidraw",
+            iap.len()
+        ),
+    }
+}
+
+/// Open each candidate, read its report descriptor, and keep the one
+/// [`choose_iap`] settles on. Opening sends nothing.
 fn open_by_descriptor(api: &HidApi, candidates: &[&DeviceInfo]) -> Result<(HidDevice, String)> {
-    let mut found = Vec::new();
+    let mut opened: Vec<Option<HidDevice>> = Vec::new();
+    let mut examined = Vec::new();
     for info in candidates {
-        let Ok(dev) = info.open_device(api) else {
-            continue;
-        };
+        let dev = info.open_device(api).ok();
         let mut descriptor = [0u8; hidapi::MAX_REPORT_DESCRIPTOR_SIZE];
-        let Ok(len) = dev.get_report_descriptor(&mut descriptor) else {
-            continue;
-        };
-        if has_output_report(&descriptor[..len]) {
-            found.push((dev, info.path().to_string_lossy().into_owned()));
-        }
-    }
-    if found.len() > 1 {
-        bail!(
-            "{} interfaces look like the IAP interface and this platform does not \
-             number them, so they cannot be told apart; attach one dongle, or \
-             name the device with --hidraw",
-            found.len()
+        examined.push(
+            match dev
+                .as_ref()
+                .and_then(|dev| dev.get_report_descriptor(&mut descriptor).ok())
+            {
+                Some(len) if has_output_report(&descriptor[..len]) => Examined::Iap,
+                Some(_) => Examined::NotIap,
+                None => Examined::Unreadable,
+            },
         );
+        opened.push(dev);
     }
-    found.pop().ok_or_else(|| {
-        anyhow!(
-            "this platform does not number HID interfaces, and none of the {} \
-             with the dongle's vendor usage could be identified as the IAP \
-             interface; name the device with --hidraw",
-            candidates.len()
-        )
-    })
+    let at = choose_iap(&examined)?;
+    let dev = opened
+        .swap_remove(at)
+        .expect("an examined IAP interface was opened");
+    Ok((dev, candidates[at].path().to_string_lossy().into_owned()))
 }
 /// The pipe an [`IapDevice`] talks through: one report out, one report in.
 /// `HidDevice` is the real one; tests script their own.
@@ -799,6 +844,49 @@ mod tests {
         0x40, 0x75, 0x08, 0x81, 0x02, 0x09, 0x63, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95, 0x40, 0x75,
         0x08, 0x91, 0x02, 0xC0,
     ];
+
+    #[test]
+    fn one_dongle_is_chosen_even_if_its_other_interface_cannot_be_read() {
+        use Examined::*;
+        assert_eq!(choose_iap(&[NotIap, Iap]).unwrap(), 1);
+        assert_eq!(choose_iap(&[Iap, NotIap]).unwrap(), 0);
+        // Interface 3 held by something else: still only one dongle's worth.
+        assert_eq!(choose_iap(&[Unreadable, Iap]).unwrap(), 1);
+        assert_eq!(choose_iap(&[Iap]).unwrap(), 0);
+    }
+
+    #[test]
+    fn two_readable_dongles_cannot_be_told_apart() {
+        use Examined::*;
+        let e = choose_iap(&[NotIap, Iap, NotIap, Iap]).unwrap_err();
+        assert!(format!("{e}").starts_with("2 interfaces look like the IAP interface"));
+    }
+
+    #[test]
+    fn an_unreadable_second_dongle_does_not_make_the_first_the_only_one() {
+        use Examined::*;
+        // Two dongles; one cannot be opened at all. The other's IAP interface
+        // is the only one found, and must not be taken for the only one there.
+        for case in [
+            vec![NotIap, Iap, Unreadable, Unreadable],
+            vec![Unreadable, Unreadable, NotIap, Iap],
+            vec![NotIap, Iap, NotIap, Unreadable],
+        ] {
+            let e = choose_iap(&case).unwrap_err();
+            assert!(
+                format!("{e}").contains("could not be examined"),
+                "{case:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_identified_is_a_refusal() {
+        use Examined::*;
+        assert!(choose_iap(&[]).is_err());
+        assert!(choose_iap(&[NotIap, NotIap]).is_err());
+        assert!(choose_iap(&[Unreadable, Unreadable]).is_err());
+    }
 
     #[test]
     fn only_the_iap_interface_has_an_output_report() {

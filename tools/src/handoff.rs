@@ -29,7 +29,7 @@ use anyhow::Result;
 use hidapi::HidApi;
 
 use crate::flows;
-use crate::iap::IapDevice;
+use crate::iap::{op_disarm, IapDevice};
 
 /// The bootloader's HID report descriptor: vendor usage page 0xFF00, usage
 /// 0x01 (OpenBoot PROTOCOL.md §12).
@@ -302,6 +302,13 @@ pub fn watch(
 ///
 /// `accepted` is called once the device has agreed to reboot, before the
 /// wait, so a caller can say so while it happens.
+///
+/// A request that gets no reply is not treated as a failure on the spot. The
+/// firmware resets a moment after it queues its answer, whether or not the
+/// host has taken it, so silence can be a reboot that worked. The bus is
+/// watched all the same, and the silence becomes the error only if the
+/// application is then still there. Giving up at once would abandon a dongle
+/// that is already in its bootloader, and tell the caller nothing was done.
 pub fn enter_and_watch(
     dev: IapDevice,
     target: &Target,
@@ -315,10 +322,31 @@ pub fn enter_and_watch(
             count: before.len(),
         });
     }
-    flows::enter_bootloader(&dev)?;
-    accepted();
-    drop(dev);
-    watch(target, &before, bus, clock)
+    let unanswered = match flows::enter_bootloader(&dev) {
+        Ok(()) => None,
+        Err(e) if e.is::<flows::EnterUnanswered>() => Some(e),
+        Err(e) => return Err(e),
+    };
+    let Some(unanswered) = unanswered else {
+        accepted();
+        drop(dev);
+        return watch(target, &before, bus, clock);
+    };
+
+    // No reply. The handle is kept: if the application turns out not to have
+    // left, the session the request was sent in may still be armed.
+    let outcome = watch(target, &before, bus, clock)?;
+    match outcome {
+        Handoff::StillPresent | Handoff::AppNeverLeft => {
+            let _ = op_disarm(&dev);
+            if outcome == Handoff::StillPresent {
+                return Err(unanswered);
+            }
+        }
+        // It left: the request took, and only its reply was lost.
+        _ => accepted(),
+    }
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -612,6 +640,73 @@ mod tests {
         );
         assert_eq!(link.commands(), vec![0x5A, 0x84, 0x85]);
         assert_eq!(accepted, 1);
+    }
+
+    /// A dongle that does everything but answer the reboot request.
+    fn silent_on_reboot() -> ScriptedLink {
+        ScriptedLink::new(|cmd, body| {
+            Some(match cmd {
+                0x5A => vec![0xA5],
+                0x84 if body[0] == 1 => vec![0x04, 0x0A, 0, 0, 0, 0, 0, 0, 0x92, 0, 0, 0],
+                0x84 => vec![0x0F, 0x01, 0, 0],
+                _ => return None,
+            })
+        })
+    }
+
+    #[test]
+    fn a_reboot_whose_reply_was_lost_is_still_followed_on_the_bus() {
+        // The firmware resets whether or not the host took its answer.
+        let link = silent_on_reboot();
+        let mut bus = FakeBus::new(vec![
+            vec![app("app-1")],   // the pre-check
+            vec![],               // gone
+            vec![boot("boot-9")], // arrived
+        ]);
+        let mut accepted = 0;
+        let outcome = enter_and_watch(
+            link.device(),
+            &target(),
+            &mut bus,
+            &mut FakeClock::new(),
+            &mut || accepted += 1,
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            Handoff::Arrived {
+                path: "boot-9".into()
+            }
+        );
+        assert_eq!(accepted, 1, "it left, so the request had taken");
+        assert_eq!(
+            link.commands(),
+            vec![0x5A, 0x84, 0x85],
+            "nothing is sent to a device that has gone"
+        );
+    }
+
+    #[test]
+    fn a_silent_reboot_request_that_changed_nothing_is_the_error_and_is_disarmed() {
+        let link = silent_on_reboot();
+        let mut bus = FakeBus::new(vec![vec![app("app-1")]]);
+        let mut accepted = 0;
+        let result = enter_and_watch(
+            link.device(),
+            &target(),
+            &mut bus,
+            &mut FakeClock::new(),
+            &mut || accepted += 1,
+        );
+        let err = result.unwrap_err();
+        assert!(err.is::<flows::EnterUnanswered>(), "{err}");
+        assert_eq!(accepted, 0);
+        assert!(bus.scans > 1, "the bus was watched before giving up");
+        assert_eq!(
+            link.commands(),
+            vec![0x5A, 0x84, 0x85, 0x84],
+            "the session the request was sent in is closed"
+        );
     }
 
     #[test]
