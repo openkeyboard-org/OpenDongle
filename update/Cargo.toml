@@ -1,0 +1,39 @@
+[package]
+name = "opendongle-update"
+version = "0.1.0"
+edition = "2021"
+description = "One-step firmware update for OpenDongle dongles: validates the bundle, reboots the dongle into OpenBoot, flashes, and confirms what came back"
+license = "Apache-2.0"
+
+[lib]
+name = "opendongle_update"
+path = "src/lib.rs"
+
+[[bin]]
+name = "opendongle-update"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The command-line front end. A program that only links the library can turn
+# this off to leave out the argument parser.
+cli = ["dep:clap"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"], optional = true }
+hidapi = "2"
+opendongle = { path = "../tools", default-features = false }
+# TEMPORARY: a sibling checkout, because the library split in OpenBoot is not
+# pushed yet. Replace with a `git` + `rev` pin before this crate is built
+# anywhere but a desk with both repositories side by side. It is deliberately
+# NOT the `third_party/openboot` submodule: that pin selects the bootloader the
+# firmware ships, and moving it for the host's sake would change the product.
+openboot = { path = "../../OpenBoot/tools", default-features = false }
+
+[dev-dependencies]
+crc32fast = "1"
+
+[profile.release]
+strip = true
