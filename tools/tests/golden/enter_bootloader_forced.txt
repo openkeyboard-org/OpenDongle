@@ -1,0 +1,8 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+  handshake       ack=0xA5  raw=a5 00 00 00 00 00 00 00
+  GetDevInfo(1)   ack=0x04  raw=04 0a 00 00 00 00 00 00 92 00 00 00 00 00
+    chip_id byte  = 0x92  (CH592 family)
+--- stderr ---
+--- outcome ---
+continues: reboot into the bootloader

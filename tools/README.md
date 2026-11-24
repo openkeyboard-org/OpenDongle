@@ -69,9 +69,23 @@ dongles attached, a flash could therefore target the wrong one.
 `--enter-bootloader` narrows the window but does not close it. It records which
 OpenBoot devices were already present before the reboot, and reports success
 only when the application interface it addressed has **left** the bus *and*
-exactly **one previously-absent** bootloader has appeared. It exits 2, with an
-explanation, if the addressed application never left, if more than one new
-bootloader appears, or — after warning — when bootloaders were already present.
+exactly **one previously-absent** bootloader has appeared and stayed put for
+three consecutive polls. The addressed interface is followed by its path, so a
+second dongle still running its application neither hides the departure nor
+counts as it. It exits 2, with an explanation, if the addressed application
+never left, if more than one new bootloader was ever seen, if the bootloader
+appeared and then left again, or when bootloaders were already present.
+
+A reboot request that gets no reply is not taken as a failure on the spot: the
+dongle resets a moment after it queues its answer, whether or not the host
+took it. The bus is watched all the same, and the missing reply is reported as
+the error (exit 1) only if the application is still there afterwards, in which
+case the session the request was sent in is closed again.
+
+It also exits 2, before rebooting anything, when several dongles are running
+their application and none was named with `--hidraw`: discovery opens the
+first match, and rebooting an arbitrary dongle is not something to do on a
+guess.
 
 If another bootloader is already on the bus it refuses **before** rebooting
 anything, leaving the dongle running.
@@ -173,7 +187,7 @@ Exit codes:
 |---|---|
 | `0` | ok |
 | `1` | device/permission/runtime error, or a refused request |
-| `2` | the handoff could not be pinned to one device. Either OpenBoot never appeared within 10 s, or the addressed application never left the bus, or more than one new bootloader appeared, or another bootloader was already present when the command started |
+| `2` | the handoff could not be pinned to one device. Either OpenBoot never appeared within 10 s, or it appeared and left again, or the addressed application never left the bus, or more than one new bootloader appeared, or another bootloader was already present when the command started, or several dongles were running their application and none was named with `--hidraw` |
 | `3` | `--image` was given while only the OpenBoot bootloader is on the bus, so the image's ODG2 family could **not** be checked against the device. The guard lives in the application, which is not present. Pass `--force` to proceed anyway, and note the output says plainly that the family was not verified |
 
 `--fault` issues only the unarmed FaultRead (0x93) and decodes the 40-byte
@@ -253,23 +267,76 @@ so nothing else would stop a vendor report going to an unrelated HID node.
 On Linux, opening the device needs hidraw permissions (run as root or use a
 `plugdev`/udev rule).
 
+## Using it as a library
+
+The crate is a library with the CLI as a thin front end, so another program
+can read a dongle with the same code. Turn the `cli` feature off to leave out
+the argument parser:
+
+```toml
+opendongle = { git = "https://github.com/openkeyboard-org/OpenDongle", default-features = false }
+```
+
+- `status`, `bond`, `fault`, `rfdiag` and `crypt` each read one thing and
+  return it. Nothing in them prints; each also renders its block as lines, and
+  `console` is the CLI's use of those.
+- `iap::armed` runs an exchange inside an armed session and **always** sends
+  the disarm, including when ARM itself appeared to fail. It returns the
+  exchange's result and the disarm's separately (`iap::Armed`), because a read
+  can succeed and still leave the session open.
+- Only `status`, `fault` and `rfdiag::read_all` are unarmed. Anything that
+  polls in the background should keep to those; `bond::read_bond`,
+  `flows::probe` and the rest arm a session.
+- `handoff::enter_and_watch` reboots a dongle into OpenBoot and reports how
+  that ended as a `handoff::Handoff`. `Arrived` carries the bootloader's path,
+  which identifies an interface, not a unit — and the two modes do not report
+  one identity to check it against. `status` gives the ROM MAC plus a
+  checksum; OpenBoot's HELLO gives the flash unique ID on CH592 and the bare
+  MAC on CH570. So the single-dongle rule above still stands.
+- `bond::BondRecord` never exposes the record's link-key bytes; `raw_masked`
+  is the only form in which the raw record leaves the module.
+
 ## Tests
 
 ```bash
 cargo test
 ```
 
-60 tests, no hardware required: Intel-HEX parsing including checksum rejection,
-ODG2 header integrity, the device-family binding, wrong-load-base and
-factory-image rejection, bond-record and fault-record decoding and the exact
-text each renders (valid, invalid/best-effort, unknown layout), status parsing
-with legacy fallback, IAP packet golden vectors and transport CRC-32, the
-`--hidraw` identity check, the `int(s,0)`-style number parser, and the CLI
-contract.
+No hardware required. The decoders are tested field by field, including the
+exact text each renders (valid, invalid/best-effort, unknown layout): Intel-HEX
+parsing, ODG2 header integrity and the device-family binding, bond, fault and
+status records, RF diagnostics pages and rates, IAP packet golden vectors.
+
+A scripted dongle (`scripted::ScriptedLink`) stands in for the device
+everywhere else: the armed-session rules (the disarm follows every failure),
+the hand-off (a fake bus and clock play out each way a reboot can end), and
+whole commands. `tests/golden/` holds one transcript per command line —
+everything it prints, and its exit status. A deliberate change to the text is
+accepted with
+
+```bash
+UPDATE_GOLDEN=1 cargo test
+```
+
+and reviewed as a diff of that directory.
 
 ## macOS caveat
 
 This is a 5-interface composite HID device and the vendor channel is interface
 4. On Linux/Windows hidapi reports the interface number reliably; on macOS it
-can be `-1` for composite devices, in which case interface matching needs a
-usage-page fallback. Verify on macOS hardware before relying on it.
+can be `-1` for composite devices.
+
+When **no** interface on the dongle is numbered, the tool falls back to the
+vendor usage (`0xFF60`/`0x61`). Interfaces 3 and 4 both declare that usage, so
+it then reads each candidate's report descriptor and takes the one with an
+Output report — interface 4 is the only one that can be written to. Anything
+but exactly one match is refused; with two dongles attached, name one with
+`--hidraw`. A candidate that cannot be opened or read counts against a match
+whenever there are more candidates than one dongle has: a second dongle that
+another program is holding must not leave the first looking like the only one. An explicit `--interface N` other than 4 cannot be honoured without
+interface numbers and finds nothing.
+
+**This path has not been run on macOS hardware.** The descriptor rule is tested
+against the firmware's own descriptors, but whether hidapi reports `-1` here,
+and what it reports for usages, needs checking on a real machine before it is
+relied on.

@@ -1,0 +1,7 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+--- stderr ---
+WARNING: an OpenBoot bootloader appeared, but the application interface we addressed (0C45:FEFE if=4) never left the bus.
+         Refusing to report success: that is not the unit asked for.
+--- outcome ---
+exit 2

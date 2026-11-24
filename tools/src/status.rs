@@ -17,16 +17,18 @@ const MAC_LEN: usize = 6;
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct DeviceStatus {
-    family: u8,
-    connection: u8,
-    update: u8,
-    capabilities: u8,
-    profile: u8,
-    last_rssi: i8,
-    uid: [u8; UID_LEN],
-    dongle_mac: [u8; MAC_LEN],
-    build_id: u32,
-    image_len: u32,
+    pub family: u8,
+    pub connection: u8,
+    pub update: u8,
+    pub capabilities: u8,
+    pub profile: u8,
+    /// Signed dBm; 0 means no reading. Use [`last_rssi`](Self::last_rssi)
+    /// for whether it means anything on this build.
+    pub last_rssi: i8,
+    pub uid: [u8; UID_LEN],
+    pub dongle_mac: [u8; MAC_LEN],
+    pub build_id: u32,
+    pub image_len: u32,
 }
 
 impl DeviceStatus {
@@ -100,7 +102,7 @@ impl DeviceStatus {
         format!("{} dBm", self.last_rssi)
     }
 
-    fn chip(&self) -> &'static str {
+    pub fn chip(&self) -> &'static str {
         match self.family {
             0x70 => "CH570",
             0x82 => "CH582",
@@ -109,7 +111,7 @@ impl DeviceStatus {
         }
     }
 
-    fn profile(&self) -> String {
+    pub fn profile(&self) -> String {
         match self.profile {
             1 => format!("{}-product", self.chip().to_ascii_lowercase()),
             // PROFILE=bench (ch592/Makefile BUILD_PROFILE_NUM): the image
@@ -124,6 +126,16 @@ impl DeviceStatus {
         }
     }
 
+    /// The 8-byte chip UID as 16 upper-case hex digits.
+    pub fn uid_hex(&self) -> String {
+        format_hex(&self.uid, "")
+    }
+
+    /// The dongle's on-air MAC, colon-separated.
+    pub fn dongle_mac_text(&self) -> String {
+        format_hex(&self.dongle_mac, ":")
+    }
+
     pub fn connection(&self) -> &'static str {
         match self.connection {
             0 => "unavailable",
@@ -134,7 +146,7 @@ impl DeviceStatus {
         }
     }
 
-    fn update(&self) -> &'static str {
+    pub fn update(&self) -> &'static str {
         match self.update {
             0 => "clean",
             1 => "staged",
@@ -159,24 +171,26 @@ pub fn read_status(dev: &IapDevice) -> Result<DeviceStatus> {
     DeviceStatus::decode(&response)
 }
 
-pub fn show_status(status: &DeviceStatus, firmware_version: &str) {
-    println!("status:");
-    println!("  chip            {}", status.chip());
-    println!("  unique ID       {}", format_hex(&status.uid, ""));
-    println!("  dongle MAC      {}", format_hex(&status.dongle_mac, ":"));
-    println!("  firmware        {firmware_version}");
-    println!(
-        "  build           {} / {:08X}",
-        status.profile(),
-        status.build_id
-    );
-    println!("  image           {} bytes", status.image_len);
-    println!("  update          {}", status.update());
-    println!("  connection      {}", status.connection());
-    println!("  last RSSI       {}", status.last_rssi());
-    println!("  capabilities    0x{:02X}", status.capabilities);
+/// The status block as the CLI prints it.
+pub fn render_status(status: &DeviceStatus, firmware_version: &str) -> Vec<String> {
+    vec![
+        "status:".to_string(),
+        format!("  chip            {}", status.chip()),
+        format!("  unique ID       {}", status.uid_hex()),
+        format!("  dongle MAC      {}", status.dongle_mac_text()),
+        format!("  firmware        {firmware_version}"),
+        format!(
+            "  build           {} / {:08X}",
+            status.profile(),
+            status.build_id
+        ),
+        format!("  image           {} bytes", status.image_len),
+        format!("  update          {}", status.update()),
+        format!("  connection      {}", status.connection()),
+        format!("  last RSSI       {}", status.last_rssi()),
+        format!("  capabilities    0x{:02X}", status.capabilities),
+    ]
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

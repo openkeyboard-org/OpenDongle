@@ -1,0 +1,43 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+link encryption (payload 42 B, product layout):
+  verified        1234
+  drop shape      1
+  drop inactive   0
+  drop mac        2
+  drop replay     0
+  drop engine     0
+  aes redo        3
+  announce retry  1
+  boot KAT        run=1 fail=0
+  plaintext drop  7
+key exchange:
+  started         4
+  completed       3
+  last failure    timeout
+  state           done
+  entropy samples 900
+  commit failures 0
+  tried this link 1
+  failures        1
+  dongle x25519   phase 2 count 6
+keyboard status (frames received: 12):
+  state           done
+  last failure    none
+  candidate=1 keys_ready=1 dongle_confirm_ok=1 dongle_pub_mask=0x7 dongle_conf_mask=0xF
+  x25519          phase 2 count 9 op 1
+  sessions ok     3
+  seeded by MCU   yes
+dongle entropy seed:
+  received        2
+  used in draws   1
+  one waiting     yes
+library heap (measurement build):
+  size            4096 B
+  untouched       1024 B
+  highest touched 3072 B from the start (1024 B never reached at the end)
+  largest gap     512 B at offset 2048
+  after start-up  untouched 2000 B, highest touched 2096 B
+--- stderr ---
+--- outcome ---
+exit 0

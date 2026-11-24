@@ -9,31 +9,22 @@
 //!
 //! Safe by default: with no action it displays device information.
 
-mod bond;
-mod fault;
-mod flows;
-mod hex;
-mod iap;
-mod rfdiag;
-mod status;
+#[cfg(test)]
+mod golden_tests;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
-use bond::show_bond_info;
 use clap::Parser;
-use fault::show_fault_info;
 use hidapi::HidApi;
 
-use flows::{enter_bootloader, probe};
-use hex::load_firmware;
-use iap::{
-    check, op_arm, op_disarm, op_rf_poke, op_version, require_path_identity, IapDevice,
-    ACK_GETDEVINFO, DEFAULT_PID, DEFAULT_VID, IAP_INTERFACE,
+use opendongle::console::{self, flash_next_step, Console, HandoffContext};
+use opendongle::handoff::{self, HidBus, SystemClock, Target, OB_USAGE, OB_USAGE_PAGE};
+use opendongle::iap::{
+    path_identity, require_path_identity, IapDevice, DEFAULT_PID, DEFAULT_VID, IAP_INTERFACE,
 };
-use status::{read_status, show_status};
-
+use opendongle::{bond, crypt, errln, outln};
 /// Parse an integer the way Python's `int(s, 0)` does: 0x/0o/0b prefixes select
 /// the radix, otherwise decimal.
 fn parse_int_auto(s: &str) -> Result<u64, String> {
@@ -218,34 +209,6 @@ impl Cli {
     }
 }
 
-/// Single-quote a path for the printed hand-off line. The line exists to be
-/// copied into a shell, so an unquoted path containing a space (or any other
-/// shell metacharacter) would be split into the wrong arguments by whoever
-/// pastes it. POSIX single quotes are literal apart from `'` itself, which is
-/// escaped the usual `'\''` way.
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty()
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"._-/=:+,@".contains(&b))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
-/// The copy-and-run `openboot flash` hand-off line. Always names the .obb
-/// bundle -- never the family-guard `--image` .bin, which is host-side input
-/// that OpenBoot must not be handed: it is slot-A-based, and OpenBoot
-/// alternates its write target, so a bare .bin is only ever right for one
-/// slot by luck (firmware/BOOT.md, "Updating: use the bundle").
-fn flash_next_step(vid: u16, pid: u16, bundle: Option<&Path>, suffix: &str) -> String {
-    let artifact = match bundle {
-        Some(p) => shell_quote(&p.display().to_string()),
-        None => "<chip>-product.obb".to_string(),
-    };
-    format!("next: openboot --vid 0x{vid:04X} --pid 0x{pid:04X} flash --force {artifact}{suffix}")
-}
-
 /// `--image` takes the flat slot-A `.bin` (or `.hex`) the family guard reads;
 /// an `.obb` bundle is a different container that load_firmware would
 /// misparse as a flat image based at 0x2000 and then family-check garbage.
@@ -254,7 +217,189 @@ fn image_arg_is_bundle(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("obb"))
 }
 
-fn run(cli: &Cli) -> Result<ExitCode> {
+/// What `device_commands` leaves for `run` to do.
+enum Step {
+    /// The command is finished; exit with this status.
+    Exit(u8),
+    /// `--enter-bootloader` passed its guards: reboot and watch the bus.
+    EnterBootloader,
+}
+
+/// Every command that needs only the opened device: the readouts, the armed
+/// operations, and the checks that come before a reboot into the bootloader.
+fn device_commands(cli: &Cli, dev: &IapDevice, con: &mut Console) -> Result<Step> {
+    outln!(
+        con,
+        "device: {}  (VID=0x{:04X} PID=0x{:04X} if={})",
+        dev.path,
+        cli.vid,
+        cli.pid,
+        cli.interface
+    );
+
+    if cli.fault {
+        // Deliberately before the probe: probe arms and disarms a session, and
+        // the whole point of --fault is to read without touching one.
+        console::fault_info(dev, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if !cli.sampler_args_valid() {
+        return Err(anyhow!(
+            "--samples/--period-ms apply only to --status or --diag"
+        ));
+    }
+    if let Some(text) = cli.kex_seed.as_deref() {
+        let (seed, source) = if text.is_empty() {
+            (
+                crypt::random_seed()?,
+                "this computer's random number generator",
+            )
+        } else {
+            (crypt::parse_kex_seed(text)?, "the command line")
+        };
+        console::kex_seed(dev, &seed, source, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if cli.kex_bench {
+        console::kex_bench(dev, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if cli.crypt_diag {
+        console::crypt_diag(dev, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if cli.clear_bond {
+        console::clear_bond(dev, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if let Some(text) = cli.provision_link_key.as_deref() {
+        let key = bond::parse_link_key(text)?;
+        console::provision_link_key(dev, &key, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if let Some(rung) = cli.rf_poke {
+        let done = console::rf_poke(dev, rung, con)?;
+        return Ok(Step::Exit(if done { 0 } else { 1 }));
+    }
+    if cli.diag {
+        console::diag_sampler(dev, cli.samples, cli.period_ms, con)?;
+        return Ok(Step::Exit(0));
+    }
+    if cli.status {
+        console::status_sampler(dev, cli.samples, cli.period_ms, con)?;
+        return Ok(Step::Exit(0));
+    }
+
+    let device_info = console::probe(dev, con)?;
+    if cli.show_info() {
+        console::info(dev, con)?;
+        return Ok(Step::Exit(0));
+    }
+
+    // --enter-bootloader from here on.
+    if let Some(ipath) = &cli.image {
+        console::check_image(ipath, &device_info, con)?;
+    } else if !cli.force {
+        return Err(anyhow!(
+            "refusing --enter-bootloader without a family check: pass \
+             --image <the update .bin> (checked against the device family), \
+             or --force to skip the guard"
+        ));
+    }
+    Ok(Step::EnterBootloader)
+}
+
+/// The application's IAP interface could not be opened. Say why, as far as
+/// the bus shows it, and return the exit status. `boots` is every OpenBoot
+/// interface on this VID:PID: with `--enter-bootloader`, exactly one means the
+/// dongle is already where it was being sent.
+fn report_open_failure(cli: &Cli, msg: &str, boots: &[String], con: &mut Console) -> u8 {
+    if msg.contains("no HID device") {
+        if cli.enter_bootloader && boots.len() > 1 {
+            errln!(
+                con,
+                "ERROR: {} OpenBoot bootloaders are on the bus; cannot say \
+                 which one this is meant to be.",
+                boots.len()
+            );
+            errln!(
+                con,
+                "       openboot refuses a multi-match too. One at a time."
+            );
+            return 2;
+        }
+        if cli.enter_bootloader && boots.len() == 1 {
+            // Already sitting in OpenBoot, so there is nothing to
+            // reboot. The family guard CANNOT run here: it compares the
+            // image against the family the *application* reports, and
+            // the application is not running. Say so rather than
+            // implying the image was checked.
+            outln!(
+                con,
+                "no {:04X}:{:04X} app interface, but an OpenBoot bootloader is \
+                 on the bus at {} (same VID:PID, HID usage page {:04X} usage \
+                 {:02X}) — already in the bootloader",
+                cli.vid,
+                cli.pid,
+                boots[0],
+                OB_USAGE_PAGE,
+                OB_USAGE
+            );
+            if cli.image.is_some() && !cli.force {
+                errln!(
+                    con,
+                    "ERROR: the image family could NOT be verified — that check \
+                     needs the running application, which is not present."
+                );
+                errln!(
+                    con,
+                    "       Confirm the image matches this device yourself (the \
+                     bootloader reports its chip family in `openboot probe`), \
+                     then re-run with --force to acknowledge the guard was skipped."
+                );
+                return 3;
+            }
+            // The flags are not optional: openboot defaults to its
+            // generic 1209:0001 and would not find this product. Name
+            // the bundle when one was given, so the printed line can be
+            // copied and run as-is rather than silently flashing a
+            // placeholder the user has to remember to substitute.
+            outln!(
+                con,
+                "{}",
+                flash_next_step(
+                    cli.vid,
+                    cli.pid,
+                    cli.bundle.as_deref(),
+                    "  (family NOT verified)"
+                )
+            );
+            return 0;
+        }
+        errln!(
+            con,
+            "ERROR: no hidraw node for VID=0x{:04X} PID=0x{:04X} interface={}",
+            cli.vid,
+            cli.pid,
+            cli.interface
+        );
+        errln!(
+            con,
+            "       (tip: confirm the dongle is plugged in; check device \
+             permissions / udev rules)"
+        );
+    } else {
+        errln!(con, "ERROR: cannot open device: {msg}");
+        errln!(
+            con,
+            "       On Linux, run as root or add your user to the 'plugdev' \
+             group and reconnect the dongle."
+        );
+    }
+    1
+}
+
+fn run(cli: &Cli, con: &mut Console) -> Result<ExitCode> {
     if let Some(ipath) = &cli.image {
         if image_arg_is_bundle(ipath) {
             return Err(anyhow!(
@@ -308,650 +453,130 @@ fn run(cli: &Cli) -> Result<ExitCode> {
     let dev = match IapDevice::open(&api, cli.vid, cli.pid, cli.interface, cli.hidraw.as_deref()) {
         Ok(d) => d,
         Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("no HID device") {
-                let boots = openboot_paths(&api, cli.vid, cli.pid);
-                if cli.enter_bootloader && boots.len() > 1 {
-                    eprintln!(
-                        "ERROR: {} OpenBoot bootloaders are on the bus; cannot say \
-                         which one this is meant to be.",
-                        boots.len()
-                    );
-                    eprintln!("       openboot refuses a multi-match too. One at a time.");
-                    return Ok(ExitCode::from(2));
-                }
-                if cli.enter_bootloader && boots.len() == 1 {
-                    // Already sitting in OpenBoot, so there is nothing to
-                    // reboot. The family guard CANNOT run here: it compares the
-                    // image against the family the *application* reports, and
-                    // the application is not running. Say so rather than
-                    // implying the image was checked.
-                    println!(
-                        "no {:04X}:{:04X} app interface, but an OpenBoot bootloader is \
-                         on the bus at {} (same VID:PID, HID usage page {:04X} usage \
-                         {:02X}) — already in the bootloader",
-                        cli.vid, cli.pid, boots[0], OB_USAGE_PAGE, OB_USAGE
-                    );
-                    if cli.image.is_some() && !cli.force {
-                        eprintln!(
-                            "ERROR: the image family could NOT be verified — that check \
-                             needs the running application, which is not present."
-                        );
-                        eprintln!(
-                            "       Confirm the image matches this device yourself (the \
-                             bootloader reports its chip family in `openboot probe`), \
-                             then re-run with --force to acknowledge the guard was skipped."
-                        );
-                        return Ok(ExitCode::from(3));
-                    }
-                    // The flags are not optional: openboot defaults to its
-                    // generic 1209:0001 and would not find this product. Name
-                    // the bundle when one was given, so the printed line can be
-                    // copied and run as-is rather than silently flashing a
-                    // placeholder the user has to remember to substitute.
-                    println!(
-                        "{}",
-                        flash_next_step(
-                            cli.vid,
-                            cli.pid,
-                            cli.bundle.as_deref(),
-                            "  (family NOT verified)"
-                        )
-                    );
-                    return Ok(ExitCode::SUCCESS);
-                }
-                eprintln!(
-                    "ERROR: no hidraw node for VID=0x{:04X} PID=0x{:04X} interface={}",
-                    cli.vid, cli.pid, cli.interface
-                );
-                eprintln!(
-                    "       (tip: confirm the dongle is plugged in; check device \
-                     permissions / udev rules)"
-                );
-            } else {
-                eprintln!("ERROR: cannot open device: {msg}");
-                eprintln!(
-                    "       On Linux, run as root or add your user to the 'plugdev' \
-                     group and reconnect the dongle."
-                );
-            }
-            return Ok(ExitCode::from(1));
+            let boots = handoff::bootloader_paths(&handoff::entries(&api), cli.vid, cli.pid);
+            let code = report_open_failure(cli, &e.to_string(), &boots, con);
+            return Ok(ExitCode::from(code));
         }
     };
-    println!(
-        "device: {}  (VID=0x{:04X} PID=0x{:04X} if={})",
-        dev.path, cli.vid, cli.pid, cli.interface
-    );
+    match device_commands(cli, &dev, con)? {
+        Step::Exit(code) => return Ok(ExitCode::from(code)),
+        Step::EnterBootloader => {}
+    }
 
-    if cli.fault {
-        // Deliberately before probe(): probe arms and disarms a session, and
-        // the whole point of --fault is to read without touching one.
-        show_fault_info(&dev)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    if !cli.sampler_args_valid() {
-        return Err(anyhow!(
-            "--samples/--period-ms apply only to --status or --diag"
-        ));
-    }
-    if let Some(text) = cli.kex_seed.as_deref() {
-        let (seed, source) = if text.is_empty() {
-            let mut seed = [0u8; iap::KEX_SEED_BYTES];
-            getrandom::fill(&mut seed)
-                .map_err(|e| anyhow!("this computer's random number generator failed: {e}"))?;
-            (seed, "this computer's random number generator")
-        } else {
-            (parse_kex_seed(text)?, "the command line")
-        };
-        let r = iap::op_kex_seed(&dev, &seed)?
-            .ok_or_else(|| anyhow!("KexSeed: no response (firmware without the key exchange?)"))?;
-        if r.len() < 3 || r[0] != iap::CMD_KEX_SEED || r[1] < 1 {
-            return Err(anyhow!(
-                "KexSeed: unexpected reply; raw={}",
-                iap::hexsp(&r, 8)
-            ));
-        }
-        match r[2] {
-            0 => {}
-            1 => return Err(anyhow!("KexSeed: the dongle refused the seed's length")),
-            2 => {
-                return Err(anyhow!(
-                    "KexSeed: the dongle refused a seed whose bytes are all the same"
-                ))
-            }
-            s => return Err(anyhow!("KexSeed: status 0x{s:02X}")),
-        }
-        println!("entropy seed accepted: 32 bytes from {source}");
-        println!("it is used by the next key exchange and lost when the dongle is unplugged");
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cli.kex_bench {
-        let r = iap::op_kex_bench(&dev)?
-            .ok_or_else(|| anyhow!("KexBench: no response (not a KEX_BENCH build?)"))?;
-        if r.len() < 34 || r[0] != 0x99 || r[1] != 32 {
-            return Err(anyhow!(
-                "KexBench: unexpected reply; raw={}",
-                iap::hexsp(&r, 8)
-            ));
-        }
-        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
-        let (total, max, min, n) = (word(2), word(6), word(10), word(14));
-        let us = |cycles: u32| f64::from(cycles) / 60.0;
-        println!("x25519 on device (60 MHz, interrupts masked per step):");
-        println!("  steps           {n}");
-        println!(
-            "  total           {total} cycles ({:.1} ms)",
-            us(total) / 1000.0
-        );
-        println!("  mean step       {:.1} us", us(total) / f64::from(n));
-        println!("  longest step    {max} cycles ({:.1} us)", us(max));
-        println!("  shortest step   {min} cycles ({:.1} us)", us(min));
-        println!(
-            "  begin / finish  {:.1} us / {:.1} us",
-            us(word(26)),
-            us(word(30))
-        );
-        println!("  result[0..8]    {}", iap::hexsp(&r[18..26], 8));
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cli.crypt_diag {
-        let r =
-            iap::op_crypt_diag(&dev)?.ok_or_else(|| anyhow!("CryptDiag: no response (timeout)"))?;
-        if r.len() < 2
-            || r[0] != iap::CMD_CRYPT_DIAG
-            || (r[1] as usize) < 28
-            || r.len() < 2 + r[1] as usize
-        {
-            return Err(anyhow!(
-                "CryptDiag: unexpected reply; raw={}",
-                iap::hexsp(&r, 8)
-            ));
-        }
-        let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
-        let n = r[1] as usize;
-        println!(
-            "link encryption (payload {n} B{}):",
-            if n == 42 { ", product layout" } else { "" }
-        );
-        println!("  verified        {}", word(2));
-        const REASON: [&str; 6] = ["(ok slot)", "shape", "inactive", "mac", "replay", "engine"];
-        for (i, name) in REASON.iter().enumerate().skip(1) {
-            println!("  drop {:<11}{}", name, word(6 + 4 * i));
-        }
-        if n == 42 {
-            println!("  aes redo        {}", word(30));
-            println!("  announce retry  {}", word(34));
-            println!("  boot KAT        run={} fail={}", r[38], r[39]);
-            println!("  plaintext drop  {}", word(40));
-        }
-        // Link-key exchange counters (0x9A), where the firmware has them.
-        if let Ok(Some(k)) = dev.xfer(&iap::packet_simple(0x9A, &[]), 500) {
-            if k.len() >= 10 && k[0] == 0x9A && k[1] >= 8 {
-                const FAIL: [&str; 6] = [
-                    "none",
-                    "low-order key",
-                    "AES engine",
-                    "confirmation",
-                    "peer abort",
-                    "timeout",
-                ];
-                const STATE: [&str; 7] = [
-                    "idle",
-                    "keygen",
-                    "public keys",
-                    "shared secret",
-                    "confirm",
-                    "done",
-                    "failed",
-                ];
-                println!("key exchange:");
-                println!("  started         {}", k[2]);
-                println!("  completed       {}", k[3]);
-                println!(
-                    "  last failure    {}",
-                    FAIL.get(k[4] as usize).unwrap_or(&"?")
-                );
-                println!(
-                    "  state           {}",
-                    STATE.get(k[5] as usize).unwrap_or(&"?")
-                );
-                println!("  entropy samples {}", u16::from_le_bytes([k[6], k[7]]));
-                println!("  commit failures {}", k[8]);
-                println!("  tried this link {}", k[9]);
-                if k[1] >= 20 && k.len() >= 22 {
-                    println!("  failures        {}", k[19]);
-                    println!("  dongle x25519   phase {} count {}", k[20], k[21]);
-                    let p = &k[10..18];
-                    println!("keyboard status (frames received: {}):", k[18]);
-                    println!(
-                        "  state           {}",
-                        STATE.get(p[0] as usize).unwrap_or(&"?")
-                    );
-                    println!(
-                        "  last failure    {}",
-                        FAIL.get(p[1] as usize).unwrap_or(&"?")
-                    );
-                    println!("  candidate={} keys_ready={} dongle_confirm_ok={} dongle_pub_mask=0x{:X} dongle_conf_mask=0x{:X}",
-                        p[2] & 1, (p[2] >> 1) & 1, (p[2] >> 2) & 1, p[2] >> 4, p[6]);
-                    println!(
-                        "  x25519          phase {} count {} op {}",
-                        p[3], p[4], p[5]
-                    );
-                    println!("  sessions ok     {}", p[7]);
-                    println!(
-                        "  seeded by MCU   {}",
-                        if p[2] & 0x08 != 0 { "yes" } else { "no" }
-                    );
-                }
-                if k[1] >= 22 && k.len() >= 24 {
-                    println!("dongle entropy seed:");
-                    println!("  received        {}", k[22]);
-                    println!("  used in draws   {}", k[23] & 0x7F);
-                    println!(
-                        "  one waiting     {}",
-                        if k[23] & 0x80 != 0 { "yes" } else { "no" }
-                    );
-                }
-            }
-        }
-        // BLE library heap watermark (0x9B), measurement builds only.
-        if let Ok(Some(h)) = dev.xfer(&iap::packet_simple(0x9B, &[]), 500) {
-            if h.len() >= 30 && h[0] == 0x9B && h[1] >= 28 {
-                let w = |i: usize| u32::from_le_bytes(h[2 + 4 * i..6 + 4 * i].try_into().unwrap());
-                println!("library heap (measurement build):");
-                println!("  size            {} B", w(0));
-                println!("  untouched       {} B", w(1));
-                println!(
-                    "  highest touched {} B from the start ({} B never reached at the end)",
-                    w(2),
-                    w(0) - w(2)
-                );
-                println!("  largest gap     {} B at offset {}", w(3), w(4));
-                println!(
-                    "  after start-up  untouched {} B, highest touched {} B",
-                    w(5),
-                    w(6)
-                );
-            }
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cli.clear_bond {
-        bond::clear_bond(&dev)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    if let Some(text) = cli.provision_link_key.as_deref() {
-        let key = bond::parse_link_key(text)?;
-        bond::provision_link_key(&dev, &key)?;
-        return Ok(ExitCode::SUCCESS);
-    }
-    if let Some(rung) = cli.rf_poke {
-        // Armed like the bond commands: arm, poke, always disarm.
-        let arm = op_arm(&dev)?;
-        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
-        let poke = op_rf_poke(&dev, rung);
-        let _ = op_disarm(&dev);
-        let response = poke?.ok_or_else(|| anyhow!("RfPoke: no response (timeout)"))?;
-        if response.len() < 4 || response[0] != 0x94 {
-            return Err(anyhow!(
-                "RfPoke: unexpected reply; raw={}",
-                iap::hexsp(&response, 8)
-            ));
-        }
-        let rc = response[2];
-        println!(
-            "rf-poke rung {rung}: {} (rc=0x{rc:02X}), rf_state={}",
-            match rc {
-                0 => "done",
-                0xE0 => "unknown rung",
-                0xE1 => "refused: not in the state this rung needs (rungs 1-3: the terminal camp; rungs 40-79: a live link)",
-                0xE2 => "refused: quiesced for reboot",
-                0xE3 => "unsupported on this chip (rung 2 on CH59x: a second vendor role init is not validated)",
-                _ => "?",
-            },
-            response[3]
-        );
-        return Ok(ExitCode::from(if rc == 0 { 0 } else { 1 }));
-    }
-    if cli.diag {
-        // 0x92 is unarmed too: sample without a probe. Print full pages each
-        // sample and, from the second sample on, the counter rates.
-        let mut prev: Option<(Vec<rfdiag::Page>, std::time::Instant)> = None;
-        for i in 0..cli.samples {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            println!("--- {now:.3} diag sample {i}");
-            let pages = rfdiag::show_rf_diag(&dev)?;
-            let t = std::time::Instant::now();
-            if let Some((p, pt)) = &prev {
-                for line in rfdiag::rates(p, &pages, t.duration_since(*pt).as_secs_f64()) {
-                    println!("{line}");
-                }
-            }
-            prev = Some((pages, t));
-            if i + 1 < cli.samples {
-                std::thread::sleep(std::time::Duration::from_millis(cli.period_ms));
-            }
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
-    if cli.status {
-        // Same reasoning: 0x91 is unarmed, so sample without a probe.
-        for i in 0..cli.samples {
-            let status = read_status(&dev)?;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            println!(
-                "{now:.3} sample {i:>3}  connection={:<22} rssi={}",
-                status.connection(),
-                status.last_rssi()
+    // Which interface is being rebooted. The watch tracks it by path, so the
+    // path has to be one a user chose — or the only one there was to choose.
+    let (target, interface) = match cli.hidraw.as_deref() {
+        None => {
+            // Discovery opened the first match. With one dongle that is the
+            // dongle; with several it is an arbitrary one, and rebooting an
+            // arbitrary one leaves a bootloader on the bus that the flash
+            // which follows would then be aimed at.
+            let apps = handoff::application_paths(
+                &handoff::entries(&HidApi::new()?),
+                cli.vid,
+                cli.pid,
+                cli.interface,
             );
-            if i + 1 < cli.samples {
-                std::thread::sleep(std::time::Duration::from_millis(cli.period_ms));
+            if apps.len() > 1 {
+                errln!(
+                    con,
+                    "ERROR: {} dongles are running their application on {:04X}:{:04X}; \
+                     cannot say which one to reboot.",
+                    apps.len(),
+                    cli.vid,
+                    cli.pid
+                );
+                errln!(
+                    con,
+                    "       Unplug the others, or name this one with --hidraw. None was rebooted."
+                );
+                return Ok(ExitCode::from(2));
             }
+            (
+                Target {
+                    path: dev.path.clone(),
+                    vid: cli.vid,
+                    pid: cli.pid,
+                },
+                cli.interface,
+            )
         }
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    let device_info = probe(&dev)?;
-    if cli.show_info() {
-        let response =
-            op_version(&dev)?.ok_or_else(|| anyhow!("Version: no response (timeout)"))?;
-        let end = response
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(response.len());
-        let firmware_version = String::from_utf8_lossy(&response[..end]);
-        let status = read_status(&dev)?;
-        show_status(&status, &firmware_version);
-        show_bond_info(&dev)?;
-        show_fault_info(&dev)?;
-        println!("tool:");
-        println!("  version         {}", env!("CARGO_PKG_VERSION"));
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // --enter-bootloader from here on.
-    if let Some(ipath) = &cli.image {
-        // Family guard: refuse a wrong-family image BEFORE the reboot, while
-        // the app (which knows its family) is still the thing answering.
-        let image = load_firmware(ipath)?;
-        image.validate_for_device((device_info.chip_id & 0xff) as u8)?;
-        println!(
-            "\nimage {}: base=0x{base:08X}, {} bytes",
-            ipath.display(),
-            image.bytes.len(),
-            base = image.base,
-        );
-        if let Some(id) = image.odg2 {
-            println!(
-                "  ODG2 family=0x{:02X} build=0x{:08X} crc=0x{:08X}",
-                id.family, id.build_id, id.image_crc32
-            );
-        }
-    } else if !cli.force {
-        return Err(anyhow!(
-            "refusing --enter-bootloader without a family check: pass \
-             --image <the update .bin> (checked against the device family), \
-             or --force to skip the guard"
-        ));
-    }
-
-    // --hidraw opens a path directly, with no check that it carries cli.vid,
-    // cli.pid or cli.interface (iap.rs). Every check below is phrased in those
-    // CLI values, so an explicit path pointing somewhere else would have us
-    // watching one device and reporting on another. Resolve the opened path's
-    // real identity and track THAT; refuse if the path is not in the device
-    // list, since then nothing can be tracked at all.
-    let (track_vid, track_pid, track_if) = match cli.hidraw.as_deref() {
-        None => (cli.vid, cli.pid, cli.interface),
-        Some(path) => {
-            let api = HidApi::new()?;
-            let found = api
-                .device_list()
-                .find(|d| d.path().to_string_lossy() == path)
-                .map(|d| (d.vendor_id(), d.product_id(), d.interface_number()));
-            match found {
-                Some(ids) => {
-                    if ids != (cli.vid, cli.pid, cli.interface) {
-                        println!(
-                            "note: --hidraw {} is {:04X}:{:04X} if={}, not the \
-                             {:04X}:{:04X} if={} selectors; tracking the opened device",
-                            path, ids.0, ids.1, ids.2, cli.vid, cli.pid, cli.interface
-                        );
-                    }
-                    ids
-                }
-                None => {
-                    eprintln!(
-                        "ERROR: --hidraw {path} is not in the HID device list, so the \
-                         reboot cannot be observed."
+        // --hidraw opens a path directly, with no check that it carries
+        // cli.vid, cli.pid or cli.interface (iap.rs). The watch is phrased in
+        // the target's identity, so an explicit path pointing somewhere else
+        // would have us watching one device and reporting on another. Resolve
+        // the opened path's real identity and track THAT; refuse if the path
+        // is not in the device list, since then nothing can be tracked at all.
+        Some(path) => match path_identity(&HidApi::new()?, path) {
+            Some(id) => {
+                if (id.vid, id.pid, id.interface) != (cli.vid, cli.pid, cli.interface) {
+                    outln!(
+                        con,
+                        "note: --hidraw {} is {:04X}:{:04X} if={}, not the \
+                         {:04X}:{:04X} if={} selectors; tracking the opened device",
+                        path,
+                        id.vid,
+                        id.pid,
+                        id.interface,
+                        cli.vid,
+                        cli.pid,
+                        cli.interface
                     );
-                    return Ok(ExitCode::from(1));
                 }
+                (
+                    Target {
+                        path: path.to_string(),
+                        vid: id.vid,
+                        pid: id.pid,
+                    },
+                    id.interface,
+                )
             }
-        }
+            None => {
+                errln!(
+                    con,
+                    "ERROR: --hidraw {path} is not in the HID device list, so the \
+                     reboot cannot be observed."
+                );
+                return Ok(ExitCode::from(1));
+            }
+        },
     };
 
-    // Snapshot the bootloaders already on the bus. Anything present now is by
-    // definition not the unit we are about to reboot, and the flash that
-    // follows selects by VID:PID alone - so without this the tool cannot tell
-    // "mine arrived" from "someone else's was already here".
-    let preexisting: std::collections::BTreeSet<String> = {
-        let api = HidApi::new()?;
-        openboot_paths(&api, track_vid, track_pid)
-            .into_iter()
-            .collect()
-    };
-    // Refuse rather than warn. Not because the follow-up flash could hit the
-    // wrong unit - it could not; openboot narrows by HID usage page and then
-    // bails outright when more than one interface matches, so the worst case
-    // there is a clear error. The reason is that proceeding is pointless and
-    // costly: we would reboot a working dongle into a bootloader that openboot
-    // will then refuse to talk to, and it idles back to the application ten
-    // seconds later. Failing here leaves the device untouched.
-    if !preexisting.is_empty() {
-        eprintln!(
-            "ERROR: {} OpenBoot bootloader(s) are already on the bus.",
-            preexisting.len()
-        );
-        eprintln!("       openboot selects by VID:PID plus HID usage page and refuses");
-        eprintln!("       when more than one matches, so the flash would fail anyway.");
-        eprintln!("       Unplug the other dongle(s) first; this one is left running.");
-        return Ok(ExitCode::from(2));
-    }
-
-    enter_bootloader(&dev)?;
-    drop(dev);
-
-    // The device resets within ~a second (RF quiesce + EP6 drain). Success
-    // is not mere disappearance — wait for the OpenBoot bootloader to
-    // actually arrive on the bus.
-    //
-    // Success requires BOTH: our application interface has left AND a
-    // bootloader is present. Accepting "a bootloader is present" alone is
-    // wrong with more than one dongle attached — if unit B were already
-    // sitting in OpenBoot while the unit we just addressed carried on running
-    // its application, we would report success and the flash that follows
-    // (selected by VID:PID only) could write B. Neither this tool nor the
-    // openboot CLI can currently pin a physical device across the
-    // re-enumeration, so requiring our app to disappear is the strongest
-    // available check. See tools/README.md on the single-device requirement.
-    let mut app_gone = false;
-    let mut arrived: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    // Consecutive polls (200 ms each) the result must hold before we accept it.
-    const SETTLE_POLLS: u32 = 3;
-    let mut settled = 0u32;
-    for _ in 0..50 {
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let api = HidApi::new()?;
-        // Re-evaluated every poll, not latched: a momentarily absent interface
-        // that comes back means the reboot did not stick, and treating the
-        // first disappearance as final would report success for it.
-        app_gone = !api.device_list().any(|d| {
-            d.vendor_id() == track_vid
-                && d.product_id() == track_pid
-                && d.interface_number() == track_if
-        });
-        // Accumulate rather than overwrite: a second bootloader appearing on a
-        // later poll must still count against uniqueness, which a per-poll
-        // snapshot would miss.
-        for path in openboot_paths(&api, track_vid, track_pid) {
-            if !preexisting.contains(&path) {
-                arrived.insert(path);
-            }
-        }
-        if arrived.len() == 1 && app_gone {
-            // Let it settle before believing it - a second device could still
-            // be mid-enumeration, and the application could still come back.
-            settled += 1;
-            if settled >= SETTLE_POLLS {
-                break;
-            }
-        } else {
-            settled = 0;
-        }
-    }
-    let arrived: Vec<String> = arrived.into_iter().collect();
-    let boot_here = arrived.len() == 1;
-    if boot_here && app_gone {
-        println!(
-            "OpenBoot bootloader is on the bus at {} ({:04X}:{:04X}, HID usage page \
-             {:04X} usage {:02X})",
-            arrived[0], cli.vid, cli.pid, OB_USAGE_PAGE, OB_USAGE
-        );
-        println!(
-            "{}",
-            flash_next_step(cli.vid, cli.pid, cli.bundle.as_deref(), "")
-        );
-        Ok(ExitCode::SUCCESS)
-    } else if arrived.len() > 1 {
-        eprintln!(
-            "WARNING: {} new OpenBoot devices appeared; cannot tell which is the \
-             one addressed.",
-            arrived.len()
-        );
-        eprintln!("         Refusing the handoff: openboot narrows by HID usage page");
-        eprintln!("         and rejects a multi-match, so the flash would fail anyway.");
-        eprintln!("         Attach one dongle at a time.");
-        Ok(ExitCode::from(2))
-    } else if !arrived.is_empty() {
-        eprintln!(
-            "WARNING: an OpenBoot bootloader appeared, but the application interface \
-             we addressed ({:04X}:{:04X} if={}) never left the bus.",
-            cli.vid, cli.pid, cli.interface
-        );
-        eprintln!("         Refusing to report success: that is not the unit asked for.");
-        Ok(ExitCode::from(2))
-    } else if app_gone {
-        eprintln!("WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s");
-        Ok(ExitCode::from(2))
-    } else {
-        eprintln!("WARNING: device still present 10 s after EnterBootloader was accepted");
-        Ok(ExitCode::from(2))
-    }
+    // Success is not mere disappearance: the addressed application has to
+    // leave AND exactly one new bootloader has to arrive and stay. Neither
+    // this tool nor the openboot CLI can pin a physical device across the
+    // re-enumeration, so that is the strongest available check. See
+    // tools/README.md on the single-device requirement.
+    let outcome =
+        handoff::enter_and_watch(dev, &target, &mut HidBus, &mut SystemClock, &mut || {
+            console::reboot_accepted(con)
+        })?;
+    let cx = handoff_context(&target, interface, cli.bundle.as_deref());
+    Ok(ExitCode::from(console::report_handoff(&outcome, &cx, con)))
 }
 
-/// The bootloader's HID report descriptor: vendor usage page 0xFF00, usage
-/// 0x01 (OpenBoot PROTOCOL.md §12).
-const OB_USAGE_PAGE: u16 = 0xFF00;
-const OB_USAGE: u16 = 0x0001;
-
-/// Given every HID interface already filtered to one VID:PID, is one of them
-/// the bootloader?
-///
-/// VID:PID alone stopped being enough when the dongle's board files gave
-/// OpenBoot the application's own identity (0C45:FEFE). Both modes now
-/// enumerate identically, and the application's keyboard, mouse and vendor
-/// interfaces sit behind that same VID:PID. The vendor usage page 0xFF00 /
-/// usage 0x01 is what separates them — the application deliberately uses
-/// 0xFFFF and 0xFF60 instead (firmware/common/src/usb_descriptors.c).
-///
-/// FAIL CLOSED: only an exact vendor usage counts.
-///
-/// A 0/0 pair means the backend could not parse the report descriptor. It is
-/// "cannot tell", and on this product cannot-tell is indistinguishable from
-/// wrong: the application shares the bootloader's VID:PID, so a set of
-/// application interfaces all reporting 0/0 would otherwise be classified as
-/// OpenBoot and acted upon — rebooting or flashing against a running
-/// application.
-///
-/// Earlier revisions accepted 0/0 when nothing reported a real usage, on the
-/// grounds that a platform not reporting usages should still work. That trades
-/// a hard failure for a wrong answer, which is the wrong way round here: the
-/// caller uses this to decide which physical device to act on. On such a
-/// platform the tool now says it cannot identify the bootloader rather than
-/// guessing, and `--hidraw` remains available to name the device outright.
-///
-/// Stricter than OpenBoot's own `narrow_to_bootloader()`, which keeps the 0/0
-/// fallback — it can afford to, because it returns a candidate list and errors
-/// when more than one survives.
-fn has_bootloader_usage(usages: &[(u16, u16)]) -> bool {
-    usages
-        .iter()
-        .any(|&(page, usage)| page == OB_USAGE_PAGE && usage == OB_USAGE)
-}
-
-/// Is the OpenBoot bootloader on the bus under this VID:PID?
-///
-/// Both call sites reach this only after the application's IAP interface
-/// failed to open, so the "cannot tell" fallback is the permissive answer we
-/// want there rather than a false negative on a platform that does not report
-/// HID usages.
-/// The hidraw paths of every OpenBoot interface on this VID:PID.
-///
-/// Returning paths rather than a bool is what lets --enter-bootloader tell
-/// "the unit I addressed arrived" from "some unit was already here": a count
-/// cannot distinguish those, and the flash that follows selects by VID:PID
-/// alone, so picking the wrong one is a real outcome rather than a hypothetical.
-fn openboot_paths(api: &HidApi, vid: u16, pid: u16) -> Vec<String> {
-    let matching: Vec<_> = api
-        .device_list()
-        .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
-        .collect();
-    let usages: Vec<(u16, u16)> = matching
-        .iter()
-        .map(|d| (d.usage_page(), d.usage()))
-        .collect();
-    if !has_bootloader_usage(&usages) {
-        return Vec::new();
+/// What the hand-off's report is phrased in: the identity of the device that
+/// was rebooted. With `--hidraw` that can differ from the `--vid`/`--pid`
+/// selectors, and it is the rebooted device's bootloader the user is then
+/// told about and handed an `openboot` command for.
+fn handoff_context<'a>(
+    target: &Target,
+    interface: i32,
+    bundle: Option<&'a Path>,
+) -> HandoffContext<'a> {
+    HandoffContext {
+        vid: target.vid,
+        pid: target.pid,
+        interface,
+        bundle,
     }
-    // Same fail-closed rule: only interfaces declaring the vendor usage.
-    matching
-        .iter()
-        .filter(|d| d.usage_page() == OB_USAGE_PAGE && d.usage() == OB_USAGE)
-        .map(|d| d.path().to_string_lossy().into_owned())
-        .collect()
-}
-
-/// 64 hex characters -> 32 bytes. The firmware refuses a seed whose bytes are
-/// all the same; refuse it here too, with a better message.
-fn parse_kex_seed(text: &str) -> Result<[u8; iap::KEX_SEED_BYTES]> {
-    let text = text.trim();
-    if text.len() != 2 * iap::KEX_SEED_BYTES || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(anyhow!(
-            "the seed must be exactly 64 hex characters (32 bytes)"
-        ));
-    }
-    let mut seed = [0u8; iap::KEX_SEED_BYTES];
-    for (i, byte) in seed.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16).unwrap();
-    }
-    if seed.iter().all(|&b| b == seed[0]) {
-        return Err(anyhow!(
-            "a seed whose bytes are all the same is not entropy; refused"
-        ));
-    }
-    Ok(seed)
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
+    let mut con = Console::stdio();
+    match run(&cli, &mut con) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("ERROR: {e}");
@@ -959,23 +584,8 @@ fn main() -> ExitCode {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn kex_seed_text_is_64_hex_characters_and_not_one_repeated_byte() {
-        let good = "000102030405060708090a0b0c0d0e0f101112131415161718191A1B1C1D1E1F";
-        let seed = super::parse_kex_seed(good).unwrap();
-        assert_eq!(seed[0], 0x00);
-        assert_eq!(seed[31], 0x1F);
-        assert!(super::parse_kex_seed(&good[..62]).is_err());
-        assert!(super::parse_kex_seed(&format!("{good}00")).is_err());
-        assert!(super::parse_kex_seed(&"zz".repeat(32)).is_err());
-        assert!(super::parse_kex_seed(&"00".repeat(32)).is_err());
-        assert!(super::parse_kex_seed(&"ff".repeat(32)).is_err());
-        assert!(super::parse_kex_seed(&"5a".repeat(32)).is_err());
-    }
-
     use super::*;
     use clap::CommandFactory;
 
@@ -1081,26 +691,6 @@ mod tests {
         assert!(full.bundle.is_some());
     }
 
-    // The printed hand-off must name the .obb bundle -- BOOT.md's update flow
-    // flashes the bundle, and a raw slot-A .bin handed to `openboot flash`
-    // fails whenever slot B is the write target. Printing the family-guard
-    // --image path here is the exact defect this line guards against.
-    #[test]
-    fn flash_next_step_names_the_bundle_never_the_image() {
-        let with = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("ch592-product.obb")), "");
-        assert_eq!(
-            with,
-            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force ch592-product.obb"
-        );
-        let without = flash_next_step(0x0C45, 0xFEFE, None, "  (family NOT verified)");
-        assert_eq!(
-            without,
-            "next: openboot --vid 0x0C45 --pid 0xFEFE flash --force \
-             <chip>-product.obb  (family NOT verified)"
-        );
-        assert!(!without.contains(".bin"));
-    }
-
     #[test]
     fn obb_is_rejected_as_a_family_guard_image() {
         assert!(image_arg_is_bundle(Path::new("ch592-product.obb")));
@@ -1110,69 +700,25 @@ mod tests {
         assert!(!image_arg_is_bundle(Path::new("no-extension")));
     }
 
-    // --bundle is only ever printed into a copy-and-run shell line, so both
-    // of these are about what a human ends up pasting.
-    #[test]
-    fn shell_quote_only_quotes_when_it_must() {
-        assert_eq!(shell_quote("ch592-product.obb"), "ch592-product.obb");
-        assert_eq!(
-            shell_quote("build/ch570-product.obb"),
-            "build/ch570-product.obb"
-        );
-        assert_eq!(shell_quote("my builds/a.obb"), "'my builds/a.obb'");
-        assert_eq!(shell_quote("it's.obb"), r"'it'\''s.obb'");
-        assert_eq!(shell_quote(""), "''");
-    }
-
-    #[test]
-    fn flash_next_step_quotes_a_path_with_spaces() {
-        let line = flash_next_step(0x0C45, 0xFEFE, Some(Path::new("my builds/a.obb")), "");
-        assert!(
-            line.contains("'my builds/a.obb'"),
-            "unquoted path in: {line}"
-        );
-    }
-
-    // The dongle's bootloader shares the application's VID:PID, so these
-    // pairs are the ONLY thing distinguishing the two modes. Getting this
-    // wrong is silent in both directions: too permissive reports "already in
-    // the bootloader" while the app is running, too strict makes
-    // --enter-bootloader always report failure after a successful reboot.
-    #[test]
-    fn bootloader_usage_needs_the_exact_vendor_page() {
-        // The bootloader's own interface.
-        assert!(has_bootloader_usage(&[(0xFF00, 0x0001)]));
-        // The application's interfaces, as declared in usb_descriptors.c.
-        // None of these may pass.
-        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0xFF60, 0x0061)]));
-        // Right page, wrong usage — and vice versa.
-        assert!(!has_bootloader_usage(&[(0xFF00, 0x0002)]));
-        assert!(!has_bootloader_usage(&[(0xFF01, 0x0001)]));
-        // Nothing on the bus under this VID:PID.
-        assert!(!has_bootloader_usage(&[]));
-    }
-
-    #[test]
-    fn unknown_usage_never_stands_in_for_the_bootloader() {
-        // 0/0 means the backend could not parse the report descriptor. On a
-        // device whose application SHARES the bootloader's VID:PID, that is
-        // indistinguishable from wrong, so it must never count - not even when
-        // it is the only thing on the bus. Guessing here means rebooting or
-        // flashing against a running application.
-        assert!(!has_bootloader_usage(&[(0, 0)]));
-        // Several application interfaces all reporting 0/0 is the concrete
-        // case: without fail-closed behaviour this classified the running
-        // application as OpenBoot.
-        assert!(!has_bootloader_usage(&[(0, 0), (0, 0), (0, 0)]));
-        assert!(!has_bootloader_usage(&[(0xFFFF, 0x0001), (0, 0)]));
-        // Only the declared vendor usage counts, mixed in or not.
-        assert!(has_bootloader_usage(&[(0, 0), (0xFF00, 0x0001)]));
-    }
-
     #[test]
     fn help_identifies_tool_version_without_version_action() {
         let help = Cli::command().render_long_help().to_string();
         assert!(help.starts_with(concat!("opendongle ", env!("CARGO_PKG_VERSION"))));
         assert!(Cli::try_parse_from(["opendongle", "--version"]).is_err());
+    }
+
+    #[test]
+    fn the_handoff_is_reported_in_the_rebooted_devices_identity() {
+        // --hidraw named a device that is not the --vid/--pid selectors: the
+        // bootloader that arrives carries ITS identity, and the openboot
+        // command printed afterwards has to find that one.
+        let target = Target {
+            path: "path-of-the-one-named".into(),
+            vid: 0x1234,
+            pid: 0x5678,
+        };
+        let cx = handoff_context(&target, 2, Some(Path::new("fw.obb")));
+        assert_eq!((cx.vid, cx.pid, cx.interface), (0x1234, 0x5678, 2));
+        assert_eq!(cx.bundle, Some(Path::new("fw.obb")));
     }
 }

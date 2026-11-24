@@ -5,12 +5,12 @@
 //!
 //! The firmware side is `RF_DiagFill` in firmware/common/src/rf_task.c; the
 //! page layouts are documented there and mirrored here field by field. Every
-//! page is 62 bytes, little-endian, byte [0] = page version, [1] = page id.
+//! page is 62 bytes, little-endian, byte `[0]` = page version, `[1]` = page id.
 //! Counters wrap; `--samples` prints per-second rates between samples.
 
 use anyhow::{bail, Result};
 
-use crate::iap::{hexsp, op_rf_diag, IapDevice};
+use crate::iap::{armed, hexsp, op_rf_diag, op_rf_poke, Armed, DisarmCheck, IapDevice};
 
 pub const ACK_RF_DIAG: u8 = 0x92;
 pub const PAGE_LEN: usize = 62;
@@ -208,12 +208,12 @@ pub const PAGE5_NAMES: [&str; 14] = [
 ];
 
 /// Page 6 words at [2 + 4 i]; the `sleep_control` and `*_ipr*` words are gauges.
-/// [42] last-wake flags, [43] PB15 boot snapshot, [44..46] remote-wake arm
+/// `[42]` last-wake flags, `[43]` PB15 boot snapshot, `[44..46]` remote-wake arm
 /// count (u16 on both sides: `usb_rw_arm_count`, delta modulo 2^16) and
 /// [46..50] `wake_none` and [50..54] `stale_adc` (library temp-sample ADC residue cleared before sleeping) follow,
 /// then [54..58] `hb_arm_deadline` and [58..62] `hb_arm_cap`: in the exact-deadline
 /// heartbeat mode (page 5 flag 0x80), how many sleeps armed TMR3 to an app timer's
-/// deadline versus to the cap; both stay 0 in the fixed-period mode. Page 5 [59] is
+/// deadline versus to the cap; both stay 0 in the fixed-period mode. Page 5 `[59]` is
 /// the idle level in its low nibble and, in that mode, a saturating count of
 /// deadline-table entries retired more than 100 ms overdue (`hb_stale_drop`) in its high nibble:
 /// any nonzero value is a finding.
@@ -685,15 +685,48 @@ pub fn read_all(dev: &IapDevice) -> Result<Vec<Page>> {
     Ok(pages)
 }
 
-/// `show_rf_diag`: see the call sites; part of the diagnostics readout.
-pub fn show_rf_diag(dev: &IapDevice) -> Result<Vec<Page>> {
-    let pages = read_all(dev)?;
-    for line in render(&pages) {
-        println!("{line}");
-    }
-    Ok(pages)
+/// The device's answer to one rung of the RF intervention ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RfPoke {
+    /// 0 when the rung ran; see [`describe`](Self::describe) for the rest.
+    pub rc: u8,
+    pub rf_state: u8,
 }
 
+impl RfPoke {
+    pub fn done(&self) -> bool {
+        self.rc == 0
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self.rc {
+            0 => "done",
+            0xE0 => "unknown rung",
+            0xE1 => "refused: not in the state this rung needs (rungs 1-3: the terminal camp; rungs 40-79: a live link)",
+            0xE2 => "refused: quiesced for reboot",
+            0xE3 => "unsupported on this chip (rung 2 on CH59x: a second vendor role init is not validated)",
+            _ => "?",
+        }
+    }
+}
+
+/// Run one rung of the RF intervention ladder (command 0x94). The one
+/// diagnostic that changes device state, so it is armed like the bond
+/// commands: arm, poke, always disarm. A refusal is an `Ok` whose
+/// [`RfPoke::done`] is false, not an error.
+pub fn rf_poke(dev: &IapDevice, rung: u8) -> Armed<RfPoke> {
+    armed(dev, DisarmCheck::Sent, |_| {
+        let response = op_rf_poke(dev, rung)?
+            .ok_or_else(|| anyhow::anyhow!("RfPoke: no response (timeout)"))?;
+        if response.len() < 4 || response[0] != 0x94 {
+            bail!("RfPoke: unexpected reply; raw={}", hexsp(&response, 8));
+        }
+        Ok(RfPoke {
+            rc: response[2],
+            rf_state: response[3],
+        })
+    })
+}
 /// Per-second rates of every counter between two samples `dt` seconds apart.
 pub fn rates(prev: &[Page], cur: &[Page], dt: f64) -> Vec<String> {
     let a = counters(prev);

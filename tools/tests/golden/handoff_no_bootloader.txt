@@ -1,0 +1,6 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+--- stderr ---
+WARNING: app left the bus but no OpenBoot bootloader appeared within 10 s
+--- outcome ---
+exit 2

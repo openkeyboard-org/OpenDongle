@@ -23,7 +23,7 @@ const APP_BASE: u32 = 0x2000;
 /// bond page's neighbourhood rather than a slot. OpenBoot would refuse it later
 /// (base != write_base), but late rejection is worse than early: the point of a
 /// host-side check is to fail before anyone gets as far as a device.
-fn slot_bases_for_family(family: u8) -> Option<[u32; 2]> {
+pub fn slot_bases_for_family(family: u8) -> Option<[u32; 2]> {
     match family {
         0x70 => Some([0x2000, 0x1E000]), // CH570: OB_APP_END clamped to 0x3A000
         0x92 => Some([0x2000, 0x39000]), // CH592: app region to 0x70000
@@ -70,6 +70,20 @@ impl FirmwareImage {
 
 fn le32(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes.try_into().unwrap())
+}
+
+/// Identify application image bytes linked for `base`, applying every check
+/// `load_firmware` applies to a file: the ODG2 header's format and kind, a
+/// family this tool has a slot layout for, `base` being one of that family's
+/// slot bases and the one the header names, the length, and the image CRC.
+///
+/// For images that do not arrive as a file of their own — the per-slot
+/// builds inside an update bundle. Bytes with no ODG2 header are refused: on
+/// the parts that take bundles, an application without one is not an
+/// OpenDongle application.
+pub fn identify_image(base: u32, image: &[u8]) -> Result<Odg2Identity> {
+    parse_odg2(base, image)?
+        .ok_or_else(|| anyhow!("no ODG2 header: not an OpenDongle application image"))
 }
 
 fn parse_odg2(base: u32, image: &[u8]) -> Result<Option<Odg2Identity>> {

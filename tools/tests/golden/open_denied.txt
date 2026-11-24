@@ -1,0 +1,6 @@
+--- stdout ---
+--- stderr ---
+ERROR: cannot open device: hidapi error: Permission denied
+       On Linux, run as root or add your user to the 'plugdev' group and reconnect the dongle.
+--- outcome ---
+exit 1

@@ -1,0 +1,7 @@
+--- stdout ---
+no 0C45:FEFE app interface, but an OpenBoot bootloader is on the bus at /dev/hidraw3 (same VID:PID, HID usage page FF00 usage 01) — already in the bootloader
+--- stderr ---
+ERROR: the image family could NOT be verified — that check needs the running application, which is not present.
+       Confirm the image matches this device yourself (the bootloader reports its chip family in `openboot probe`), then re-run with --force to acknowledge the guard was skipped.
+--- outcome ---
+exit 3

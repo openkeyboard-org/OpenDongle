@@ -99,17 +99,182 @@ pub fn packet_enter_bootloader() -> [u8; REPORT_SIZE] {
 
 // ---------------- HID transport ----------------
 
-/// Find the HID interface for (vid, pid, interface). On macOS `interface_number`
-/// can be -1 for composite devices; a usage-page fallback may be needed there
-/// (verify on hardware). Linux/Windows report the interface number reliably.
-fn find_device(api: &HidApi, vid: u16, pid: u16, interface: i32) -> Option<&DeviceInfo> {
-    api.device_list().find(|d| {
-        d.vendor_id() == vid && d.product_id() == pid && d.interface_number() == interface
-    })
+/// The usage the application declares on its vendor interfaces
+/// (firmware/common/src/usb_descriptors.c). Interfaces 3 and 4 BOTH declare
+/// it, so the usage alone never identifies the IAP interface: 3 is a 32-byte
+/// input-only pipe, 4 is the 64-byte in/out one this tool talks to.
+pub const IAP_USAGE_PAGE: u16 = 0xFF60;
+pub const IAP_USAGE: u16 = 0x0061;
+
+/// Whether a HID report descriptor declares an Output report.
+///
+/// This is what tells interface 4 from interface 3 where the platform does
+/// not number interfaces: only the IAP interface can be written to. Walks the
+/// items rather than scanning for a byte, since `0x91` can also be data.
+pub fn has_output_report(descriptor: &[u8]) -> bool {
+    let mut at = 0;
+    while at < descriptor.len() {
+        let prefix = descriptor[at];
+        if prefix == 0xFE {
+            // Long item: [0xFE][data size][tag][data...].
+            let Some(&size) = descriptor.get(at + 1) else {
+                return false;
+            };
+            at += 3 + usize::from(size);
+            continue;
+        }
+        // Short item: tag in the high nibble, type in bits 2-3, and a size
+        // code in bits 0-1 where 3 means four bytes. Main item (type 0) with
+        // tag 9 is Output.
+        if prefix & 0xFC == 0x90 {
+            return true;
+        }
+        at += 1 + [0usize, 1, 2, 4][usize::from(prefix & 0x03)];
+    }
+    false
+}
+
+/// How to pick the IAP interface out of one VID:PID's HID interfaces.
+#[derive(Debug, PartialEq, Eq)]
+enum Pick {
+    /// This entry carries the wanted interface number.
+    Entry(usize),
+    /// The platform reports no interface numbers. These entries declare the
+    /// IAP usage, and only their report descriptors can say which is which.
+    AskDescriptors(Vec<usize>),
+    Nothing,
+}
+
+/// `entries` is `(interface number, usage page, usage)` for every HID
+/// interface on the VID:PID, in enumeration order.
+///
+/// An interface number, where the platform gives one, is authoritative and
+/// is all that is consulted. The usage fallback applies only when NO entry is
+/// numbered (macOS reports -1 for some composite devices) and only for the
+/// default IAP interface — an explicit `--interface N` on such a platform
+/// cannot be honoured and finds nothing, rather than being quietly replaced.
+fn pick_interface(entries: &[(i32, u16, u16)], interface: i32) -> Pick {
+    if let Some(at) = entries.iter().position(|e| e.0 == interface) {
+        return Pick::Entry(at);
+    }
+    if interface != IAP_INTERFACE || entries.is_empty() || entries.iter().any(|e| e.0 >= 0) {
+        return Pick::Nothing;
+    }
+    let candidates: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| (e.1, e.2) == (IAP_USAGE_PAGE, IAP_USAGE))
+        .map(|(at, _)| at)
+        .collect();
+    if candidates.is_empty() {
+        Pick::Nothing
+    } else {
+        Pick::AskDescriptors(candidates)
+    }
+}
+
+/// What looking at one candidate interface showed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Examined {
+    /// Its report descriptor has an Output report: an IAP interface.
+    Iap,
+    /// Its descriptor was read and has none.
+    NotIap,
+    /// It could not be opened, or its descriptor could not be read.
+    Unreadable,
+}
+
+/// How many interfaces one dongle presents under the IAP usage (3 and 4).
+/// More candidates than this means more than one dongle.
+const CANDIDATES_PER_DONGLE: usize = 2;
+
+/// Which candidate is THE IAP interface, given what examining each showed.
+/// Anything but exactly one is a refusal: with none the descriptors could not
+/// be read, and with several (two dongles) nothing says which was meant.
+///
+/// A candidate that could not be examined is not evidence of absence. With
+/// two dongles attached and one of them unopenable — held by another program,
+/// say — the other's IAP interface would be the only one FOUND without being
+/// the only one THERE, and whatever came next would be done to a dongle
+/// nobody chose. So one match is accepted only when every candidate was
+/// examined, or when there are no more candidates than a single dongle has:
+/// then the unreadable one can only be that dongle's other interface.
+fn choose_iap(examined: &[Examined]) -> Result<usize> {
+    let iap: Vec<usize> = examined
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| **e == Examined::Iap)
+        .map(|(at, _)| at)
+        .collect();
+    let unreadable = examined
+        .iter()
+        .filter(|e| **e == Examined::Unreadable)
+        .count();
+    match iap[..] {
+        [] => bail!(
+            "this platform does not number HID interfaces, and none of the {}              with the dongle's vendor usage could be identified as the IAP              interface; name the device with --hidraw",
+            examined.len()
+        ),
+        [only] if unreadable == 0 || examined.len() <= CANDIDATES_PER_DONGLE => Ok(only),
+        [_] => bail!(
+            "one interface looks like the IAP interface, but {unreadable} of the {}              that could be one could not be examined and this platform does not              number them, so another dongle's may be among those; attach one              dongle, or name the device with --hidraw",
+            examined.len()
+        ),
+        _ => bail!(
+            "{} interfaces look like the IAP interface and this platform does not              number them, so they cannot be told apart; attach one dongle, or              name the device with --hidraw",
+            iap.len()
+        ),
+    }
+}
+
+/// Open each candidate, read its report descriptor, and keep the one
+/// [`choose_iap`] settles on. Opening sends nothing.
+fn open_by_descriptor(api: &HidApi, candidates: &[&DeviceInfo]) -> Result<(HidDevice, String)> {
+    let mut opened: Vec<Option<HidDevice>> = Vec::new();
+    let mut examined = Vec::new();
+    for info in candidates {
+        let dev = info.open_device(api).ok();
+        let mut descriptor = [0u8; hidapi::MAX_REPORT_DESCRIPTOR_SIZE];
+        examined.push(
+            match dev
+                .as_ref()
+                .and_then(|dev| dev.get_report_descriptor(&mut descriptor).ok())
+            {
+                Some(len) if has_output_report(&descriptor[..len]) => Examined::Iap,
+                Some(_) => Examined::NotIap,
+                None => Examined::Unreadable,
+            },
+        );
+        opened.push(dev);
+    }
+    let at = choose_iap(&examined)?;
+    let dev = opened
+        .swap_remove(at)
+        .expect("an examined IAP interface was opened");
+    Ok((dev, candidates[at].path().to_string_lossy().into_owned()))
+}
+/// The pipe an [`IapDevice`] talks through: one report out, one report in.
+/// `HidDevice` is the real one; tests script their own.
+pub trait ReportLink {
+    /// Write one `REPORT_SIZE`-byte report (leading report-ID byte included).
+    fn write_report(&self, report: &[u8]) -> Result<()>;
+    /// Read one report into `buf`; `Ok(0)` when nothing arrived in time.
+    fn read_report(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize>;
+}
+
+impl ReportLink for HidDevice {
+    fn write_report(&self, report: &[u8]) -> Result<()> {
+        self.write(report)?;
+        Ok(())
+    }
+
+    fn read_report(&self, buf: &mut [u8], timeout_ms: i32) -> Result<usize> {
+        Ok(self.read_timeout(buf, timeout_ms)?)
+    }
 }
 
 pub struct IapDevice {
-    dev: HidDevice,
+    link: Box<dyn ReportLink>,
     /// Human-readable device path for logging.
     pub path: String,
 }
@@ -128,11 +293,27 @@ impl IapDevice {
             let cpath = CString::new(p)?;
             (api.open_path(&cpath)?, p.to_string())
         } else {
-            let info = find_device(api, vid, pid, interface).ok_or_else(|| {
-                anyhow!("no HID device for VID=0x{vid:04X} PID=0x{pid:04X} interface={interface}")
-            })?;
-            let path = info.path().to_string_lossy().into_owned();
-            (info.open_device(api)?, path)
+            let entries: Vec<&DeviceInfo> = api
+                .device_list()
+                .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
+                .collect();
+            let keys: Vec<(i32, u16, u16)> = entries
+                .iter()
+                .map(|d| (d.interface_number(), d.usage_page(), d.usage()))
+                .collect();
+            match pick_interface(&keys, interface) {
+                Pick::Entry(at) => {
+                    let path = entries[at].path().to_string_lossy().into_owned();
+                    (entries[at].open_device(api)?, path)
+                }
+                Pick::AskDescriptors(at) => {
+                    let candidates: Vec<&DeviceInfo> = at.iter().map(|&i| entries[i]).collect();
+                    open_by_descriptor(api, &candidates)?
+                }
+                Pick::Nothing => {
+                    bail!("no HID device for VID=0x{vid:04X} PID=0x{pid:04X} interface={interface}")
+                }
+            }
         };
 
         // Drain any buffered input reports so the first xfer sees a fresh reply.
@@ -143,7 +324,19 @@ impl IapDevice {
                 break;
             }
         }
-        Ok(IapDevice { dev, path })
+        Ok(IapDevice {
+            link: Box::new(dev),
+            path,
+        })
+    }
+
+    /// An `IapDevice` over any [`ReportLink`], for a caller that brings its
+    /// own pipe.
+    pub fn with_link(link: Box<dyn ReportLink>, path: &str) -> IapDevice {
+        IapDevice {
+            link,
+            path: path.to_string(),
+        }
     }
 
     /// Write a report, wait, and read one response (or `None` on timeout).
@@ -155,10 +348,10 @@ impl IapDevice {
                 packet.len()
             );
         }
-        self.dev.write(packet)?;
+        self.link.write_report(packet)?;
         std::thread::sleep(POST_WRITE_SLEEP);
         let mut buf = [0u8; REPORT_SIZE];
-        let n = self.dev.read_timeout(&mut buf, timeout_ms)?;
+        let n = self.link.read_report(&mut buf, timeout_ms)?;
         if n == 0 {
             return Ok(None);
         }
@@ -168,20 +361,43 @@ impl IapDevice {
 
 // ---------------- Explicit-path identity check ----------------
 
-/// The (vid, pid, interface) triple hidapi enumerates for `path`, or `None`
-/// when the path is not in the device list at all. Enumeration only: nothing
-/// is opened and nothing is sent.
-pub fn path_identity(api: &HidApi, path: &str) -> Option<(u16, u16, i32)> {
+/// What hidapi enumerates for one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathIdentity {
+    pub vid: u16,
+    pub pid: u16,
+    /// -1 where the platform does not number interfaces.
+    pub interface: i32,
+    pub usage_page: u16,
+    pub usage: u16,
+}
+
+/// The identity hidapi enumerates for `path`, or `None` when the path is not
+/// in the device list at all. Enumeration only: nothing is opened and nothing
+/// is sent.
+pub fn path_identity(api: &HidApi, path: &str) -> Option<PathIdentity> {
     api.device_list()
         .find(|d| d.path().to_string_lossy() == path)
-        .map(|d| (d.vendor_id(), d.product_id(), d.interface_number()))
+        .map(|d| PathIdentity {
+            vid: d.vendor_id(),
+            pid: d.product_id(),
+            interface: d.interface_number(),
+            usage_page: d.usage_page(),
+            usage: d.usage(),
+        })
 }
 
 /// The comparison behind [`require_path_identity`], split out so it can be
 /// tested without hardware.
+///
+/// Where the platform does not number the interface (-1), the number cannot
+/// be compared, so the default IAP interface is accepted on VID:PID plus the
+/// vendor usage instead. That admits interface 3 as well as 4 — they share
+/// the usage — but 3 has no Output report, so a report sent to it goes
+/// nowhere; it does keep the keyboard, mouse and consumer interfaces out.
 pub fn check_path_identity(
     path: &str,
-    found: Option<(u16, u16, i32)>,
+    found: Option<PathIdentity>,
     vid: u16,
     pid: u16,
     interface: i32,
@@ -191,15 +407,25 @@ pub fn check_path_identity(
             "--hidraw {path} is not in the HID device list; refusing to send an IAP \
              report to a node that cannot be identified"
         ),
-        Some(found) if found == (vid, pid, interface) => Ok(()),
-        Some((v, p, i)) => bail!(
-            "--hidraw {path} is {v:04X}:{p:04X} if={i}, not the {vid:04X}:{pid:04X} \
+        Some(f) if (f.vid, f.pid, f.interface) == (vid, pid, interface) => Ok(()),
+        Some(f)
+            if f.interface < 0
+                && interface == IAP_INTERFACE
+                && (f.vid, f.pid) == (vid, pid)
+                && (f.usage_page, f.usage) == (IAP_USAGE_PAGE, IAP_USAGE) =>
+        {
+            Ok(())
+        }
+        Some(f) => bail!(
+            "--hidraw {path} is {:04X}:{:04X} if={}, not the {vid:04X}:{pid:04X} \
              if={interface} this command expects; refusing to send an IAP report to it \
-             (pass matching --vid/--pid/--interface if that node really is the dongle)"
+             (pass matching --vid/--pid/--interface if that node really is the dongle)",
+            f.vid,
+            f.pid,
+            f.interface
         ),
     }
 }
-
 /// `--hidraw` bypasses discovery: [`IapDevice::open`] opens whatever path it is
 /// given with no check that the node carries the CLI's VID, PID or interface.
 /// Actions that send a vendor report without first probing use this to
@@ -302,6 +528,71 @@ pub fn op_rf_diag(dev: &IapDevice, page: u8) -> Result<Response> {
 /// RF intervention ladder rung (armed session): 1 re-arm, 2 re-init + re-arm.
 pub fn op_rf_poke(dev: &IapDevice, rung: u8) -> Result<Response> {
     dev.xfer(&packet_simple(CMD_RF_POKE, &[rung]), READ_TIMEOUT_MS)
+}
+
+// ---------------- Armed sessions ----------------
+
+/// What an armed exchange produced, and what became of the session it opened.
+///
+/// The two are separate because they fail separately: the exchange can
+/// succeed and leave the session open, and a caller that reports only the
+/// first would call a device clean that is still armed.
+pub struct Armed<T> {
+    pub result: Result<T>,
+    /// `Err` when the closing disarm could not be confirmed. The session may
+    /// then still be armed; it clears when the dongle is replugged.
+    pub disarm: Result<()>,
+}
+
+impl<T> Armed<T> {
+    /// Both, as one result: the exchange's own error first, then an
+    /// unconfirmed disarm.
+    pub fn strict(self) -> Result<T> {
+        let value = self.result?;
+        self.disarm?;
+        Ok(value)
+    }
+}
+
+/// How much of the disarm reply a command insists on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DisarmCheck {
+    /// The reply must arrive and be one of the two acknowledgements.
+    Acknowledged,
+    /// Only a transport failure counts. After some commands the device has
+    /// been seen to answer the disarm with a status frame instead.
+    Sent,
+}
+
+/// ARM, run `body` with the arm reply, and disarm — on every path.
+///
+/// From the moment ARM is written the session may be armed, even when its
+/// reply is lost or wrong, so the disarm is attempted whatever happened in
+/// between, including when ARM itself appeared to fail.
+pub fn armed<T>(
+    dev: &IapDevice,
+    check_disarm: DisarmCheck,
+    body: impl FnOnce(&[u8]) -> Result<T>,
+) -> Armed<T> {
+    let result = op_arm(dev).and_then(|arm| {
+        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
+        body(arm.as_deref().unwrap_or_default())
+    });
+    let disarm = op_disarm(dev).and_then(|reply| {
+        if check_disarm == DisarmCheck::Sent {
+            return Ok(());
+        }
+        // Either ack means the write landed.
+        let reply = reply.ok_or_else(|| anyhow!("GetDevInfo(disarm): no response (timeout)"))?;
+        if reply.is_empty() || (reply[0] != ACK_OK && reply[0] != ACK_GETDEVINFO) {
+            bail!(
+                "GetDevInfo(disarm): unexpected ack; raw={}",
+                hexsp(&reply, 8)
+            );
+        }
+        Ok(())
+    });
+    Armed { result, disarm }
 }
 
 // ---------------- Response checking ----------------
@@ -430,10 +721,21 @@ mod tests {
         assert_eq!(crc32fast::hash(HANDSHAKE_PAYLOAD), 0xa85e_8a42);
     }
 
+    fn identity(vid: u16, pid: u16, interface: i32) -> PathIdentity {
+        PathIdentity {
+            vid,
+            pid,
+            interface,
+            usage_page: IAP_USAGE_PAGE,
+            usage: IAP_USAGE,
+        }
+    }
+
     #[test]
     fn explicit_path_must_match_the_selectors() {
         let want = (DEFAULT_VID, DEFAULT_PID, IAP_INTERFACE);
-        assert!(check_path_identity("/dev/hidraw3", Some(want), want.0, want.1, want.2).is_ok());
+        let found = Some(identity(want.0, want.1, want.2));
+        assert!(check_path_identity("/dev/hidraw3", found, want.0, want.1, want.2).is_ok());
 
         // Not enumerated at all: nothing to compare against, so refuse.
         let err = check_path_identity("/dev/hidraw3", None, want.0, want.1, want.2)
@@ -443,15 +745,269 @@ mod tests {
 
         // Each selector on its own must be enough to refuse.
         for found in [
-            (0x1209, DEFAULT_PID, IAP_INTERFACE),
-            (DEFAULT_VID, 0x0001, IAP_INTERFACE),
-            (DEFAULT_VID, DEFAULT_PID, 0),
+            identity(0x1209, DEFAULT_PID, IAP_INTERFACE),
+            identity(DEFAULT_VID, 0x0001, IAP_INTERFACE),
+            identity(DEFAULT_VID, DEFAULT_PID, 0),
         ] {
             let err = check_path_identity("/dev/hidraw3", Some(found), want.0, want.1, want.2)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("refusing"), "{err}");
             assert!(err.contains("0C45:FEFE if=4"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_unnumbered_path_is_accepted_on_the_vendor_usage_only() {
+        let (vid, pid) = (DEFAULT_VID, DEFAULT_PID);
+        let vendor = identity(vid, pid, -1);
+        assert!(check_path_identity("p", Some(vendor), vid, pid, IAP_INTERFACE).is_ok());
+
+        // The same dongle's keyboard interface must still be refused.
+        let keyboard = PathIdentity {
+            usage_page: 0x0001,
+            usage: 0x0006,
+            ..vendor
+        };
+        assert!(check_path_identity("p", Some(keyboard), vid, pid, IAP_INTERFACE).is_err());
+        // The other vendor interface is not the IAP usage either.
+        let other = PathIdentity {
+            usage_page: 0xFFFF,
+            usage: 0x0001,
+            ..vendor
+        };
+        assert!(check_path_identity("p", Some(other), vid, pid, IAP_INTERFACE).is_err());
+        // An explicit non-default interface cannot be confirmed without a number.
+        assert!(check_path_identity("p", Some(vendor), vid, pid, 2).is_err());
+        // And a different device entirely is refused whatever its usage.
+        assert!(check_path_identity(
+            "p",
+            Some(identity(0x1209, pid, -1)),
+            vid,
+            pid,
+            IAP_INTERFACE
+        )
+        .is_err());
+    }
+
+    /* --- choosing the interface ------------------------------------------ */
+
+    /// The application's five interfaces as Linux and Windows report them.
+    const NUMBERED: [(i32, u16, u16); 5] = [
+        (0, 0x0001, 0x0006),
+        (1, 0x0001, 0x0002),
+        (2, 0x000C, 0x0001),
+        (3, IAP_USAGE_PAGE, IAP_USAGE),
+        (4, IAP_USAGE_PAGE, IAP_USAGE),
+    ];
+
+    fn unnumbered() -> Vec<(i32, u16, u16)> {
+        NUMBERED.iter().map(|e| (-1, e.1, e.2)).collect()
+    }
+
+    #[test]
+    fn an_interface_number_is_authoritative() {
+        assert_eq!(pick_interface(&NUMBERED, 4), Pick::Entry(4));
+        assert_eq!(pick_interface(&NUMBERED, 3), Pick::Entry(3));
+        // Not present: no fallback while the platform does number interfaces,
+        // or a missing interface 4 would quietly become interface 3.
+        assert_eq!(pick_interface(&NUMBERED[..4], 4), Pick::Nothing);
+        assert_eq!(pick_interface(&[], 4), Pick::Nothing);
+    }
+
+    #[test]
+    fn unnumbered_interfaces_fall_back_to_the_vendor_usage() {
+        // Both vendor interfaces declare the usage, so both are candidates:
+        // the usage narrows, the report descriptor decides.
+        assert_eq!(
+            pick_interface(&unnumbered(), IAP_INTERFACE),
+            Pick::AskDescriptors(vec![3, 4])
+        );
+        // An explicit other interface cannot be honoured without numbers.
+        assert_eq!(pick_interface(&unnumbered(), 2), Pick::Nothing);
+        // Only the bootloader is on the bus: nothing declares the usage.
+        assert_eq!(
+            pick_interface(&[(-1, 0xFF00, 0x0001)], IAP_INTERFACE),
+            Pick::Nothing
+        );
+    }
+
+    /// The report descriptors of interfaces 3 and 4, copied from
+    /// firmware/common/src/usb_descriptors.c. Same usage, and only interface
+    /// 4 has an Output report — the fact the fallback rests on.
+    const DESC_IF3: [u8; 21] = [
+        0x06, 0x60, 0xFF, 0x09, 0x61, 0xA1, 0x01, 0x09, 0x62, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95,
+        0x20, 0x75, 0x08, 0x81, 0x02, 0xC0,
+    ];
+    const DESC_IF4: [u8; 34] = [
+        0x06, 0x60, 0xFF, 0x09, 0x61, 0xA1, 0x01, 0x09, 0x62, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95,
+        0x40, 0x75, 0x08, 0x81, 0x02, 0x09, 0x63, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x95, 0x40, 0x75,
+        0x08, 0x91, 0x02, 0xC0,
+    ];
+
+    #[test]
+    fn one_dongle_is_chosen_even_if_its_other_interface_cannot_be_read() {
+        use Examined::*;
+        assert_eq!(choose_iap(&[NotIap, Iap]).unwrap(), 1);
+        assert_eq!(choose_iap(&[Iap, NotIap]).unwrap(), 0);
+        // Interface 3 held by something else: still only one dongle's worth.
+        assert_eq!(choose_iap(&[Unreadable, Iap]).unwrap(), 1);
+        assert_eq!(choose_iap(&[Iap]).unwrap(), 0);
+    }
+
+    #[test]
+    fn two_readable_dongles_cannot_be_told_apart() {
+        use Examined::*;
+        let e = choose_iap(&[NotIap, Iap, NotIap, Iap]).unwrap_err();
+        assert!(format!("{e}").starts_with("2 interfaces look like the IAP interface"));
+    }
+
+    #[test]
+    fn an_unreadable_second_dongle_does_not_make_the_first_the_only_one() {
+        use Examined::*;
+        // Two dongles; one cannot be opened at all. The other's IAP interface
+        // is the only one found, and must not be taken for the only one there.
+        for case in [
+            vec![NotIap, Iap, Unreadable, Unreadable],
+            vec![Unreadable, Unreadable, NotIap, Iap],
+            vec![NotIap, Iap, NotIap, Unreadable],
+        ] {
+            let e = choose_iap(&case).unwrap_err();
+            assert!(
+                format!("{e}").contains("could not be examined"),
+                "{case:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_identified_is_a_refusal() {
+        use Examined::*;
+        assert!(choose_iap(&[]).is_err());
+        assert!(choose_iap(&[NotIap, NotIap]).is_err());
+        assert!(choose_iap(&[Unreadable, Unreadable]).is_err());
+    }
+
+    #[test]
+    fn only_the_iap_interface_has_an_output_report() {
+        assert!(!has_output_report(&DESC_IF3));
+        assert!(has_output_report(&DESC_IF4));
+    }
+
+    #[test]
+    fn output_detection_parses_items_and_is_not_fooled_by_data() {
+        // 0x91 as the DATA byte of a Report Count item is not an Output item.
+        assert!(!has_output_report(&[0x95, 0x91, 0x81, 0x02]));
+        // Every size form of the Output item counts.
+        assert!(has_output_report(&[0x90]));
+        assert!(has_output_report(&[0x92, 0x02, 0x01]));
+        // A long item is skipped whole, whatever it contains.
+        assert!(!has_output_report(&[0xFE, 0x02, 0x10, 0x91, 0x02, 0xC0]));
+        // Truncated input ends the walk; it must not panic.
+        assert!(!has_output_report(&[0x26, 0xFF]));
+        assert!(!has_output_report(&[0xFE]));
+        assert!(!has_output_report(&[]));
+    }
+
+    /* --- armed sessions --------------------------------------------------- */
+
+    use crate::scripted::ScriptedLink;
+
+    fn session(arm: Option<Vec<u8>>, disarm: Option<Vec<u8>>) -> ScriptedLink {
+        ScriptedLink::new(move |cmd, body| match (cmd, body.first()) {
+            (CMD_GETDEVINFO, Some(1)) => arm.clone(),
+            (CMD_GETDEVINFO, _) => disarm.clone(),
+            _ => Some(vec![0xEE]),
+        })
+    }
+
+    fn ok_arm() -> Option<Vec<u8>> {
+        Some(vec![ACK_GETDEVINFO])
+    }
+
+    fn ok_disarm() -> Option<Vec<u8>> {
+        Some(vec![ACK_OK])
+    }
+
+    /// GetDevInfo bodies as sent: 1 arms, 0 disarms.
+    fn session_bytes(link: &ScriptedLink) -> Vec<u8> {
+        link.log()
+            .iter()
+            .filter(|(cmd, _)| *cmd == CMD_GETDEVINFO)
+            .map(|(_, body)| body[0])
+            .collect()
+    }
+
+    #[test]
+    fn an_armed_body_runs_between_arm_and_disarm() {
+        let link = session(ok_arm(), ok_disarm());
+        let dev = link.device();
+        let outcome = armed(&dev, DisarmCheck::Acknowledged, |arm| {
+            assert_eq!(arm[0], ACK_GETDEVINFO, "the body is handed the arm reply");
+            dev.xfer(&packet_simple(CMD_BOND_READ, &[]), 10)?;
+            Ok(7)
+        });
+        assert_eq!(outcome.strict().unwrap(), 7);
+        assert_eq!(
+            link.commands(),
+            vec![CMD_GETDEVINFO, CMD_BOND_READ, CMD_GETDEVINFO]
+        );
+        assert_eq!(session_bytes(&link), vec![1, 0]);
+    }
+
+    #[test]
+    fn a_failing_body_is_still_followed_by_the_disarm() {
+        let link = session(ok_arm(), ok_disarm());
+        let outcome: Armed<()> = armed(&link.device(), DisarmCheck::Acknowledged, |_| {
+            bail!("the exchange failed")
+        });
+        assert!(outcome.result.is_err());
+        assert!(outcome.disarm.is_ok());
+        assert_eq!(session_bytes(&link), vec![1, 0]);
+    }
+
+    /// ARM was written, so the session may be armed whatever came back —
+    /// nothing, or the wrong thing. The body must not run, and the disarm
+    /// must still go out.
+    #[test]
+    fn an_arm_that_is_lost_or_wrong_skips_the_body_and_still_disarms() {
+        for arm in [None, Some(vec![0x55])] {
+            let link = session(arm, ok_disarm());
+            let mut ran = false;
+            let outcome = armed(&link.device(), DisarmCheck::Acknowledged, |_| {
+                ran = true;
+                Ok(())
+            });
+            assert!(outcome.result.is_err());
+            assert!(!ran, "the body must not run without a confirmed arm");
+            assert_eq!(session_bytes(&link), vec![1, 0]);
+        }
+    }
+
+    #[test]
+    fn an_acknowledged_disarm_accepts_either_ack_and_nothing_else() {
+        for (disarm, confirmed) in [
+            (Some(vec![ACK_OK]), true),
+            (Some(vec![ACK_GETDEVINFO]), true),
+            (Some(vec![0x77]), false),
+            (None, false),
+        ] {
+            let link = session(ok_arm(), disarm);
+            let outcome = armed(&link.device(), DisarmCheck::Acknowledged, |_| Ok(()));
+            assert!(outcome.result.is_ok());
+            assert_eq!(outcome.disarm.is_ok(), confirmed);
+        }
+    }
+
+    /// After a bond clear the device has been seen to answer the disarm with
+    /// a status frame, so those commands only require that it was sent.
+    #[test]
+    fn a_sent_disarm_does_not_judge_the_reply() {
+        for disarm in [Some(vec![0x77]), None] {
+            let link = session(ok_arm(), disarm);
+            let outcome = armed(&link.device(), DisarmCheck::Sent, |_| Ok(()));
+            assert!(outcome.disarm.is_ok());
+            assert_eq!(session_bytes(&link), vec![1, 0]);
         }
     }
 }

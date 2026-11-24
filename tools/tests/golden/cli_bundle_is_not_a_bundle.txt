@@ -1,0 +1,5 @@
+--- stdout ---
+--- stderr ---
+ERROR: --bundle fw.bin is not an .obb bundle; OpenBoot needs the bundle so it can pick the variant for the slot it is actually writing. Pass the flat slot-A .bin as --image instead
+--- outcome ---
+exit 1

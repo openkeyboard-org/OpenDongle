@@ -1,0 +1,13 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+x25519 on device (60 MHz, interrupts masked per step):
+  steps           255
+  total           6000000 cycles (100.0 ms)
+  mean step       392.2 us
+  longest step    30000 cycles (500.0 us)
+  shortest step   18000 cycles (300.0 us)
+  begin / finish  20.0 us / 40.0 us
+  result[0..8]    de ad be ef 01 02 03 04
+--- stderr ---
+--- outcome ---
+exit 0

@@ -1,0 +1,6 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+bond erased and verified; replug the dongle, then pair (it stays in pairing until a keyboard pairs)
+--- stderr ---
+--- outcome ---
+exit 0

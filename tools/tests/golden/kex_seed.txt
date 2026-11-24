@@ -1,0 +1,7 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+entropy seed accepted: 32 bytes from the command line
+it is used by the next key exchange and lost when the dongle is unplugged
+--- stderr ---
+--- outcome ---
+exit 0

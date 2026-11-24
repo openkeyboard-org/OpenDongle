@@ -1,0 +1,7 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+<clock> sample   0  connection=connected              rssi=-58 dBm
+<clock> sample   1  connection=connected              rssi=-58 dBm
+--- stderr ---
+--- outcome ---
+exit 0

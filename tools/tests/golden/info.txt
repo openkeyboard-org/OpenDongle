@@ -1,0 +1,51 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+  handshake       ack=0xA5  raw=a5 00 00 00 00 00 00 00
+  GetDevInfo(1)   ack=0x04  raw=04 0a 00 00 00 00 00 00 92 00 00 00 00 00
+    chip_id byte  = 0x92  (CH592 family)
+status:
+  chip            CH592
+  unique ID       B259216232DC0598
+  dongle MAC      BA:47:8B:72:AB:3C
+  firmware        0.97.1
+  build           ch592-product / 1234ABCD
+  image           25848 bytes
+  update          clean
+  connection      connected
+  last RSSI       -58 dBm
+  capabilities    0x0F
+bond:
+  valid           yes
+  magic           0x444E4F42
+  format          2
+  flags           0x03
+  encryption      active (capable + key)
+  link key        present (redacted)
+  session AA      0xAC1234CE
+  interval        28 ticks (0.875 ms)
+  timeout         600 ticks (18.750 ms)
+  keyboard MAC    10:20:30:40:50:60
+  dongle MAC      (none: factory MAC in use)
+  reserved        0x0000
+  checksum        0x000004AE (valid)
+  raw             42 4f 4e 44 02 03 1c 00 ce 34 12 ac 58 02 00 00 00 00 00 00 00 00 10 20 30 40 50 60 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 ae 04 00 00 (link key bytes 28..43 masked)
+health:
+  page            v1 family=0x92 (CH592) valid=yes record-version=1
+  startup reset   power-on (0x01)
+  startup marker  0xC5
+  reset keeper    live=0x5C (armed)
+  record reset    external (0x03)
+  record keeper   0x5C (armed)
+  last fault      none (kind 0x00)
+  action          none (0)
+  flags           0x00 (none)
+  counters        events=0 reset-requests=0 repeats=0 boots=3
+  mcause          0x00000000
+  mepc            0x00000000
+  mtval           0x00000000
+  raw             92 01 01 01 00 00 00 5c 00 00 00 00 00 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 c5 01 5c
+tool:
+  version         0.1.0
+--- stderr ---
+--- outcome ---
+exit 0

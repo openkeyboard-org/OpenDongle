@@ -6,13 +6,12 @@
 use anyhow::{bail, Result};
 
 use crate::iap::{
-    check, hexsp, op_arm, op_bond_clear, op_bond_read, op_bond_write, op_disarm, IapDevice,
-    ACK_GETDEVINFO, ACK_OK,
+    armed, hexsp, op_bond_clear, op_bond_read, op_bond_write, Armed, DisarmCheck, IapDevice, ACK_OK,
 };
 
 const BOND_MAGIC: u32 = 0x444E_4F42;
 const BOND_VERSION: u8 = 2;
-const BOND_RECORD_LEN: usize = 48;
+pub const BOND_RECORD_LEN: usize = 48;
 const ACK_BOND_READ: u8 = 0x88;
 
 const BOND_FLAG_ENC_CAPABLE: u8 = 0x01;
@@ -23,26 +22,30 @@ const BOND_READ_INVALID: u8 = 0x01;
 const BOND_READ_REDACTED: u8 = 0x02;
 
 #[derive(Debug, PartialEq, Eq)]
-struct BondRecord {
-    magic: u32,
-    version: u8,
-    flags: u8,
-    conn_interval: u16,
-    session_aa: u32,
-    conn_timeout: u16,
-    reserved0: u16,
+pub struct BondRecord {
+    pub magic: u32,
+    pub version: u8,
+    pub flags: u8,
+    pub conn_interval: u16,
+    pub session_aa: u32,
+    pub conn_timeout: u16,
+    pub reserved0: u16,
     /// N09 dongle-identity override; all-zero means "use the factory MAC".
-    dongle_mac: [u8; 6],
-    peer_mac: [u8; 6],
-    checksum: u32,
+    pub dongle_mac: [u8; 6],
+    pub peer_mac: [u8; 6],
+    pub checksum: u32,
     // The firmware zeroes link_key in the BondRead response and sets the
     // redacted bit; the key is never transported. This records that the device
     // held one, for display only.
-    redacted: bool,
+    pub redacted: bool,
+    // Kept private: these are the record's bytes as the device sent them. The
+    // firmware zeroes the link key before sending, but nothing outside this
+    // module should depend on that — see `raw_masked`.
     raw: [u8; BOND_RECORD_LEN],
 }
 
-enum BondRead {
+#[derive(Debug, PartialEq, Eq)]
+pub enum BondRead {
     Valid(BondRecord),
     /// The firmware said the record is not usable. The fields are the same
     /// byte-for-byte split as for a valid record, but nothing about them has
@@ -69,9 +72,27 @@ impl BondRecord {
         }
     }
 
+    /// The record's bytes with the link-key field masked, whatever the device
+    /// sent in it. The only form in which they leave this module.
+    pub fn raw_masked(&self) -> [u8; BOND_RECORD_LEN] {
+        let mut shown = self.raw;
+        shown[28..44].fill(0);
+        shown
+    }
+
+    /// Whether the keyboard advertised link encryption at pairing.
+    pub fn encryption_capable(&self) -> bool {
+        self.flags & BOND_FLAG_ENC_CAPABLE != 0
+    }
+
+    /// Whether the bond holds a link key.
+    pub fn has_link_key(&self) -> bool {
+        self.flags & BOND_FLAG_ENC_KEY != 0
+    }
+
     /// The firmware's checksum: a plain byte sum over the first 44 bytes
     /// (everything, link key included, ahead of the checksum word).
-    fn computed_checksum(&self) -> u32 {
+    pub fn computed_checksum(&self) -> u32 {
         self.raw[..44].iter().map(|&byte| u32::from(byte)).sum()
     }
 
@@ -184,7 +205,7 @@ fn ticks_line(label: &str, ticks: u16) -> String {
 /// Render the bond block. Split from printing so tests can pin which fields
 /// appear for a valid record, what a best-effort reading of an invalid one
 /// looks like, and that the raw bytes always close the block.
-fn render_bond(read: &BondRead) -> Vec<String> {
+pub fn render_bond(read: &BondRead) -> Vec<String> {
     let mut lines = vec!["bond:".to_string()];
     match read {
         BondRead::Invalid(record) => {
@@ -288,63 +309,38 @@ fn render_bond(read: &BondRead) -> Vec<String> {
     lines
 }
 
-/// `show_bond_info`: see the call sites; part of the diagnostics readout.
-pub fn show_bond_info(dev: &IapDevice) -> Result<()> {
-    let arm = op_arm(dev)?;
-    check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
-
-    // Always attempt to disarm, including after a read transport error.
-    let read = op_bond_read(dev);
-    let disarm = op_disarm(dev);
-    let response = read?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
-    // Disarm answers with either ack, exactly as in probe(): both mean the
-    // write landed. Demanding only ACK_OK would fail a healthy session.
-    let disarm = disarm?;
-    let dr = disarm
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("GetDevInfo(disarm): no response (timeout)"))?;
-    if dr.is_empty() || (dr[0] != ACK_OK && dr[0] != ACK_GETDEVINFO) {
-        anyhow::bail!(
-            "GetDevInfo(disarm): unexpected ack; raw={}",
-            crate::iap::hexsp(dr, 8)
-        );
-    }
-
-    for text in render_bond(&decode_response(&response)?) {
-        println!("{text}");
-    }
-    Ok(())
+/// Read the stored bond. BondRead needs an armed session, so this arms,
+/// reads, and disarms — the disarm on every path, and insisted on: an
+/// unacknowledged disarm after a read is reported, not ignored.
+///
+/// An absent or invalid bond is information, not an error: it comes back as
+/// [`BondRead::Invalid`].
+pub fn read_bond(dev: &IapDevice) -> Armed<BondRead> {
+    armed(dev, DisarmCheck::Acknowledged, |_| {
+        let response =
+            op_bond_read(dev)?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
+        decode_response(&response)
+    })
 }
 
 /// Erase the stored bond. The firmware verifies the erase and then refuses to
 /// accept a new pair until it is reset, so the operator must replug the dongle;
 /// after that it stays in pairing until a keyboard pairs.
-pub fn clear_bond(dev: &IapDevice) -> Result<()> {
-    // From the moment ARM is sent the session may be armed, even if its reply
-    // is lost: every exit below goes through the disarm.
-    let armed = op_arm(dev).and_then(|arm| check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None));
-    let reply = match armed {
-        Ok(()) => op_bond_clear(dev),
-        Err(e) => Err(e),
-    };
+pub fn clear_bond(dev: &IapDevice) -> Armed<()> {
     // The disarm reply after a clear has been seen as a status frame rather
-    // than the usual ack, so only a transport failure is reported.
-    if op_disarm(dev).is_err() {
-        eprintln!(
-            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
-        );
-    }
-    let reply = reply?.ok_or_else(|| anyhow::anyhow!("BondClear: no response (timeout)"))?;
-    if reply.len() < 3 || reply[0] != ACK_OK {
-        bail!("BondClear: unexpected reply; raw={}", hexsp(&reply, 8));
-    }
-    if reply[2] != 0 {
-        bail!("BondClear failed: status 0x{:02X}", reply[2]);
-    }
-    println!("bond erased and verified; replug the dongle, then pair (it stays in pairing until a keyboard pairs)");
-    Ok(())
+    // than the usual ack, so only a transport failure counts against it.
+    armed(dev, DisarmCheck::Sent, |_| {
+        let reply = op_bond_clear(dev)?
+            .ok_or_else(|| anyhow::anyhow!("BondClear: no response (timeout)"))?;
+        if reply.len() < 3 || reply[0] != ACK_OK {
+            bail!("BondClear: unexpected reply; raw={}", hexsp(&reply, 8));
+        }
+        if reply[2] != 0 {
+            bail!("BondClear failed: status 0x{:02X}", reply[2]);
+        }
+        Ok(())
+    })
 }
-
 /// Parse a 16-byte link key from 32 hex characters, refusing the two
 /// erased-flash patterns the firmware also refuses.
 pub fn parse_link_key(text: &str) -> Result<[u8; 16]> {
@@ -385,15 +381,20 @@ fn record_with_link_key(
     Ok(out)
 }
 
+/// What the device did with a link key it accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyActivation {
+    /// Written, verified, and in use on the live link.
+    Active,
+    /// Written and verified; it takes effect at the next reconnect or replug.
+    Deferred,
+}
+
 /// BENCH: install a link key on the stored bond over USB. There is no on-air
 /// key establishment yet, so both ends are handed the same key out of band;
 /// this is the receiver half. The device activates it live.
-pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
-    // From the moment ARM is sent the session may be armed, even if its reply
-    // is lost: every exit below goes through the disarm.
-    let outcome = (|| -> Result<u8> {
-        let arm = op_arm(dev)?;
-        check("GetDevInfo(arm)", &arm, ACK_GETDEVINFO, None)?;
+pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Armed<KeyActivation> {
+    armed(dev, DisarmCheck::Sent, |_| {
         let response =
             op_bond_read(dev)?.ok_or_else(|| anyhow::anyhow!("BondRead: no response (timeout)"))?;
         let record = match decode_response(&response)? {
@@ -406,30 +407,16 @@ pub fn provision_link_key(dev: &IapDevice, key: &[u8; 16]) -> Result<()> {
         if reply.len() < 3 || reply[0] != ACK_OK {
             bail!("BondWrite: unexpected reply; raw={}", hexsp(&reply, 8));
         }
-        Ok(reply[2])
-    })();
-    if op_disarm(dev).is_err() {
-        eprintln!(
-            "warning: disarm not confirmed; replug the dongle to be sure the session is closed"
-        );
-    }
-
-    match outcome? {
-        0x00 => {
-            println!("link key written, verified and active");
-            Ok(())
+        match reply[2] {
+            0x00 => Ok(KeyActivation::Active),
+            0xB5 => Ok(KeyActivation::Deferred),
+            0xB2 => bail!("BondWrite refused: record semantically invalid (0xB2)"),
+            0xB3 => bail!("BondWrite refused: key/flag form (0xB3)"),
+            0xB4 => bail!("BondWrite failed: stored record did not verify (0xB4)"),
+            status => bail!("BondWrite failed: status 0x{status:02X}"),
         }
-        0xB5 => {
-            println!("link key written and verified; activation deferred (reconnect or replug the dongle)");
-            Ok(())
-        }
-        0xB2 => bail!("BondWrite refused: record semantically invalid (0xB2)"),
-        0xB3 => bail!("BondWrite refused: key/flag form (0xB3)"),
-        0xB4 => bail!("BondWrite failed: stored record did not verify (0xB4)"),
-        status => bail!("BondWrite failed: status 0x{status:02X}"),
-    }
+    })
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,0 +1,12 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+link encryption (payload 28 B):
+  verified        1234
+  drop shape      1
+  drop inactive   0
+  drop mac        2
+  drop replay     0
+  drop engine     0
+--- stderr ---
+--- outcome ---
+exit 0
