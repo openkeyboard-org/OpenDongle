@@ -35,7 +35,7 @@ use anyhow::{bail, Result};
 use crate::iap::{hexsp, op_fault, IapDevice};
 
 const ACK_FAULT: u8 = 0x93;
-const FAULT_LEN: usize = 40;
+pub const FAULT_LEN: usize = 40;
 
 const KEEP_ARMED: u8 = 0x5C;
 const KEEP_CONSUMED: u8 = 0xA3;
@@ -65,31 +65,31 @@ fn known_layouts_list() -> String {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct FaultStatus {
-    family: u8,
-    page_version: u8,
-    valid: bool,
-    record_version: u8,
-    kind: u8,
-    action: u8,
-    flags: u8,
-    keeper_live: u8,
-    event_count: u32,
-    reset_request_count: u32,
-    repeat_count: u32,
-    boot_count: u32,
-    mcause: u32,
-    mepc: u32,
-    mtval: u32,
+pub struct FaultStatus {
+    pub family: u8,
+    pub page_version: u8,
+    pub valid: bool,
+    pub record_version: u8,
+    pub kind: u8,
+    pub action: u8,
+    pub flags: u8,
+    pub keeper_live: u8,
+    pub event_count: u32,
+    pub reset_request_count: u32,
+    pub repeat_count: u32,
+    pub boot_count: u32,
+    pub mcause: u32,
+    pub mepc: u32,
+    pub mtval: u32,
     /// Record byte: the reset status the boot path (or the fault handler) stored.
-    record_reset_status: u8,
+    pub record_reset_status: u8,
     /// Startup phase marker stamped by the reset handler (CH570: 0xC0..0xC5).
-    startup_marker: u8,
+    pub startup_marker: u8,
     /// Reset status read pristine at startup, before clock/peripheral init.
-    startup_reset_status: u8,
+    pub startup_reset_status: u8,
     /// Record's own snapshot of the reset keeper.
-    reset_keep: u8,
-    raw: [u8; FAULT_LEN],
+    pub reset_keep: u8,
+    pub raw: [u8; FAULT_LEN],
 }
 
 /// Human name of the low three bits of R8_RESET_STATUS.
@@ -187,22 +187,22 @@ impl FaultStatus {
 
     /// Chip name when the (family, page version) pair is a layout this tool
     /// understands; `None` means the field bytes must not be interpreted.
-    fn chip(&self) -> Option<&'static str> {
+    pub fn chip(&self) -> Option<&'static str> {
         known_chip(self.family, self.page_version)
     }
 
     /// Name of the reset status captured pristine at startup.
-    fn startup_reset_name(&self) -> &'static str {
+    pub fn startup_reset_name(&self) -> &'static str {
         reset_name(self.startup_reset_status)
     }
 
     /// Name of the reset status the fault record itself stored.
-    fn record_reset_name(&self) -> &'static str {
+    pub fn record_reset_name(&self) -> &'static str {
         reset_name(self.record_reset_status)
     }
 
     /// Human name of the fault kind byte.
-    fn fault_name(&self) -> &'static str {
+    pub fn fault_name(&self) -> &'static str {
         match self.kind {
             0x00 => "none",
             0xDE => "hard fault",
@@ -212,7 +212,7 @@ impl FaultStatus {
     }
 
     /// Human name of the fault action byte.
-    fn action_name(&self) -> &'static str {
+    pub fn action_name(&self) -> &'static str {
         match self.action {
             0 => "none",
             1 => "reset requested",
@@ -247,7 +247,7 @@ const RECORD_ONLY_LABELS: &[&str] = &[
 /// Render the health block. Split from printing so tests can pin the exact
 /// wording: which fields appear, which say unavailable, and that the raw page
 /// is always the last line.
-fn render_fault(fault: &FaultStatus) -> Vec<String> {
+pub fn render_fault(fault: &FaultStatus) -> Vec<String> {
     let mut lines = vec!["health:".to_string()];
     let raw_line = line("raw", hexsp(&fault.raw, FAULT_LEN));
 
@@ -355,25 +355,18 @@ fn render_fault(fault: &FaultStatus) -> Vec<String> {
     lines
 }
 
-/// Print the rendered fault page.
-fn print_fault(fault: &FaultStatus) {
-    for text in render_fault(fault) {
-        println!("{text}");
-    }
-}
-
-/// Read and print the fault page. Command 0x93 is deliberately unarmed on the
-/// firmware side, so this neither arms nor disarms a session and can be
-/// issued on a unit whose RF link must not be disturbed any more than one EP6
-/// exchange does.
-pub fn show_fault_info(dev: &IapDevice) -> Result<()> {
+/// Read the fault page. Command 0x93 is deliberately unarmed on the firmware
+/// side, so this neither arms nor disarms a session and can be issued on a
+/// unit whose RF link must not be disturbed any more than one EP6 exchange
+/// does.
+///
+/// A page whose (family, page version) this tool does not know still decodes:
+/// check [`FaultStatus::chip`] before reading any field as a fact.
+pub fn read_fault(dev: &IapDevice) -> Result<FaultStatus> {
     let response =
         op_fault(dev)?.ok_or_else(|| anyhow::anyhow!("FaultRead: no response (timeout)"))?;
-    let fault = FaultStatus::decode(&response)?;
-    print_fault(&fault);
-    Ok(())
+    FaultStatus::decode(&response)
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

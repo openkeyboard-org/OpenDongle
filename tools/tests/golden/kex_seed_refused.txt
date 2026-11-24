@@ -1,0 +1,6 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+--- stderr ---
+--- outcome ---
+ERROR: KexSeed: the dongle refused a seed whose bytes are all the same
+exit 1

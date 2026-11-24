@@ -1,0 +1,6 @@
+--- stdout ---
+--- stderr ---
+ERROR: no hidraw node for VID=0x0C45 PID=0xFEFE interface=4
+       (tip: confirm the dongle is plugged in; check device permissions / udev rules)
+--- outcome ---
+exit 1

@@ -1,0 +1,9 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+--- stderr ---
+WARNING: 2 new OpenBoot devices appeared; cannot tell which is the one addressed.
+         Refusing the handoff: openboot narrows by HID usage page
+         and rejects a multi-match, so the flash would fail anyway.
+         Attach one dongle at a time.
+--- outcome ---
+exit 2

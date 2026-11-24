@@ -1,0 +1,8 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+--- stderr ---
+WARNING: an OpenBoot bootloader appeared and then left the bus again.
+         It has most likely idled back into its application; there is
+         nothing to flash. Run --enter-bootloader again.
+--- outcome ---
+exit 2

@@ -1,0 +1,6 @@
+--- stdout ---
+--- stderr ---
+ERROR: 2 OpenBoot bootloaders are on the bus; cannot say which one this is meant to be.
+       openboot refuses a multi-match too. One at a time.
+--- outcome ---
+exit 2

@@ -1,0 +1,8 @@
+--- stdout ---
+--- stderr ---
+ERROR: 1 OpenBoot bootloader(s) are already on the bus.
+       openboot selects by VID:PID plus HID usage page and refuses
+       when more than one matches, so the flash would fail anyway.
+       Unplug the other dongle(s) first; this one is left running.
+--- outcome ---
+exit 2

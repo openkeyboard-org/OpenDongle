@@ -1,0 +1,6 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+rf-poke rung 40: refused: not in the state this rung needs (rungs 1-3: the terminal camp; rungs 40-79: a live link) (rc=0xE1), rf_state=5
+--- stderr ---
+--- outcome ---
+exit 1

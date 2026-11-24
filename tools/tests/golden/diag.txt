@@ -1,0 +1,39 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+--- <clock> diag sample 0
+rf runtime:
+  state           idle (0) channel=0 confirm_state=0 boot_window_step=0 pair_prep_idx=0 data_ch_idx=0
+  flags           bond_valid=false persisted=false persist_pending=false ev10_active=false boot_window=false pair_window=false tombstone=false pair_is_fresh=false
+                  quiesced=false burst_active=false first_supervision_armed=false rx_armed=false
+  access addr     ram=0x00000000 bond=0x00000000 radio(last RX arm)=0x00000000 pair-ack advertises 0x00000000
+  radio           last RX arm: channel=0 rc=0x00 timeout=0 (0.0 ms); last TX: channel=0 rc=0x00; last shut rc=0x00; rx_armed=0
+  peer            MAC 00:00:00:00:00:00 interval=0 timeout=0 rssi_byte=0 (0)
+  clocks          hal_now=0x00000000 last_conn_rx_tsys=0x00000000 connected_rx_count=0
+  last LEN-10     none yet (0)
+  persist         none yet (0); last bond_save rc=0x00; last pair-ACK StartTx rc=0x00
+  raw             01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+phy + executor:
+  phy             rx_arm_attempts=0 rx_arm_fail=0 rx_done=0 rx_crcerr=0 rx_timeout=0 tx_start=0 tx_fail=0 tx_done=0 shut_calls=0
+  camp watchdog   rearms=0 (u16; ~5/s while a terminal camp is silent on CH59x, 0 while it hears)
+  dispatch        pending=0x0000 delay_slot0=0x0000 delay_slot1=0x0000 degraded=0
+  timers          active_mask=0x00 periodic_owner=none pair-ack=off ev10-rekey=off boot-window=off connected-poll=off evt-delay-0=off evt-delay-1=off
+  raw             01 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+protocol counters A:
+                  len10_seen=0 len10_accept_known=0 len10_accept_fresh=0 len10_rejected=0 len10_ev10_seen=0
+                  pair_ack_posted=0 pair_ack_tx_ok=0 pair_ack_tx_fail=0 pair_ack_tx_done=0 rx_restart_handled=0
+                  rx_restart_dropped_ev10=0 arm_retry_scheduled=0 pump_passes=0 supervision_lapses=0 ev10_entries=0
+  raw             01 02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+protocol counters B:
+                  ev10_giveups=0 pair_prep_runs=0 ev10_ack_tx=0 ev10_ack_tx_fail=0 connected_promotes=0
+                  fresh_relistens=0 bootwin_closes=0 confirm_armed=0 confirm_to_waitrx=0 confirm_to_waitrearm=0
+                  persist_attempts=0 persist_ok=0 ack_latency_ticks=0 (0.0 us @100MHz) ack_tx_ticks=0 (0.0 us @100MHz) last_ack_aa=0x00000000
+  raw             01 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+radio internals:
+  irqs            lle_irqs=0 bb_irqs=0 cb_calls=0 irq_bits=0x00 (en BLEB=false BLEL=false TMR=false; hi BLEB=false BLEL=false TMR=false; regs_valid=false)
+  systick         now=0x00000000 last callback never reacquire entry never give-up never (100 MHz; wraps every 42.9 s)
+  LLE             ctrl=0x00000000 (mode idle) status=0x00000000 mask=0x00000000 timeout=0x00000000 BB[40]=0x00000000
+  lib             gStatus=0 (?) WaitRecvTime=0 tuned_channel=0 rx_white_channel=0 burst_idx=0 usb_suspend_episodes=0
+  raw             01 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+--- stderr ---
+--- outcome ---
+exit 0

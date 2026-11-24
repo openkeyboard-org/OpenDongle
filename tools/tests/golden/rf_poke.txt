@@ -1,0 +1,6 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+rf-poke rung 1: done (rc=0x00), rf_state=3
+--- stderr ---
+--- outcome ---
+exit 0

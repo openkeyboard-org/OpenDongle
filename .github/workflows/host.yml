@@ -32,15 +32,23 @@ jobs:
       - name: host test suite
         run: make -C firmware test
 
+  # The tool is documented as running on Linux, Windows and macOS, and hidapi
+  # is a different backend on each (hidraw, hid.dll, IOKit), so all three build
+  # and test it. None of this touches a device.
   tools:
-    name: rust cli
-    runs-on: ubuntu-latest
+    name: rust cli (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: tools
     steps:
       - uses: actions/checkout@v4
       - name: hidapi native deps
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: format
         run: cargo fmt --check
@@ -48,3 +56,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: tests
         run: cargo test
+      # A program that links the library turns the CLI feature off; that
+      # configuration has to keep building without the argument parser.
+      - name: library without the cli
+        run: cargo build --lib --no-default-features

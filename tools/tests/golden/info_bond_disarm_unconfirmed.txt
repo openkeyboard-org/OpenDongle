@@ -1,0 +1,20 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+  handshake       ack=0xA5  raw=a5 00 00 00 00 00 00 00
+  GetDevInfo(1)   ack=0x04  raw=04 0a 00 00 00 00 00 00 92 00 00 00 00 00
+    chip_id byte  = 0x92  (CH592 family)
+status:
+  chip            CH592
+  unique ID       B259216232DC0598
+  dongle MAC      BA:47:8B:72:AB:3C
+  firmware        0.97.1
+  build           ch592-product / 1234ABCD
+  image           25848 bytes
+  update          clean
+  connection      connected
+  last RSSI       -58 dBm
+  capabilities    0x0F
+--- stderr ---
+--- outcome ---
+ERROR: GetDevInfo(disarm): unexpected ack; raw=77 01 00 00 00 00 00 00
+exit 1

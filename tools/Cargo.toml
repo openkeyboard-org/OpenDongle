@@ -5,13 +5,24 @@ edition = "2021"
 description = "Host CLI for OpenDongle CH570/CH592 dongles: status, bond and fault readout, and handoff to the OpenBoot bootloader for updates"
 license = "Apache-2.0"
 
+[lib]
+name = "opendongle"
+path = "src/lib.rs"
+
 [[bin]]
 name = "opendongle"
 path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# The command-line front end. A program that only links the library can turn
+# this off to leave out the argument parser.
+cli = ["dep:clap"]
 
 [dependencies]
 hidapi = "2"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 anyhow = "1"
 crc32fast = "1"
 getrandom = "0.3"

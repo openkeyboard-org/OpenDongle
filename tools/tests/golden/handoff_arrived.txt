@@ -1,0 +1,7 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+OpenBoot bootloader is on the bus at /dev/hidraw7 (0C45:FEFE, HID usage page FF00 usage 01)
+next: openboot --vid 0x0C45 --pid 0xFEFE flash --force build/ch592-product.obb
+--- stderr ---
+--- outcome ---
+exit 0

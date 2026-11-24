@@ -1,0 +1,5 @@
+--- stdout ---
+--- stderr ---
+ERROR: --image fw.obb is an .obb bundle; the family guard needs the flat slot-A .bin (or .hex). Pass that as --image and the bundle as --bundle -- the bundle is what OpenBoot flashes afterwards
+--- outcome ---
+exit 1

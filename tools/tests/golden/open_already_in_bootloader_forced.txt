@@ -1,0 +1,6 @@
+--- stdout ---
+no 0C45:FEFE app interface, but an OpenBoot bootloader is on the bus at /dev/hidraw3 (same VID:PID, HID usage page FF00 usage 01) — already in the bootloader
+next: openboot --vid 0x0C45 --pid 0xFEFE flash --force fw.obb  (family NOT verified)
+--- stderr ---
+--- outcome ---
+exit 0

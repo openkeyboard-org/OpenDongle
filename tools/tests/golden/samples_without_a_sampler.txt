@@ -1,0 +1,6 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+--- stderr ---
+--- outcome ---
+ERROR: --samples/--period-ms apply only to --status or --diag
+exit 1

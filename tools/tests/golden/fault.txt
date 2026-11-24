@@ -1,0 +1,20 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+health:
+  page            v1 family=0x92 (CH592) valid=yes record-version=1
+  startup reset   power-on (0x01)
+  startup marker  0xC5
+  reset keeper    live=0x5C (armed)
+  record reset    external (0x03)
+  record keeper   0x5C (armed)
+  last fault      none (kind 0x00)
+  action          none (0)
+  flags           0x00 (none)
+  counters        events=0 reset-requests=0 repeats=0 boots=3
+  mcause          0x00000000
+  mepc            0x00000000
+  mtval           0x00000000
+  raw             92 01 01 01 00 00 00 5c 00 00 00 00 00 00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 03 c5 01 5c
+--- stderr ---
+--- outcome ---
+exit 0

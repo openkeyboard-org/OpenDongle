@@ -1,0 +1,7 @@
+--- stdout ---
+device: scripted  (VID=0x0C45 PID=0xFEFE if=4)
+  handshake       ack=0xA5  raw=a5 00 00 00 00 00 00 00
+--- stderr ---
+--- outcome ---
+ERROR: GetDevInfo(arm): no response (timeout)
+exit 1

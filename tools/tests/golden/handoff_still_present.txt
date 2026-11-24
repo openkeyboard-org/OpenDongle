@@ -1,0 +1,6 @@
+--- stdout ---
+  EnterBootloader accepted; device is resetting into OpenBoot
+--- stderr ---
+WARNING: device still present 10 s after EnterBootloader was accepted
+--- outcome ---
+exit 2
