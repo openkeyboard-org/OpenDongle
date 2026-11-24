@@ -94,6 +94,15 @@ pub struct Faults {
     pub application_never_returns: bool,
     /// After the next boot, the application answering is another dongle's.
     pub another_dongle_returns: bool,
+    /// From the nth HELLO on (1-based), the device handles it — the session
+    /// opens — and its reply is lost.
+    pub hello_replies_lost_from: Option<usize>,
+    /// The nth attempt to open the bootloader (1-based) fails; the rest work.
+    pub bootloader_open_fails_on: Option<usize>,
+    /// After a reset the application takes this long to enumerate.
+    pub returns_after: Option<Duration>,
+    /// A second dongle is attached throughout, running its application.
+    pub bystander: bool,
 }
 
 pub struct World {
@@ -115,6 +124,11 @@ pub struct World {
     boots: usize,
     /// How many times the application has started.
     starts: usize,
+    hellos: usize,
+    /// Attempts to open the bootloader, whether or not they worked.
+    opens: usize,
+    /// How long until the application, having reset, is on the bus again.
+    returning: Option<Duration>,
 }
 
 pub type Shared = Rc<RefCell<World>>;
@@ -136,6 +150,9 @@ impl World {
             writes: 0,
             boots: 0,
             starts: 1,
+            hellos: 0,
+            opens: 0,
+            returning: None,
         }))
     }
 
@@ -175,12 +192,24 @@ impl World {
         self.starts += 1;
         self.mode = if self.faults.application_never_returns {
             Mode::Gone
+        } else if let Some(delay) = self.faults.returns_after {
+            self.returning = Some(delay);
+            Mode::Gone
         } else {
             Mode::App
         };
     }
 
     fn tick(&mut self, d: Duration) {
+        if let Some(left) = self.returning {
+            if d >= left {
+                self.returning = None;
+                self.mode = Mode::App;
+            } else {
+                self.returning = Some(left - d);
+            }
+            return;
+        }
         if self.mode != Mode::Boot {
             return;
         }
@@ -235,6 +264,14 @@ impl World {
             OB_CMD_HELLO => {
                 self.session = true;
                 self.written.clear();
+                self.hellos += 1;
+                if self
+                    .faults
+                    .hello_replies_lost_from
+                    .is_some_and(|nth| self.hellos >= nth)
+                {
+                    return None;
+                }
                 Some(self.hello_payload())
             }
             OB_CMD_ERASE => Some(vec![OB_OK]),
@@ -330,23 +367,34 @@ impl World {
             }
             0x91 => {
                 let other = self.faults.another_dongle_returns && self.starts > 1;
-                let mut p = [0u8; 32];
-                p[0] = 1; // schema
-                p[1] = 0x92; // family
-                p[2] = 3; // connected
-                p[4] = 0x0F;
-                p[5] = 8;
-                p[6] = 1;
-                p[8..16].copy_from_slice(if other { &OTHER_UID } else { &UID });
-                p[16..20].copy_from_slice(&self.running_build()?.to_le_bytes());
-                p[20..24].copy_from_slice(&0x1000u32.to_le_bytes());
-                let mut reply = vec![0x91, 32];
-                reply.extend_from_slice(&p);
-                reply
+                status_reply(if other { &OTHER_UID } else { &UID }, self.running_build()?)
             }
             _ => return None,
         })
     }
+}
+
+/// An application's answer to the status command.
+fn status_reply(uid: &[u8; 8], build: u32) -> Vec<u8> {
+    let mut p = [0u8; 32];
+    p[0] = 1; // schema
+    p[1] = 0x92; // family
+    p[2] = 3; // connected
+    p[4] = 0x0F;
+    p[5] = 8;
+    p[6] = 1;
+    p[8..16].copy_from_slice(uid);
+    p[16..20].copy_from_slice(&build.to_le_bytes());
+    p[20..24].copy_from_slice(&0x1000u32.to_le_bytes());
+    let mut reply = vec![0x91, 32];
+    reply.extend_from_slice(&p);
+    reply
+}
+
+/// The other dongle's application: it answers the status read with its own
+/// UID and nothing else, and is never the one being updated.
+fn bystander() -> IapDevice {
+    ScriptedLink::new(|cmd, _| (cmd == 0x91).then(|| status_reply(&OTHER_UID, 0x0BAD))).device()
 }
 
 /// The application's IAP interface.
@@ -381,8 +429,11 @@ pub struct SimDevices(pub Shared);
 
 impl Devices for SimDevices {
     fn open_bootloader(&mut self, _vid: u16, _pid: u16, path: &str) -> Result<Bootloader> {
-        let world = self.0.borrow();
-        if world.faults.cannot_open_bootloader {
+        let mut world = self.0.borrow_mut();
+        world.opens += 1;
+        if world.faults.cannot_open_bootloader
+            || world.faults.bootloader_open_fails_on == Some(world.opens)
+        {
             bail!("access denied");
         }
         if world.mode != Mode::Boot || path != BOOT_PATH {
@@ -402,11 +453,16 @@ impl Devices for SimDevices {
         })
     }
 
-    fn open_application(&mut self, _vid: u16, _pid: u16, _interface: i32) -> Result<IapDevice> {
-        if self.0.borrow().mode != Mode::App {
-            bail!("no HID device");
+    fn open_applications(&mut self, _vid: u16, _pid: u16, _interface: i32) -> Vec<IapDevice> {
+        // The bystander first: that is the order that used to end the wait.
+        let mut found = Vec::new();
+        if self.0.borrow().faults.bystander {
+            found.push(bystander());
         }
-        Ok(application(&self.0).1)
+        if self.0.borrow().mode == Mode::App {
+            found.push(application(&self.0).1);
+        }
+        found
     }
 }
 
@@ -431,6 +487,9 @@ impl Bus for SimBus {
         }
         if world.faults.bootloader_already_present {
             bus.push(entry("someone-else", 0, OB_USAGE_PAGE, OB_USAGE));
+        }
+        if world.faults.bystander {
+            bus.push(entry("app-other", 4, 0xFF60, 0x0061));
         }
         Ok(bus)
     }

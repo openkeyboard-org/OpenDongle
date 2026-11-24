@@ -244,6 +244,17 @@ fn run(cli: &Cli) -> Result<ExitCode> {
             report_running(&back, "its previous firmware", cli);
             ExitCode::from(1)
         }
+        Outcome::Unknown { why, back } => {
+            eprintln!("ERROR: it is not known whether the update was applied: {why}");
+            eprintln!(
+                "       The commit was sent, its reply never came, and the dongle                  could not be asked what had happened."
+            );
+            report_running(&back, "its previous firmware", cli);
+            eprintln!(
+                "       The dongle may start the new firmware or the previous one.                  Once it is back, `opendongle --status` shows which build it is                  running; update again if it is the previous one."
+            );
+            ExitCode::from(1)
+        }
         Outcome::Committed {
             verification,
             problem,

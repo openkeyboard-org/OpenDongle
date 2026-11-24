@@ -92,8 +92,11 @@ pub struct Bootloader {
 pub trait Devices {
     /// Open the OpenBoot interface at exactly `path`.
     fn open_bootloader(&mut self, vid: u16, pid: u16, path: &str) -> Result<Bootloader>;
-    /// Find and open the application's IAP interface.
-    fn open_application(&mut self, vid: u16, pid: u16, interface: i32) -> Result<IapDevice>;
+    /// Open the IAP interface of every dongle that is running its application
+    /// right now. That can be more than the one being updated — another
+    /// dongle may be attached — so the caller tells them apart by what each
+    /// reports. One that cannot be opened is left out.
+    fn open_applications(&mut self, vid: u16, pid: u16, interface: i32) -> Vec<IapDevice>;
 }
 
 /// Where the transaction has got to.
@@ -187,6 +190,12 @@ pub enum Outcome {
         problem: Option<String>,
         running: Confirmation,
     },
+    /// COMMIT was sent, its reply never came, the device could not be asked
+    /// what had happened, and what came back afterwards does not settle it.
+    /// The new image may or may not be what the dongle boots next. `back` is
+    /// what was seen; it is never the addressed dongle on a known build,
+    /// since that would have settled it.
+    Unknown { why: String, back: Confirmation },
 }
 
 impl Outcome {
@@ -256,7 +265,8 @@ pub enum Ended {
         problem: Option<String>,
     },
     /// COMMIT's reply never came and the device could not be asked what
-    /// happened. Which build comes back is the only evidence left.
+    /// happened. Which build comes back is the only evidence left. It was
+    /// still asked to boot, without knowing whether it heard.
     Unknown { base: u32, why: String },
 }
 
@@ -390,7 +400,16 @@ pub fn flash_session(
                         "{why}; a fresh HELLO showed nothing was committed"
                     )))
                 }
-                Err(_) => Ended::Unknown { base, why },
+                // Still nothing. Whether the commit landed cannot be known
+                // from here, but the device may well be listening: a HELLO
+                // it handled has opened a session even if its reply was
+                // lost, and it would then sit in the bootloader for good.
+                // Ask it to boot regardless. This is the first BOOT of the
+                // session, and without a session it is refused, harmlessly.
+                Err(_) => {
+                    boot(&mut client);
+                    Ended::Unknown { base, why }
+                }
             }
         }
         // Still erasing or writing: nothing is committed.
@@ -414,7 +433,14 @@ struct Waiting<'a> {
     bootloader_path: &'a str,
 }
 
-/// Wait for an application to answer and read what it is.
+/// Wait for the addressed dongle's application to answer, and read what it
+/// is running.
+///
+/// Another dongle answering is not that: with a second one attached, it is
+/// the first thing found on every poll while the addressed one is still
+/// resetting. So the wait goes on until the UID that was read before the
+/// update shows up, or the deadline passes. Only then is a different unit
+/// reported, as what was there instead.
 fn who_came_back(
     waiting: &Waiting,
     bus: &mut dyn Bus,
@@ -424,21 +450,23 @@ fn who_came_back(
     let target = &waiting.request.target;
     let started = clock.now();
     let mut rescued = false;
+    let mut someone_else = None;
     loop {
         clock.sleep(POLL);
-        if let Ok(dev) = devices.open_application(target.vid, target.pid, waiting.request.interface)
-        {
-            if let Ok(identity) = Identity::read(&dev) {
-                return Some(identity);
+        for dev in devices.open_applications(target.vid, target.pid, waiting.request.interface) {
+            match Identity::read(&dev) {
+                Ok(identity) if identity.uid == waiting.before.uid => return Some(identity),
+                Ok(identity) => someone_else = Some(identity),
+                Err(_) => {}
             }
         }
         let waited = clock.now().duration_since(started);
 
         // Nothing yet, and a bootloader is still sitting there: the BOOT
         // never reached it, or it was never opened. One fresh session, one
-        // BOOT. This is a new session, so it is not a resend.
+        // BOOT. This is a new session, so it is not a resend. A poll on
+        // which the bootloader could not be opened has not used that up.
         if !rescued && waited >= RESCUE_AFTER {
-            rescued = true;
             let still_there = bus.scan().is_ok_and(|entries| {
                 handoff::bootloader_paths(&entries, target.vid, target.pid)
                     .iter()
@@ -448,16 +476,20 @@ fn who_came_back(
                 if let Ok(mut bootloader) =
                     devices.open_bootloader(target.vid, target.pid, waiting.bootloader_path)
                 {
+                    rescued = true;
                     let mut client = BootClient::new(bootloader.transport.as_mut());
-                    if client.hello().is_ok() {
-                        boot(&mut client);
-                    }
+                    // The HELLO opens the session when the device handles it,
+                    // not when its reply arrives. So the BOOT follows whatever
+                    // came back: sending a HELLO and stopping there would
+                    // strand a bootloader that had been about to idle out.
+                    let _ = client.hello();
+                    boot(&mut client);
                     let _ = bootloader.transport.close();
                 }
             }
         }
         if waited >= RETURN_DEADLINE {
-            return None;
+            return someone_else;
         }
     }
 }
@@ -475,11 +507,14 @@ fn judge(came_back: Option<Identity>, before: &Identity, expected_build: u32) ->
 
 /// Update the dongle behind `dev` with `request.artifact`.
 ///
-/// `Err` is only for a failure before anything was sent that changes the
-/// dongle — the status read, or the bus scan ahead of the reboot. Once the
-/// reboot has been asked for, every ending is an [`Outcome`], because by then
-/// "it failed" is not enough to act on: the caller needs to know what the
-/// dongle is doing now.
+/// `Err` is for a failure that leaves the dongle running its application as
+/// before: the status read, the bus scan ahead of the reboot, or a reboot
+/// request it refused or never acted on. It is also what a bus that cannot
+/// be read while watching for the bootloader comes out as; then the dongle
+/// may have left, and idles back by itself, since nothing has opened a
+/// session on it. From the moment a bootloader is opened, every ending is an
+/// [`Outcome`], because by then "it failed" is not enough to act on: the
+/// caller needs to know what the dongle is doing now.
 pub fn run(
     dev: IapDevice,
     request: &Request,
@@ -557,25 +592,31 @@ pub fn run(
             problem,
             running: judge(came_back, waiting.before, new_build(base)),
         },
-        // Nothing but the result to go on. The new build running means the
-        // commit landed; the old one means it did not; anything else is
-        // reported as it is, as an update that was not committed.
+        // Nothing but the result to go on. The addressed dongle running the
+        // new build means the commit landed. Running its previous build means
+        // the update is not what it boots, whatever became of the commit.
+        // Anything else settles nothing, and is reported as exactly that: to
+        // say "not applied" would be a guess, and the dongle may come up on
+        // the new build the next time it is plugged in.
         Ended::Unknown { base, why } => {
             let as_new = judge(came_back, waiting.before, new_build(base));
+            let as_old = judge(came_back, waiting.before, before.build_id);
             if matches!(as_new, Confirmation::Confirmed(_)) {
                 Outcome::Committed {
                     verification: None,
                     problem: Some(why),
                     running: as_new,
                 }
-            } else {
+            } else if matches!(as_old, Confirmation::Confirmed(_)) {
                 Outcome::NotCommitted {
                     why: Stopped::Failed(format!(
-                        "{why}; the device then stopped answering, so whether the \
-                         image was committed is not known"
+                        "{why}; the device then stopped answering, and came back on \
+                         its previous firmware"
                     )),
-                    back: judge(came_back, waiting.before, before.build_id),
+                    back: as_old,
                 }
+            } else {
+                Outcome::Unknown { why, back: as_old }
             }
         }
     })

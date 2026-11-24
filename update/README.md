@@ -37,11 +37,15 @@ every path ends by telling the device to boot.
 | Erasing or writing (failure, or a cancel) | BOOT | The previous build: the running slot is never the one written |
 | COMMIT rejected | BOOT | The previous build |
 | COMMIT sent, no reply | A fresh HELLO shows which slot is active, then BOOT | The new build if it landed, otherwise the previous one |
+| COMMIT sent, no reply, and no reply to that HELLO either | BOOT all the same, then what comes back decides: the new build means it landed, the previous one that the update is not what the dongle boots. If neither is seen, the tool says it does not know | The new build or the previous one |
 | COMMIT acknowledged, cross-check failed | BOOT; the bootloader checks the image again as it starts | Whichever passes that check |
-| BOOT sent, no reply | Never resent. If the bootloader is still there four seconds on, one new session and one BOOT | The new build |
+| BOOT sent, no reply | Never resent. If the bootloader is still there four seconds on, one new session and one BOOT; the BOOT follows the session's HELLO whether or not that was answered, and a poll on which the bootloader could not be opened is tried again | The new build |
+| The reboot request gets no reply | The bus is watched all the same: the dongle resets whether or not its answer was taken. Only if the application is still there afterwards is it an error | Its application if the request never took; otherwise the update goes on |
 
-It then waits up to twenty seconds for an application to answer and compares
-what it finds with what it expected.
+It then waits up to twenty seconds for the addressed dongle's application to
+answer and compares what it finds with what it expected. Another dongle
+answering in the meantime does not end the wait; it is reported only if the
+addressed one never comes back.
 
 ## What it cannot do
 

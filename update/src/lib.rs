@@ -26,6 +26,7 @@ use anyhow::Result;
 use hidapi::HidApi;
 
 use openboot::transport::hid::HidTransport;
+use opendongle::handoff;
 use opendongle::iap::IapDevice;
 
 use transaction::{Bootloader, Devices};
@@ -49,7 +50,23 @@ impl Devices for HidDevices {
         })
     }
 
-    fn open_application(&mut self, vid: u16, pid: u16, interface: i32) -> Result<IapDevice> {
-        IapDevice::open(&HidApi::new()?, vid, pid, interface, None)
+    fn open_applications(&mut self, vid: u16, pid: u16, interface: i32) -> Vec<IapDevice> {
+        let Ok(api) = HidApi::new() else {
+            return Vec::new();
+        };
+        let paths = handoff::application_paths(&handoff::entries(&api), vid, pid, interface);
+        if paths.is_empty() {
+            // No interface carries the IAP interface's number. Either no
+            // application is on the bus, or this platform does not number
+            // interfaces; discovery copes with the second and finds nothing
+            // in the first.
+            return IapDevice::open(&api, vid, pid, interface, None)
+                .into_iter()
+                .collect();
+        }
+        paths
+            .iter()
+            .filter_map(|path| IapDevice::open(&api, vid, pid, interface, Some(path)).ok())
+            .collect()
     }
 }

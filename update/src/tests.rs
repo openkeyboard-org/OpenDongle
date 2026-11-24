@@ -359,6 +359,102 @@ fn a_device_that_goes_silent_after_commit_is_judged_by_what_comes_back() {
 }
 
 #[test]
+fn a_commit_and_a_hello_both_unanswered_still_end_with_a_boot() {
+    // The commit landed; its reply was lost, and so was the reply to the
+    // HELLO that would have settled it. That HELLO still opened a session,
+    // so without a BOOT the dongle would sit in its bootloader for good.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.commit = CommitFault::ReplyLost;
+        w.faults.hello_replies_lost_from = Some(2);
+    }
+    let outcome = update(&world);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    let w = world.borrow();
+    assert_eq!(w.sent(OB_CMD_BOOT), 1, "asked to boot, once");
+    assert_eq!(w.mode, Mode::App);
+    assert_eq!(w.running_build(), Some(NEW_B));
+}
+
+#[test]
+fn a_session_on_its_own_boots_the_device_when_the_commit_cannot_be_settled() {
+    // The same double loss, for a caller of `flash_session` alone: there is
+    // no wait and no rescue behind it, so the BOOT has to come from here.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.mode = Mode::Boot;
+        w.faults.commit = CommitFault::ReplyLost;
+        w.faults.hello_replies_lost_from = Some(2);
+    }
+    let artifact = release();
+    let mut bootloader = SimDevices(world.clone())
+        .open_bootloader(VID, PID, BOOT_PATH)
+        .unwrap();
+    let ended = flash_session(
+        bootloader.transport.as_mut(),
+        bootloader.serial.as_deref(),
+        artifact.source(),
+        &mut (),
+    );
+    assert!(matches!(ended, Ended::Unknown { .. }), "{ended:?}");
+    let w = world.borrow();
+    assert_eq!(w.sent(OB_CMD_BOOT), 1);
+    assert_eq!(w.mode, Mode::App, "it has left the bootloader");
+}
+
+#[test]
+fn a_commit_that_cannot_be_settled_is_reported_as_unknown_not_as_not_applied() {
+    // As above, and then nothing comes back at all. The commit DID land, so
+    // "the update was not applied" would be false; all that can honestly be
+    // said is that it is not known.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.commit = CommitFault::ReplyLost;
+        w.faults.hello_replies_lost_from = Some(2);
+        w.faults.application_never_returns = true;
+    }
+    let outcome = update(&world);
+    assert!(!outcome.succeeded());
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Unknown {
+                back: Confirmation::NoApplication,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let w = world.borrow();
+    assert_eq!(w.slots[1], Some(NEW_B), "the new build is installed");
+    assert_eq!(w.active, 1, "and is what the dongle boots next");
+}
+
+#[test]
+fn an_unsettled_commit_followed_by_the_old_build_was_not_applied() {
+    // The commit never reached the device, and the HELLO after it went
+    // unanswered: unknown, until the dongle comes back on what it ran before.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.commit = CommitFault::NeverArrives;
+        w.faults.hello_replies_lost_from = Some(2);
+    }
+    let outcome = update(&world);
+    let Outcome::NotCommitted { back, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        matches!(back, Confirmation::Confirmed(id) if id.build_id == OLD),
+        "{back:?}"
+    );
+    assert_eq!(world.borrow().sent(OB_CMD_BOOT), 1);
+}
+
+#[test]
 fn a_failed_cross_check_after_commit_is_reported_with_what_actually_runs() {
     let world = World::running(OLD);
     world.borrow_mut().faults.live_crc_wrong = true;
@@ -424,6 +520,98 @@ fn a_boot_that_never_arrived_gets_one_fresh_session_and_one_boot() {
     assert_eq!(w.sent(OB_CMD_HELLO), 2);
     assert_eq!(w.sent(OB_CMD_BOOT), 1);
     assert_eq!(w.running_build(), Some(NEW_B));
+}
+
+#[test]
+fn the_rescue_boots_even_when_its_own_hello_goes_unanswered() {
+    // The first BOOT never arrived. The fresh session's HELLO is handled by
+    // the device and its reply lost: the session is open, so stopping there
+    // would leave the dongle in its bootloader.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.boot = BootFault::FirstNeverArrives;
+        w.faults.hello_replies_lost_from = Some(2);
+    }
+    let outcome = update(&world);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    let w = world.borrow();
+    assert_eq!(w.sent(OB_CMD_BOOT), 1);
+    assert_eq!(w.mode, Mode::App);
+}
+
+#[test]
+fn a_rescue_that_could_not_open_the_bootloader_is_tried_again() {
+    // The first BOOT never arrived, and the one poll on which the rescue
+    // first tried, the bootloader would not open. That must not use up the
+    // only attempt.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.boot = BootFault::FirstNeverArrives;
+        w.faults.bootloader_open_fails_on = Some(2);
+    }
+    let outcome = update(&world);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    let w = world.borrow();
+    assert_eq!(w.sent(OB_CMD_HELLO), 2, "one fresh session");
+    assert_eq!(w.sent(OB_CMD_BOOT), 1);
+}
+
+#[test]
+fn another_dongle_attached_does_not_end_the_wait_for_the_addressed_one() {
+    // A second dongle is running its application throughout. While the
+    // updated one is still resetting it is the only thing that answers, and
+    // it is not the answer.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.bystander = true;
+        w.faults.returns_after = Some(std::time::Duration::from_secs(1));
+    }
+    let outcome = update(&world);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    let Outcome::Committed { running, .. } = outcome else {
+        unreachable!()
+    };
+    assert!(
+        matches!(running, Confirmation::Confirmed(id) if id.uid == UID && id.build_id == NEW_B),
+        "{running:?}"
+    );
+}
+
+#[test]
+fn another_dongle_attached_does_not_stop_the_rescue() {
+    // The same bystander, and the BOOT never arrived: returning on the first
+    // poll would have left the addressed dongle in its bootloader.
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.bystander = true;
+        w.faults.boot = BootFault::FirstNeverArrives;
+    }
+    let outcome = update(&world);
+    assert!(outcome.succeeded(), "{outcome:?}");
+    assert_eq!(world.borrow().sent(OB_CMD_BOOT), 1);
+}
+
+#[test]
+fn only_another_dongle_ever_answering_is_reported_as_a_different_unit() {
+    let world = World::running(OLD);
+    {
+        let mut w = world.borrow_mut();
+        w.faults.bystander = true;
+        w.faults.application_never_returns = true;
+    }
+    let outcome = update(&world);
+    assert!(!outcome.succeeded());
+    let Outcome::Committed { running, .. } = outcome else {
+        panic!("{outcome:?}")
+    };
+    assert!(
+        matches!(running, Confirmation::DifferentUnit(id) if id.uid == OTHER_UID),
+        "{running:?}"
+    );
 }
 
 #[test]
